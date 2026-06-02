@@ -10,6 +10,7 @@ type LaneView = {
 
 type LaneState = {
   file_path: string;
+  storage_path: string;
   base: LaneView;
   lanes: LaneView[];
 };
@@ -84,12 +85,7 @@ function App() {
       return;
     }
 
-    await runRequest(
-      () =>
-        apiPost<LaneState>(`/api/lanes/${encodeURIComponent(lane)}/replace`, {
-          content: state?.base.content ?? "",
-        }),
-    );
+    await runRequest(() => apiPost<LaneState>(`/api/lanes/${encodeURIComponent(lane)}`, {}));
     setActiveLane(lane);
   }
 
@@ -158,7 +154,9 @@ function App() {
       <section className="file">
         <header className="filebar">
           <div>
-            <p>{activeLane}</p>
+            <p>
+              {activeLane} / {state?.storage_path ?? ""}
+            </p>
             <h2>{state?.file_path ?? ""}</h2>
           </div>
           <div className="actions">

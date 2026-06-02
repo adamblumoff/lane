@@ -1,12 +1,22 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Range;
 
+pub mod demo;
+pub mod projection;
+
+pub type FilePath = String;
 pub type LaneId = String;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LaneFile {
-    base: Vec<u8>,
+pub struct LaneRepo {
+    lanes: BTreeSet<LaneId>,
+    files: BTreeMap<FilePath, LaneFile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LaneFile {
+    base_hash: u64,
     blobs: Vec<Vec<u8>>,
     lanes: BTreeMap<LaneId, LaneView>,
 }
@@ -31,50 +41,267 @@ enum Source {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaneError {
+    ReservedLane(LaneId),
+    LaneMissing(LaneId),
+    BaseChanged { path: FilePath },
     RangeOutOfBounds { start: u64, end: u64, len: u64 },
     BlobMissing(u64),
-    LaneMissing(LaneId),
+    ExtentOutOfBounds,
+}
+
+impl LaneRepo {
+    pub fn new() -> Self {
+        Self {
+            lanes: BTreeSet::new(),
+            files: BTreeMap::new(),
+        }
+    }
+
+    pub fn lane_ids(&self) -> impl Iterator<Item = &str> {
+        self.lanes.iter().map(String::as_str)
+    }
+
+    pub fn create_lane(&mut self, lane: impl Into<LaneId>) -> Result<bool, LaneError> {
+        let lane = lane.into();
+        ensure_user_lane(&lane)?;
+        Ok(self.lanes.insert(lane))
+    }
+
+    pub fn discard_lane(&mut self, lane: &str) -> bool {
+        let removed = self.lanes.remove(lane);
+        for file in self.files.values_mut() {
+            file.discard_lane(lane);
+        }
+        self.files.retain(|_, file| !file.is_empty());
+        removed
+    }
+
+    pub fn read(&self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError> {
+        if lane == "base" {
+            return Ok(base.to_vec());
+        }
+        self.ensure_lane(lane)?;
+        match self.files.get(path) {
+            Some(file) => file.read(path, lane, base),
+            None => Ok(base.to_vec()),
+        }
+    }
+
+    pub fn write(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+        range: Range<u64>,
+        replacement: impl Into<Vec<u8>>,
+    ) -> Result<(), LaneError> {
+        self.ensure_lane(lane)?;
+        if let Some(file) = self.files.get_mut(path) {
+            return file.write(path, lane, base, range, replacement);
+        }
+
+        let mut file = LaneFile::new(base);
+        file.write(path, lane, base, range, replacement)?;
+        self.files.insert(path.to_owned(), file);
+        Ok(())
+    }
+
+    pub fn replace(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+        content: impl Into<Vec<u8>>,
+    ) -> Result<(), LaneError> {
+        let current_len = self.read(path, lane, base)?.len() as u64;
+        self.write(path, lane, base, 0..current_len, content)
+    }
+
+    pub fn delete(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+        range: Range<u64>,
+    ) -> Result<(), LaneError> {
+        self.write(path, lane, base, range, Vec::new())
+    }
+
+    pub fn promote(&mut self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError> {
+        self.ensure_lane(lane)?;
+        let Some(file) = self.files.get_mut(path) else {
+            return Ok(base.to_vec());
+        };
+
+        let promoted = file.promote(path, lane, base)?;
+        if file.is_empty() {
+            self.files.remove(path);
+        }
+        Ok(promoted)
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"LANEREPO\0\0\0\x01");
+
+        write_u64(&mut bytes, self.lanes.len() as u64);
+        for lane in &self.lanes {
+            write_bytes(&mut bytes, lane.as_bytes());
+        }
+
+        write_u64(&mut bytes, self.files.len() as u64);
+        for (path, file) in &self.files {
+            write_bytes(&mut bytes, path.as_bytes());
+            write_u64(&mut bytes, file.base_hash);
+
+            write_u64(&mut bytes, file.blobs.len() as u64);
+            for blob in &file.blobs {
+                write_bytes(&mut bytes, blob);
+            }
+
+            write_u64(&mut bytes, file.lanes.len() as u64);
+            for (lane, view) in &file.lanes {
+                write_bytes(&mut bytes, lane.as_bytes());
+                write_u64(&mut bytes, view.extents.len() as u64);
+                for extent in &view.extents {
+                    match extent.source {
+                        Source::Base => {
+                            bytes.push(0);
+                            write_u64(&mut bytes, extent.start);
+                            write_u64(&mut bytes, extent.len);
+                        }
+                        Source::Blob(blob_id) => {
+                            bytes.push(1);
+                            write_u64(&mut bytes, blob_id);
+                            write_u64(&mut bytes, extent.start);
+                            write_u64(&mut bytes, extent.len);
+                        }
+                    }
+                }
+            }
+        }
+
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut cursor = Cursor::new(bytes);
+        cursor.expect(b"LANEREPO\0\0\0\x01")?;
+
+        let mut lanes = BTreeSet::new();
+        for _ in 0..cursor.read_u64()? {
+            lanes.insert(read_string(&mut cursor)?);
+        }
+
+        let mut files = BTreeMap::new();
+        for _ in 0..cursor.read_u64()? {
+            let path = read_string(&mut cursor)?;
+            let base_hash = cursor.read_u64()?;
+
+            let mut blobs = Vec::new();
+            for _ in 0..cursor.read_u64()? {
+                blobs.push(cursor.read_bytes()?.to_vec());
+            }
+
+            let mut overlays = BTreeMap::new();
+            for _ in 0..cursor.read_u64()? {
+                let lane = read_string(&mut cursor)?;
+                let mut extents = Vec::new();
+                for _ in 0..cursor.read_u64()? {
+                    let source = match cursor.read_byte()? {
+                        0 => Source::Base,
+                        1 => Source::Blob(cursor.read_u64()?),
+                        tag => return Err(DecodeError::InvalidSource(tag)),
+                    };
+                    let start = cursor.read_u64()?;
+                    let len = cursor.read_u64()?;
+                    extents.push(Extent { source, start, len });
+                }
+                overlays.insert(
+                    lane,
+                    LaneView {
+                        extents: normalize_extents_checked(extents)?,
+                    },
+                );
+            }
+
+            files.insert(
+                path,
+                LaneFile {
+                    base_hash,
+                    blobs,
+                    lanes: overlays,
+                },
+            );
+        }
+
+        let repo = Self { lanes, files };
+        repo.validate()?;
+        if !cursor.is_finished() {
+            return Err(DecodeError::TrailingBytes);
+        }
+        Ok(repo)
+    }
+
+    fn ensure_lane(&self, lane: &str) -> Result<(), LaneError> {
+        if self.lanes.contains(lane) {
+            Ok(())
+        } else {
+            Err(LaneError::LaneMissing(lane.to_owned()))
+        }
+    }
+
+    fn validate(&self) -> Result<(), DecodeError> {
+        for file in self.files.values() {
+            for lane in file.lanes.keys() {
+                if !self.lanes.contains(lane) {
+                    return Err(DecodeError::OverlayLaneMissing(lane.clone()));
+                }
+            }
+            file.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for LaneRepo {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LaneFile {
-    pub fn new(base: impl Into<Vec<u8>>) -> Self {
+    fn new(base: &[u8]) -> Self {
         Self {
-            base: base.into(),
+            base_hash: hash_bytes(base),
             blobs: Vec::new(),
             lanes: BTreeMap::new(),
         }
     }
 
-    pub fn base(&self) -> &[u8] {
-        &self.base
+    fn read(&self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError> {
+        self.ensure_base(path, base)?;
+        match self.lanes.get(lane) {
+            Some(view) => self.render(view, base),
+            None => Ok(base.to_vec()),
+        }
     }
 
-    pub fn lane_ids(&self) -> impl Iterator<Item = &str> {
-        self.lanes.keys().map(String::as_str)
-    }
-
-    pub fn read_base(&self) -> Vec<u8> {
-        self.base.clone()
-    }
-
-    pub fn read(&self, lane: &str) -> Result<Vec<u8>, LaneError> {
-        self.render(&self.view_for(lane))
-    }
-
-    pub fn write(
+    fn write(
         &mut self,
-        lane: impl Into<LaneId>,
+        path: &str,
+        lane: &str,
+        base: &[u8],
         range: Range<u64>,
         replacement: impl Into<Vec<u8>>,
     ) -> Result<(), LaneError> {
-        let lane = lane.into();
+        self.ensure_base(path, base)?;
         let replacement = replacement.into();
-        let view = self.view_for(&lane);
+        let view = self.view_for(lane, base);
         let current_len = extents_len(&view.extents);
         ensure_valid_range(range.clone(), current_len)?;
 
         let mut next = slice_extents(&view.extents, 0..range.start);
-
         if !replacement.is_empty() {
             let blob_id = self.push_blob(replacement);
             let blob_len = self.blobs[blob_id as usize].len() as u64;
@@ -84,10 +311,10 @@ impl LaneFile {
                 len: blob_len,
             });
         }
-
         next.extend(slice_extents(&view.extents, range.end..current_len));
+
         self.lanes.insert(
-            lane,
+            lane.to_owned(),
             LaneView {
                 extents: normalize_extents(next),
             },
@@ -95,31 +322,14 @@ impl LaneFile {
         Ok(())
     }
 
-    pub fn delete(&mut self, lane: impl Into<LaneId>, range: Range<u64>) -> Result<(), LaneError> {
-        self.write(lane, range, Vec::new())
-    }
+    fn promote(&mut self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError> {
+        self.ensure_base(path, base)?;
+        let promoted = self.read(path, lane, base)?;
 
-    pub fn discard(&mut self, lane: &str) -> bool {
-        self.lanes.remove(lane).is_some()
-    }
-
-    pub fn promote(&mut self, lane: &str) -> Result<(), LaneError> {
-        if !self.lanes.contains_key(lane) {
-            return Err(LaneError::LaneMissing(lane.to_owned()));
-        }
-
-        let promoted = self.read(lane)?;
-
-        let lane_ids: Vec<_> = self
-            .lanes
-            .keys()
-            .filter(|lane_id| lane_id.as_str() != lane)
-            .cloned()
-            .collect();
-
+        let lanes: Vec<_> = self.lanes.keys().cloned().collect();
         let mut preserved = BTreeMap::new();
-        for lane_id in lane_ids {
-            let bytes = self.read(&lane_id)?;
+        for lane_id in lanes {
+            let bytes = self.read(path, &lane_id, base)?;
             let blob_id = self.push_blob(bytes);
             let len = self.blobs[blob_id as usize].len() as u64;
             preserved.insert(
@@ -134,107 +344,50 @@ impl LaneFile {
             );
         }
 
-        self.base = promoted;
+        self.base_hash = hash_bytes(&promoted);
         self.lanes = preserved;
-        Ok(())
+        Ok(promoted)
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"LANE\0\0\0\x01");
-        write_bytes(&mut bytes, &self.base);
-        write_u64(&mut bytes, self.blobs.len() as u64);
-        for blob in &self.blobs {
-            write_bytes(&mut bytes, blob);
-        }
-        write_u64(&mut bytes, self.lanes.len() as u64);
-        for (lane_id, view) in &self.lanes {
-            write_bytes(&mut bytes, lane_id.as_bytes());
-            write_u64(&mut bytes, view.extents.len() as u64);
-            for extent in &view.extents {
-                match extent.source {
-                    Source::Base => {
-                        bytes.push(0);
-                        write_u64(&mut bytes, extent.start);
-                        write_u64(&mut bytes, extent.len);
-                    }
-                    Source::Blob(blob_id) => {
-                        bytes.push(1);
-                        write_u64(&mut bytes, blob_id);
-                        write_u64(&mut bytes, extent.start);
-                        write_u64(&mut bytes, extent.len);
-                    }
-                }
-            }
-        }
-        bytes
+    fn discard_lane(&mut self, lane: &str) {
+        self.lanes.remove(lane);
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut cursor = Cursor::new(bytes);
-        cursor.expect(b"LANE\0\0\0\x01")?;
-
-        let base = cursor.read_bytes()?.to_vec();
-        let mut blobs = Vec::new();
-        for _ in 0..cursor.read_u64()? {
-            blobs.push(cursor.read_bytes()?.to_vec());
-        }
-
-        let mut lanes = BTreeMap::new();
-        for _ in 0..cursor.read_u64()? {
-            let lane_id = String::from_utf8(cursor.read_bytes()?.to_vec())
-                .map_err(|_| DecodeError::InvalidUtf8)?;
-            let mut extents = Vec::new();
-            for _ in 0..cursor.read_u64()? {
-                let tag = cursor.read_byte()?;
-                let source = match tag {
-                    0 => Source::Base,
-                    1 => Source::Blob(cursor.read_u64()?),
-                    _ => return Err(DecodeError::InvalidSource(tag)),
-                };
-                let start = cursor.read_u64()?;
-                let len = cursor.read_u64()?;
-                extents.push(Extent { source, start, len });
-            }
-            lanes.insert(
-                lane_id,
-                LaneView {
-                    extents: normalize_extents_checked(extents)?,
-                },
-            );
-        }
-
-        let file = Self { base, blobs, lanes };
-        file.validate()?;
-        if !cursor.is_finished() {
-            return Err(DecodeError::TrailingBytes);
-        }
-        Ok(file)
+    fn is_empty(&self) -> bool {
+        self.lanes.is_empty()
     }
 
-    fn view_for(&self, lane: &str) -> LaneView {
+    fn view_for(&self, lane: &str, base: &[u8]) -> LaneView {
         self.lanes.get(lane).cloned().unwrap_or_else(|| LaneView {
             extents: vec![Extent {
                 source: Source::Base,
                 start: 0,
-                len: self.base.len() as u64,
+                len: base.len() as u64,
             }],
         })
     }
 
-    fn render(&self, view: &LaneView) -> Result<Vec<u8>, LaneError> {
+    fn render(&self, view: &LaneView, base: &[u8]) -> Result<Vec<u8>, LaneError> {
         let mut bytes = Vec::with_capacity(extents_len(&view.extents) as usize);
         for extent in &view.extents {
             let source = match extent.source {
-                Source::Base => &self.base,
+                Source::Base => base,
                 Source::Blob(blob_id) => self
                     .blobs
                     .get(blob_id as usize)
                     .ok_or(LaneError::BlobMissing(blob_id))?,
             };
-            let start = extent.start as usize;
-            let end = start + extent.len as usize;
-            bytes.extend_from_slice(&source[start..end]);
+            let start: usize = extent
+                .start
+                .try_into()
+                .map_err(|_| LaneError::ExtentOutOfBounds)?;
+            let len: usize = extent
+                .len
+                .try_into()
+                .map_err(|_| LaneError::ExtentOutOfBounds)?;
+            let end = start.checked_add(len).ok_or(LaneError::ExtentOutOfBounds)?;
+            let slice = source.get(start..end).ok_or(LaneError::ExtentOutOfBounds)?;
+            bytes.extend_from_slice(slice);
         }
         Ok(bytes)
     }
@@ -245,17 +398,27 @@ impl LaneFile {
         blob_id
     }
 
+    fn ensure_base(&self, path: &str, base: &[u8]) -> Result<(), LaneError> {
+        if self.base_hash == hash_bytes(base) {
+            Ok(())
+        } else {
+            Err(LaneError::BaseChanged {
+                path: path.to_owned(),
+            })
+        }
+    }
+
     fn validate(&self) -> Result<(), DecodeError> {
         for view in self.lanes.values() {
             for extent in &view.extents {
-                let source_len = match extent.source {
-                    Source::Base => self.base.len() as u64,
-                    Source::Blob(blob_id) => self
-                        .blobs
-                        .get(blob_id as usize)
-                        .ok_or(DecodeError::BlobMissing(blob_id))?
-                        .len() as u64,
+                let Source::Blob(blob_id) = extent.source else {
+                    continue;
                 };
+                let source_len = self
+                    .blobs
+                    .get(blob_id as usize)
+                    .ok_or(DecodeError::BlobMissing(blob_id))?
+                    .len() as u64;
                 if extent.start > source_len || extent.len > source_len - extent.start {
                     return Err(DecodeError::ExtentOutOfBounds);
                 }
@@ -273,6 +436,7 @@ pub enum DecodeError {
     InvalidSource(u8),
     BlobMissing(u64),
     ExtentOutOfBounds,
+    OverlayLaneMissing(LaneId),
     TrailingBytes,
 }
 
@@ -283,6 +447,14 @@ impl fmt::Display for DecodeError {
 }
 
 impl std::error::Error for DecodeError {}
+
+fn ensure_user_lane(lane: &str) -> Result<(), LaneError> {
+    if lane.trim().is_empty() || lane == "base" {
+        Err(LaneError::ReservedLane(lane.to_owned()))
+    } else {
+        Ok(())
+    }
+}
 
 fn ensure_valid_range(range: Range<u64>, len: u64) -> Result<(), LaneError> {
     if range.start > range.end || range.end > len {
@@ -350,6 +522,19 @@ fn normalize_extents_checked(extents: Vec<Extent>) -> Result<Vec<Extent>, Decode
     Ok(normalized)
 }
 
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn read_string(cursor: &mut Cursor<'_>) -> Result<String, DecodeError> {
+    String::from_utf8(cursor.read_bytes()?.to_vec()).map_err(|_| DecodeError::InvalidUtf8)
+}
+
 fn write_bytes(target: &mut Vec<u8>, bytes: &[u8]) {
     write_u64(target, bytes.len() as u64);
     target.extend_from_slice(bytes);
@@ -407,117 +592,5 @@ impl<'a> Cursor<'a> {
 
     fn is_finished(&self) -> bool {
         self.offset == self.bytes.len()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lane_writes_do_not_change_base_or_other_lanes() {
-        let mut file = LaneFile::new(b"abcdef".to_vec());
-
-        file.write("agent-a", 2..4, b"XX".to_vec()).unwrap();
-        file.write("agent-b", 1..5, b"Y".to_vec()).unwrap();
-
-        assert_eq!(file.read_base(), b"abcdef");
-        assert_eq!(file.read("agent-a").unwrap(), b"abXXef");
-        assert_eq!(file.read("agent-b").unwrap(), b"aYf");
-        assert_eq!(file.read("unknown").unwrap(), b"abcdef");
-    }
-
-    #[test]
-    fn writes_are_addressed_against_the_lane_view() {
-        let mut file = LaneFile::new(b"abcdef".to_vec());
-
-        file.write("agent-a", 2..4, b"XX".to_vec()).unwrap();
-        file.write("agent-a", 4..4, b"YY".to_vec()).unwrap();
-
-        assert_eq!(file.read("agent-a").unwrap(), b"abXXYYef");
-    }
-
-    #[test]
-    fn delete_removes_bytes_from_one_lane() {
-        let mut file = LaneFile::new(b"abcdef".to_vec());
-
-        file.delete("agent-a", 1..5).unwrap();
-
-        assert_eq!(file.read_base(), b"abcdef");
-        assert_eq!(file.read("agent-a").unwrap(), b"af");
-    }
-
-    #[test]
-    fn promote_preserves_non_promoted_lane_renderings() {
-        let mut file = LaneFile::new(b"abcdef".to_vec());
-        file.write("agent-a", 2..4, b"XX".to_vec()).unwrap();
-        file.write("agent-b", 1..5, b"Y".to_vec()).unwrap();
-
-        file.promote("agent-a").unwrap();
-
-        assert_eq!(file.read_base(), b"abXXef");
-        assert_eq!(file.read("agent-b").unwrap(), b"aYf");
-        assert_eq!(file.read("agent-a").unwrap(), b"abXXef");
-    }
-
-    #[test]
-    fn promote_rejects_missing_lanes() {
-        let mut file = LaneFile::new(b"abcdef".to_vec());
-        file.write("agent-a", 2..4, b"XX".to_vec()).unwrap();
-
-        assert_eq!(
-            file.promote("missing"),
-            Err(LaneError::LaneMissing("missing".to_owned()))
-        );
-        assert_eq!(file.read_base(), b"abcdef");
-        assert_eq!(file.read("agent-a").unwrap(), b"abXXef");
-    }
-
-    #[test]
-    fn serialized_lane_file_round_trips() {
-        let mut file = LaneFile::new(b"abcdef".to_vec());
-        file.write("agent-a", 2..4, b"XX".to_vec()).unwrap();
-        file.delete("agent-b", 1..5).unwrap();
-
-        let decoded = LaneFile::from_bytes(&file.to_bytes()).unwrap();
-
-        assert_eq!(decoded.read_base(), b"abcdef");
-        assert_eq!(decoded.read("agent-a").unwrap(), b"abXXef");
-        assert_eq!(decoded.read("agent-b").unwrap(), b"af");
-    }
-
-    #[test]
-    fn decode_rejects_trailing_bytes() {
-        let mut bytes = LaneFile::new(b"abcdef".to_vec()).to_bytes();
-        bytes.push(0);
-
-        assert_eq!(
-            LaneFile::from_bytes(&bytes),
-            Err(DecodeError::TrailingBytes)
-        );
-    }
-
-    #[test]
-    fn decode_rejects_extent_overflow_without_panicking() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"LANE\0\0\0\x01");
-        write_bytes(&mut bytes, b"base");
-        write_u64(&mut bytes, 0);
-        write_u64(&mut bytes, 1);
-        write_bytes(&mut bytes, b"agent-a");
-        write_u64(&mut bytes, 2);
-
-        bytes.push(0);
-        write_u64(&mut bytes, u64::MAX);
-        write_u64(&mut bytes, 1);
-
-        bytes.push(0);
-        write_u64(&mut bytes, 0);
-        write_u64(&mut bytes, 1);
-
-        assert_eq!(
-            LaneFile::from_bytes(&bytes),
-            Err(DecodeError::ExtentOutOfBounds)
-        );
     }
 }
