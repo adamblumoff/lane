@@ -9,6 +9,7 @@ type LaneView = {
 };
 
 type LaneState = {
+  file_path: string;
   base: LaneView;
   lanes: LaneView[];
 };
@@ -158,7 +159,7 @@ function App() {
         <header className="filebar">
           <div>
             <p>{activeLane}</p>
-            <h2>src/example.ts</h2>
+            <h2>{state?.file_path ?? ""}</h2>
           </div>
           <div className="actions">
             <button type="button" onClick={reset}>
