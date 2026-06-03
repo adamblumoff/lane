@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::projection::SourceProjection;
+use crate::storage::{load_repo, persist_bytes, persist_repo};
 use crate::{LaneError, LaneRepo};
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header::CONTENT_TYPE};
@@ -133,7 +134,7 @@ struct PromoteSource {
 struct WorktreeWrite {
     source_path: PathBuf,
     original_bytes: Option<Vec<u8>>,
-    next_bytes: Vec<u8>,
+    next_bytes: Option<Vec<u8>>,
 }
 
 async fn state(State(state): State<AppState>) -> Result<Json<StateResponse>, ApiError> {
@@ -249,7 +250,7 @@ fn promote_sources(
     sources: Vec<PromoteSource>,
     promote: impl FnOnce(
         &mut LaneRepo,
-        Vec<(String, Vec<u8>)>,
+        Vec<(String, Option<Vec<u8>>)>,
     ) -> Result<Vec<crate::PromotedFile>, LaneError>,
 ) -> Result<Json<StateResponse>, ApiError> {
     if sources.is_empty() {
@@ -258,7 +259,7 @@ fn promote_sources(
     }
     let bases = sources
         .iter()
-        .map(|source| (source.path.clone(), source.source.bytes().to_vec()))
+        .map(|source| (source.path.clone(), Some(source.source.bytes().to_vec())))
         .collect::<Vec<_>>();
     let mut repo = state.repo.lock().expect("lane repo mutex");
     let mut draft = repo.clone();
@@ -303,7 +304,7 @@ async fn reset(State(state): State<AppState>) -> Result<Json<StateResponse>, Api
             Ok(WorktreeWrite {
                 source_path,
                 original_bytes,
-                next_bytes: sample.bytes.to_vec(),
+                next_bytes: Some(sample.bytes.to_vec()),
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
@@ -322,15 +323,14 @@ pub fn project_root() -> PathBuf {
 }
 
 fn load_or_seed_repo(storage_path: &FsPath, root_path: &FsPath) -> io::Result<LaneRepo> {
-    match fs::read(storage_path) {
-        Ok(bytes) => LaneRepo::from_bytes(&bytes).map_err(decode_error),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    match load_repo(storage_path)? {
+        Some(repo) => Ok(repo),
+        None => {
             let base_files = read_or_seed_sample_sources(root_path)?;
             let repo = seed_repo(base_files);
             persist_repo(storage_path, &repo)?;
             Ok(repo)
         }
-        Err(error) => Err(error),
     }
 }
 
@@ -381,84 +381,6 @@ fn seed_repo(base_files: Vec<(String, Vec<u8>)>) -> LaneRepo {
         }
     }
     repo
-}
-
-fn persist_repo(path: &FsPath, repo: &LaneRepo) -> io::Result<()> {
-    persist_bytes(path, &repo.to_bytes())
-}
-
-fn persist_bytes(path: &FsPath, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)?;
-    }
-    let temp_path = temp_path_for(path)?;
-    let result = (|| {
-        let mut temp_file = fs::File::create(&temp_path)?;
-        temp_file.write_all(bytes)?;
-        temp_file.sync_all()?;
-        drop(temp_file);
-        replace_file(&temp_path, path)
-    })();
-
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temp_path);
-        return Err(error);
-    }
-    Ok(())
-}
-
-fn temp_path_for(path: &FsPath) -> io::Result<PathBuf> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?;
-    let mut temp_name = file_name.to_os_string();
-    temp_name.push(".tmp");
-    Ok(path.with_file_name(temp_name))
-}
-
-#[cfg(not(windows))]
-fn replace_file(from: &FsPath, to: &FsPath) -> io::Result<()> {
-    fs::rename(from, to)
-}
-
-#[cfg(windows)]
-fn replace_file(from: &FsPath, to: &FsPath) -> io::Result<()> {
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-
-    unsafe extern "system" {
-        fn MoveFileExW(
-            existing_file_name: *const u16,
-            new_file_name: *const u16,
-            flags: u32,
-        ) -> i32;
-    }
-
-    let from = windows_path(from);
-    let to = windows_path(to);
-    let ok = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-
-    if ok == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-fn windows_path(path: &FsPath) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-
-    path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 
 fn read_project_file(state: &AppState, path: &str) -> Result<Vec<u8>, ApiError> {
@@ -521,10 +443,14 @@ fn persist_promoted_sources(
             let source = source_by_path.get(&file.path).ok_or_else(|| {
                 ApiError::server_error(format!("missing promoted source: {}", file.path))
             })?;
+            let next_bytes = file
+                .bytes
+                .as_deref()
+                .map(|bytes| source.source.materialize(bytes));
             Ok(WorktreeWrite {
                 source_path: source.source_path.clone(),
                 original_bytes: Some(source.original_bytes.clone()),
-                next_bytes: source.source.materialize(&file.bytes),
+                next_bytes,
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
@@ -539,7 +465,11 @@ fn persist_worktree_writes(
 ) -> Result<(), ApiError> {
     let mut written = Vec::new();
     for write in writes {
-        if let Err(error) = persist_bytes(&write.source_path, &write.next_bytes) {
+        let result = match &write.next_bytes {
+            Some(bytes) => persist_bytes(&write.source_path, bytes),
+            None => fs::remove_file(&write.source_path),
+        };
+        if let Err(error) = result {
             return rollback_worktree(repo_path, rollback_repo, written, error);
         }
         written.push((write.source_path, write.original_bytes));
@@ -623,10 +553,6 @@ fn normalize_repo_path(path: &str) -> Result<String, ApiError> {
         ));
     }
     Ok(label)
-}
-
-fn decode_error(error: crate::DecodeError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
 fn mutate_repo(
