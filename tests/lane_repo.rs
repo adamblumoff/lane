@@ -2,6 +2,8 @@ use lane::{LaneError, LaneRepo};
 
 const PATH: &str = "src/example.ts";
 const BASE: &[u8] = b"export const mode = 'base';\n";
+const SETTINGS_PATH: &str = "src/settings.json";
+const SETTINGS_BASE: &[u8] = b"{\"mode\":\"base\"}\n";
 
 #[test]
 fn lanes_project_normal_file_bytes_without_changing_base() {
@@ -33,6 +35,140 @@ fn lanes_project_normal_file_bytes_without_changing_base() {
 }
 
 #[test]
+fn overlay_paths_report_lane_overlays() {
+    let mut repo = seeded_repo();
+    repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
+        .unwrap();
+    repo.write(
+        SETTINGS_PATH,
+        "agent-b",
+        SETTINGS_BASE,
+        9..13,
+        b"safe".to_vec(),
+    )
+    .unwrap();
+
+    assert_eq!(repo.overlay_paths("agent-a").unwrap(), vec![PATH]);
+    assert_eq!(repo.overlay_paths("agent-b").unwrap(), vec![SETTINGS_PATH]);
+    assert_eq!(
+        repo.overlay_paths("missing"),
+        Err(LaneError::LaneMissing("missing".to_owned()))
+    );
+}
+
+#[test]
+fn promote_lane_promotes_every_changed_path_for_lane() {
+    let mut repo = seeded_repo();
+    repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
+        .unwrap();
+    repo.write(
+        SETTINGS_PATH,
+        "agent-a",
+        SETTINGS_BASE,
+        9..13,
+        b"fast".to_vec(),
+    )
+    .unwrap();
+    repo.write(PATH, "agent-b", BASE, 21..25, b"safe".to_vec())
+        .unwrap();
+
+    let promoted = repo
+        .promote_lane(
+            "agent-a",
+            vec![
+                (PATH.to_owned(), BASE.to_vec()),
+                (SETTINGS_PATH.to_owned(), SETTINGS_BASE.to_vec()),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        promoted,
+        vec![
+            promoted_file(PATH, b"export const mode = 'fast';\n"),
+            promoted_file(SETTINGS_PATH, b"{\"mode\":\"fast\"}\n"),
+        ]
+    );
+    assert_eq!(
+        repo.read(PATH, "agent-b", b"export const mode = 'fast';\n")
+            .unwrap(),
+        b"export const mode = 'safe';\n"
+    );
+    assert_eq!(
+        repo.read(SETTINGS_PATH, "agent-b", b"{\"mode\":\"fast\"}\n")
+            .unwrap(),
+        b"{\"mode\":\"fast\"}\n"
+    );
+    assert_eq!(
+        repo.overlay_paths("agent-a").unwrap(),
+        vec![PATH, SETTINGS_PATH]
+    );
+    assert_eq!(repo.overlay_paths("agent-b").unwrap(), vec![PATH]);
+    assert_eq!(
+        repo.promote_lane(
+            "agent-a",
+            vec![
+                (PATH.to_owned(), b"export const mode = 'fast';\n".to_vec()),
+                (SETTINGS_PATH.to_owned(), b"{\"mode\":\"fast\"}\n".to_vec()),
+            ],
+        )
+        .unwrap(),
+        Vec::<lane::PromotedFile>::new()
+    );
+}
+
+#[test]
+fn promote_lane_requires_base_for_every_changed_path() {
+    let mut repo = seeded_repo();
+    repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
+        .unwrap();
+
+    assert_eq!(
+        repo.promote_lane("agent-a", Vec::<(String, Vec<u8>)>::new()),
+        Err(LaneError::BaseMissing {
+            path: PATH.to_owned()
+        })
+    );
+}
+
+#[test]
+fn failed_promote_lane_does_not_mutate_repo() {
+    let mut repo = seeded_repo();
+    repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
+        .unwrap();
+    repo.write(
+        SETTINGS_PATH,
+        "agent-a",
+        SETTINGS_BASE,
+        9..13,
+        b"fast".to_vec(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        repo.promote_lane(
+            "agent-a",
+            vec![
+                (PATH.to_owned(), BASE.to_vec()),
+                (SETTINGS_PATH.to_owned(), b"{\"mode\":\"moved\"}\n".to_vec()),
+            ],
+        ),
+        Err(LaneError::BaseChanged {
+            path: SETTINGS_PATH.to_owned()
+        })
+    );
+
+    assert_eq!(
+        repo.read(PATH, "agent-a", BASE).unwrap(),
+        b"export const mode = 'fast';\n"
+    );
+    assert_eq!(
+        repo.read(SETTINGS_PATH, "agent-a", SETTINGS_BASE).unwrap(),
+        b"{\"mode\":\"fast\"}\n"
+    );
+}
+
+#[test]
 fn promote_returns_new_base_and_preserves_other_lane_projections() {
     let mut repo = seeded_repo();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
@@ -49,6 +185,20 @@ fn promote_returns_new_base_and_preserves_other_lane_projections() {
         repo.read(PATH, "agent-b", &promoted).unwrap(),
         b"export const mode = 'safe';\n"
     );
+    assert_eq!(repo.overlay_paths("agent-a").unwrap(), vec![PATH]);
+    assert_eq!(repo.overlay_paths("agent-b").unwrap(), vec![PATH]);
+}
+
+#[test]
+fn replacing_with_base_content_clears_lane_overlay() {
+    let mut repo = seeded_repo();
+    repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
+        .unwrap();
+
+    repo.replace(PATH, "agent-a", BASE, BASE.to_vec()).unwrap();
+
+    assert_eq!(repo.read(PATH, "agent-a", BASE).unwrap(), BASE);
+    assert_eq!(repo.overlay_paths("agent-a").unwrap(), Vec::<&str>::new());
 }
 
 #[test]
@@ -140,4 +290,11 @@ fn seeded_repo() -> LaneRepo {
     repo.create_lane("agent-a").unwrap();
     repo.create_lane("agent-b").unwrap();
     repo
+}
+
+fn promoted_file(path: &str, bytes: &[u8]) -> lane::PromotedFile {
+    lane::PromotedFile {
+        path: path.to_owned(),
+        bytes: bytes.to_vec(),
+    }
 }

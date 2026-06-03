@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, Response, StatusCode, header::CONTENT_TYPE};
-use lane::demo::{AppState, DEMO_PATH, SAMPLE_BASE, STORAGE_PATH, router};
+use lane::demo::{
+    AppState, CONFIG_PATH, DEMO_PATH, SAMPLE_BASE, SAMPLE_CONFIG, STORAGE_PATH, router,
+};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -18,14 +20,19 @@ async fn seeds_demo_source_and_repo_store() {
     let state = AppState::new(root.clone()).unwrap();
 
     assert_eq!(fs::read(root.join(DEMO_PATH)).unwrap(), SAMPLE_BASE);
+    assert_eq!(fs::read(root.join(CONFIG_PATH)).unwrap(), SAMPLE_CONFIG);
     assert!(root.join(STORAGE_PATH).exists());
 
     let response = get_json(router(state), "/api/state").await;
-    assert_eq!(response["file_path"], DEMO_PATH);
     assert_eq!(response["storage_path"], STORAGE_PATH);
-    assert_eq!(mode(&response["base"]), "base");
-    assert_eq!(mode(&response["lanes"][0]), "fast");
-    assert_eq!(mode(&response["lanes"][1]), "safe");
+    let example = file(&response, DEMO_PATH);
+    let config = file(&response, CONFIG_PATH);
+    assert_eq!(mode(&example["base"]), "base");
+    assert_eq!(mode(&example["lanes"][0]), "fast");
+    assert_eq!(mode(&example["lanes"][1]), "safe");
+    assert_eq!(mode(&config["base"]), "base");
+    assert_eq!(mode(&config["lanes"][0]), "fast");
+    assert_eq!(mode(&config["lanes"][1]), "safe");
 
     cleanup(root);
 }
@@ -39,9 +46,10 @@ async fn seeding_preserves_existing_normal_source() {
     let response = get_json(router(AppState::new(root.clone()).unwrap()), "/api/state").await;
 
     assert_eq!(fs::read(root.join(DEMO_PATH)).unwrap(), existing);
-    assert_eq!(content(&response["base"]).as_bytes(), existing);
-    assert_eq!(content(&response["lanes"][0]).as_bytes(), existing);
-    assert_eq!(content(&response["lanes"][1]).as_bytes(), existing);
+    let example = file(&response, DEMO_PATH);
+    assert_eq!(content(&example["base"]).as_bytes(), existing);
+    assert_eq!(content(&example["lanes"][0]).as_bytes(), existing);
+    assert_eq!(content(&example["lanes"][1]).as_bytes(), existing);
 
     cleanup(root);
 }
@@ -54,9 +62,10 @@ async fn crlf_checkout_projects_lanes_and_read_materializes_newlines() {
     let app = router(state);
 
     let state_response = get_json(app.clone(), "/api/state").await;
-    assert_eq!(content(&state_response["base"]).as_bytes(), SAMPLE_BASE);
-    assert_eq!(mode(&state_response["lanes"][0]), "fast");
-    assert_eq!(mode(&state_response["lanes"][1]), "safe");
+    let example = file(&state_response, DEMO_PATH);
+    assert_eq!(content(&example["base"]).as_bytes(), SAMPLE_BASE);
+    assert_eq!(mode(&example["lanes"][0]), "fast");
+    assert_eq!(mode(&example["lanes"][1]), "safe");
 
     let read_response = get_response(app, "/api/read?path=demo%2Fexample.ts&lane=agent-a").await;
     assert_eq!(read_response.status(), StatusCode::OK);
@@ -73,6 +82,7 @@ async fn promote_preserves_observed_crlf_source_style() {
     let root = temp_root();
     let state = AppState::new(root.clone()).unwrap();
     let source_path = root.join(DEMO_PATH);
+    let config_path = root.join(CONFIG_PATH);
     write_file(&source_path, &crlf(SAMPLE_BASE));
 
     let response = post_json(router(state), "/api/lanes/agent-a/promote", "{}").await;
@@ -81,6 +91,36 @@ async fn promote_preserves_observed_crlf_source_style() {
     assert_eq!(
         fs::read(source_path).unwrap(),
         crlf(&sample_content("fast"))
+    );
+    assert_eq!(fs::read(config_path).unwrap(), sample_config("fast"));
+
+    cleanup(root);
+}
+
+#[tokio::test]
+async fn promote_file_promotes_only_requested_path() {
+    let root = temp_root();
+    let app = router(AppState::new(root.clone()).unwrap());
+
+    let response = post_json(
+        app.clone(),
+        "/api/lanes/agent-a/promote-file",
+        r#"{"path":"demo/example.ts"}"#,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        fs::read(root.join(DEMO_PATH)).unwrap(),
+        sample_content("fast")
+    );
+    assert_eq!(fs::read(root.join(CONFIG_PATH)).unwrap(), SAMPLE_CONFIG);
+    let state_response = get_json(app, "/api/state").await;
+    assert_eq!(mode(&file(&state_response, DEMO_PATH)["base"]), "fast");
+    assert_eq!(mode(&file(&state_response, CONFIG_PATH)["base"]), "base");
+    assert_eq!(
+        mode(&file(&state_response, CONFIG_PATH)["lanes"][0]),
+        "fast"
     );
 
     cleanup(root);
@@ -92,8 +132,10 @@ async fn failed_source_promote_write_rolls_back_lane_repo() {
     let state = AppState::new(root.clone()).unwrap();
     let app = router(state);
     let source_path = root.join(DEMO_PATH);
+    let config_path = root.join(CONFIG_PATH);
     let repo_path = root.join(STORAGE_PATH);
     let source_before = fs::read(&source_path).unwrap();
+    let config_before = fs::read(&config_path).unwrap();
     let repo_before = fs::read(&repo_path).unwrap();
     fs::create_dir(temp_write_path_for(&source_path)).unwrap();
 
@@ -101,9 +143,11 @@ async fn failed_source_promote_write_rolls_back_lane_repo() {
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(fs::read(&source_path).unwrap(), source_before);
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
     assert_eq!(fs::read(&repo_path).unwrap(), repo_before);
     let state_response = get_json(app, "/api/state").await;
-    assert_eq!(mode(&state_response["base"]), "base");
+    assert_eq!(mode(&file(&state_response, DEMO_PATH)["base"]), "base");
+    assert_eq!(mode(&file(&state_response, CONFIG_PATH)["base"]), "base");
 
     cleanup(root);
 }
@@ -121,18 +165,41 @@ async fn failed_source_reset_write_rolls_back_lane_repo() {
     );
 
     let source_path = root.join(DEMO_PATH);
+    let config_path = root.join(CONFIG_PATH);
     let repo_path = root.join(STORAGE_PATH);
     let source_before = fs::read(&source_path).unwrap();
+    let config_before = fs::read(&config_path).unwrap();
     let repo_before = fs::read(&repo_path).unwrap();
-    fs::create_dir(temp_write_path_for(&source_path)).unwrap();
+    fs::create_dir(temp_write_path_for(&config_path)).unwrap();
 
     let response = post_json(app.clone(), "/api/reset", "{}").await;
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(fs::read(&source_path).unwrap(), source_before);
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
     assert_eq!(fs::read(&repo_path).unwrap(), repo_before);
     let state_response = get_json(app, "/api/state").await;
-    assert_eq!(mode(&state_response["base"]), "fast");
+    assert_eq!(mode(&file(&state_response, DEMO_PATH)["base"]), "fast");
+    assert_eq!(mode(&file(&state_response, CONFIG_PATH)["base"]), "fast");
+
+    cleanup(root);
+}
+
+#[tokio::test]
+async fn reset_preserves_unreadable_existing_source() {
+    let root = temp_root();
+    let app = router(AppState::new(root.clone()).unwrap());
+    let config_path = root.join(CONFIG_PATH);
+    let repo_path = root.join(STORAGE_PATH);
+    let repo_before = fs::read(&repo_path).unwrap();
+    fs::remove_file(&config_path).unwrap();
+    fs::create_dir(&config_path).unwrap();
+
+    let response = post_json(app, "/api/reset", "{}").await;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(config_path.is_dir());
+    assert_eq!(fs::read(&repo_path).unwrap(), repo_before);
 
     cleanup(root);
 }
@@ -196,11 +263,27 @@ async fn response_bytes(response: Response<Body>) -> Vec<u8> {
         .to_vec()
 }
 
+fn file<'a>(state: &'a Value, path: &str) -> &'a Value {
+    state["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == path)
+        .unwrap()
+}
+
 fn mode(view: &Value) -> &str {
-    content(view)
+    let content = content(view);
+    content
         .split("mode = '")
         .nth(1)
         .and_then(|suffix| suffix.split('\'').next())
+        .or_else(|| {
+            content
+                .split("\"mode\": \"")
+                .nth(1)
+                .and_then(|suffix| suffix.split('"').next())
+        })
         .unwrap()
 }
 
@@ -213,6 +296,10 @@ fn sample_content(mode: &str) -> Vec<u8> {
         "export const mode = '{mode}';\n\nexport function describeLane() {{\n  return `current mode: ${{mode}}`;\n}}\n"
     )
     .into_bytes()
+}
+
+fn sample_config(mode: &str) -> Vec<u8> {
+    format!("{{\n  \"mode\": \"{mode}\",\n  \"retries\": 1\n}}\n").into_bytes()
 }
 
 fn crlf(bytes: &[u8]) -> Vec<u8> {

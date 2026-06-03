@@ -8,6 +8,8 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@mantine/core": "^9.2.2",
+    "@mantine/hooks": "^9.2.2",
     "react": "^19.2.1",
     "react-dom": "^19.2.1"
   },

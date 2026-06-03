@@ -15,6 +15,12 @@ pub struct LaneRepo {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromotedFile {
+    pub path: FilePath,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct LaneFile {
     base_hash: u64,
     blobs: Vec<Vec<u8>>,
@@ -43,6 +49,7 @@ enum Source {
 pub enum LaneError {
     ReservedLane(LaneId),
     LaneMissing(LaneId),
+    BaseMissing { path: FilePath },
     BaseChanged { path: FilePath },
     RangeOutOfBounds { start: u64, end: u64, len: u64 },
     BlobMissing(u64),
@@ -59,6 +66,19 @@ impl LaneRepo {
 
     pub fn lane_ids(&self) -> impl Iterator<Item = &str> {
         self.lanes.iter().map(String::as_str)
+    }
+
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.files.keys().map(String::as_str)
+    }
+
+    pub fn overlay_paths(&self, lane: &str) -> Result<Vec<&str>, LaneError> {
+        self.ensure_lane(lane)?;
+        Ok(self
+            .files
+            .iter()
+            .filter_map(|(path, file)| file.has_lane(lane).then_some(path.as_str()))
+            .collect())
     }
 
     pub fn create_lane(&mut self, lane: impl Into<LaneId>) -> Result<bool, LaneError> {
@@ -97,12 +117,18 @@ impl LaneRepo {
     ) -> Result<(), LaneError> {
         self.ensure_lane(lane)?;
         if let Some(file) = self.files.get_mut(path) {
-            return file.write(path, lane, base, range, replacement);
+            file.write(path, lane, base, range, replacement)?;
+            if file.is_empty() {
+                self.files.remove(path);
+            }
+            return Ok(());
         }
 
         let mut file = LaneFile::new(base);
         file.write(path, lane, base, range, replacement)?;
-        self.files.insert(path.to_owned(), file);
+        if !file.is_empty() {
+            self.files.insert(path.to_owned(), file);
+        }
         Ok(())
     }
 
@@ -137,6 +163,46 @@ impl LaneRepo {
         if file.is_empty() {
             self.files.remove(path);
         }
+        Ok(promoted)
+    }
+
+    pub fn promote_lane(
+        &mut self,
+        lane: &str,
+        bases: impl IntoIterator<Item = (FilePath, Vec<u8>)>,
+    ) -> Result<Vec<PromotedFile>, LaneError> {
+        let base_by_path: BTreeMap<_, _> = bases.into_iter().collect();
+        let mut changed_bases = Vec::new();
+        for path in self.overlay_paths(lane)? {
+            let base = base_by_path
+                .get(path)
+                .ok_or_else(|| LaneError::BaseMissing {
+                    path: path.to_owned(),
+                })?;
+            if self.read(path, lane, base)? != *base {
+                changed_bases.push((path.to_owned(), base.clone()));
+            }
+        }
+        self.promote_paths(lane, changed_bases)
+    }
+
+    pub fn promote_paths(
+        &mut self,
+        lane: &str,
+        bases: impl IntoIterator<Item = (FilePath, Vec<u8>)>,
+    ) -> Result<Vec<PromotedFile>, LaneError> {
+        self.ensure_lane(lane)?;
+        let mut draft = self.clone();
+        let mut promoted = Vec::new();
+
+        for (path, base) in bases {
+            promoted.push(PromotedFile {
+                bytes: draft.promote(&path, lane, &base)?,
+                path,
+            });
+        }
+
+        *self = draft;
         Ok(promoted)
     }
 
@@ -313,12 +379,14 @@ impl LaneFile {
         }
         next.extend(slice_extents(&view.extents, range.end..current_len));
 
-        self.lanes.insert(
-            lane.to_owned(),
-            LaneView {
-                extents: normalize_extents(next),
-            },
-        );
+        let next_view = LaneView {
+            extents: normalize_extents(next),
+        };
+        if self.render(&next_view, base)? == base {
+            self.lanes.remove(lane);
+        } else {
+            self.lanes.insert(lane.to_owned(), next_view);
+        }
         Ok(())
     }
 
@@ -351,6 +419,10 @@ impl LaneFile {
 
     fn discard_lane(&mut self, lane: &str) {
         self.lanes.remove(lane);
+    }
+
+    fn has_lane(&self, lane: &str) -> bool {
+        self.lanes.contains_key(lane)
     }
 
     fn is_empty(&self) -> bool {
