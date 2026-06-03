@@ -2,10 +2,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::fs;
-use std::io;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use crate::storage::{load_repo, persist_repo};
+use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
 use crate::vfs::{DirEntry, DirEntryKind, FileWorktree, LaneFs, LaneFsError};
 use crate::{LaneError, LaneRepo};
 use windows::Win32::Foundation::{
@@ -34,15 +34,38 @@ pub struct MountOptions {
     pub mount_path: PathBuf,
 }
 
-pub fn mount_foreground(options: MountOptions) -> winfsp::Result<()> {
-    let _init = winfsp::winfsp_init()?;
+pub struct MountedLane {
+    _init: winfsp::FspInit,
+    host: FileSystemHost<LaneWinFsp, CoarseGuard>,
+    mount_path: PathBuf,
+}
+
+impl MountedLane {
+    pub fn view_root(&self) -> PathBuf {
+        if looks_like_drive_mount(&self.mount_path) {
+            let label = self.mount_path.as_os_str().to_string_lossy();
+            PathBuf::from(format!("{label}\\"))
+        } else {
+            self.mount_path.clone()
+        }
+    }
+}
+
+impl Drop for MountedLane {
+    fn drop(&mut self) {
+        self.host.stop();
+        self.host.unmount();
+    }
+}
+
+pub fn mount_hidden(options: MountOptions) -> winfsp::Result<MountedLane> {
+    let init = winfsp::winfsp_init()?;
     let mount_path = options.mount_path.clone();
     if !looks_like_drive_mount(&options.mount_path) {
         fs::create_dir_all(&options.mount_path)?;
     }
-    let lane = options.lane.clone();
 
-    let context = LaneWinFsp::open(options)?;
+    let context = LaneWinFsp::open(&options)?;
     let mut volume = VolumeParams::new();
     volume
         .filesystem_name("LaneFS")
@@ -55,16 +78,11 @@ pub fn mount_foreground(options: MountOptions) -> winfsp::Result<()> {
     let mut host = FileSystemHost::<LaneWinFsp, CoarseGuard>::new(volume, context)?;
     host.mount(&mount_path)?;
     host.start()?;
-    println!(
-        "mounted lane {lane} at {}; press Enter to unmount",
-        mount_path.display()
-    );
-
-    let mut line = String::new();
-    let _ = io::stdin().read_line(&mut line);
-    host.stop();
-    host.unmount();
-    Ok(())
+    Ok(MountedLane {
+        _init: init,
+        host,
+        mount_path,
+    })
 }
 
 struct LaneWinFsp {
@@ -88,22 +106,22 @@ enum NodeKind {
 }
 
 impl LaneWinFsp {
-    fn open(options: MountOptions) -> winfsp::Result<Self> {
+    fn open(options: &MountOptions) -> winfsp::Result<Self> {
         let storage_path = options.repo_root.join(STORAGE_PATH);
-        let repo = match load_repo(&storage_path) {
+        let _lock = acquire_repo_lock(&storage_path)?;
+        let mut repo = match load_repo(&storage_path) {
             Ok(Some(repo)) => repo,
             Ok(None) => LaneRepo::new(),
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => LaneRepo::new(),
+            Err(error) if error.kind() == ErrorKind::InvalidData => LaneRepo::new(),
             Err(error) => return Err(error.into()),
         };
-        let mut state = LaneFs::new(repo, FileWorktree::new(options.repo_root));
-        state
-            .create_lane(options.lane.clone())
-            .map_err(map_fs_error)?;
-        persist_repo(&storage_path, state.repo())?;
+        repo.create_lane(options.lane.clone())
+            .map_err(map_lane_error)?;
+        persist_repo(&storage_path, &repo)?;
+        let state = LaneFs::new(repo, FileWorktree::new(options.repo_root.clone()));
 
         Ok(Self {
-            lane: options.lane,
+            lane: options.lane.clone(),
             storage_path,
             state: RefCell::new(state),
             created_dirs: RefCell::new(BTreeSet::new()),
@@ -166,14 +184,14 @@ impl LaneWinFsp {
         state
             .write_file(&self.lane, path, bytes)
             .map_err(map_fs_error)?;
-        persist_repo(&self.storage_path, state.repo())?;
+        self.persist_lane_state(&state)?;
         Ok(())
     }
 
     fn delete_file(&self, path: &str) -> winfsp::Result<()> {
         let mut state = self.state.borrow_mut();
         state.delete_file(&self.lane, path).map_err(map_fs_error)?;
-        persist_repo(&self.storage_path, state.repo())?;
+        self.persist_lane_state(&state)?;
         Ok(())
     }
 
@@ -182,7 +200,44 @@ impl LaneWinFsp {
         state
             .rename_file(&self.lane, from, to)
             .map_err(map_fs_error)?;
-        persist_repo(&self.storage_path, state.repo())?;
+        self.persist_lane_state(&state)?;
+        Ok(())
+    }
+
+    fn persist_lane_state(&self, state: &LaneFs<FileWorktree>) -> winfsp::Result<()> {
+        let _lock = acquire_repo_lock(&self.storage_path)?;
+        let mut repo = match load_repo(&self.storage_path) {
+            Ok(Some(repo)) => repo,
+            Ok(None) => LaneRepo::new(),
+            Err(error) if error.kind() == ErrorKind::InvalidData => LaneRepo::new(),
+            Err(error) => return Err(error.into()),
+        };
+        repo.create_lane(self.lane.clone())
+            .map_err(map_lane_error)?;
+
+        let mut merged = LaneFs::new(
+            repo,
+            FileWorktree::new(state.worktree().root_path().to_path_buf()),
+        );
+        let paths = merged
+            .changed_paths(&self.lane)
+            .map_err(map_fs_error)?
+            .into_iter()
+            .chain(state.changed_paths(&self.lane).map_err(map_fs_error)?)
+            .collect::<BTreeSet<_>>();
+
+        for path in paths {
+            match state.read_file(&self.lane, &path).map_err(map_fs_error)? {
+                Some(bytes) => merged
+                    .write_file(&self.lane, &path, bytes)
+                    .map_err(map_fs_error)?,
+                None => merged
+                    .delete_file(&self.lane, &path)
+                    .map_err(map_fs_error)?,
+            }
+        }
+
+        persist_repo(&self.storage_path, merged.repo())?;
         Ok(())
     }
 
@@ -583,6 +638,13 @@ fn map_fs_error(error: LaneFsError) -> FspError {
         LaneFsError::Io(error) => error.into(),
         LaneFsError::Lane(LaneError::LaneMissing(_)) => nt(STATUS_OBJECT_NAME_NOT_FOUND),
         LaneFsError::Lane(_) => nt(STATUS_INTERNAL_ERROR),
+    }
+}
+
+fn map_lane_error(error: LaneError) -> FspError {
+    match error {
+        LaneError::LaneMissing(_) => nt(STATUS_OBJECT_NAME_NOT_FOUND),
+        _ => nt(STATUS_INTERNAL_ERROR),
     }
 }
 

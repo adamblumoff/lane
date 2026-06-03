@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Range;
 
-pub mod demo;
-pub mod projection;
+pub mod cli;
 pub mod storage;
 pub mod vfs;
 

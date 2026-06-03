@@ -1,6 +1,8 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use crate::LaneRepo;
 
@@ -14,6 +16,74 @@ pub fn load_repo(path: &Path) -> io::Result<Option<LaneRepo>> {
 
 pub fn persist_repo(path: &Path, repo: &LaneRepo) -> io::Result<()> {
     persist_bytes(path, &repo.to_bytes())
+}
+
+pub struct RepoLock {
+    path: PathBuf,
+    _file: File,
+}
+
+pub fn acquire_repo_lock(storage_path: &Path) -> io::Result<RepoLock> {
+    let lock_path = storage_path.with_extension("lane.lock");
+    acquire_path_lock(&lock_path)
+}
+
+pub fn acquire_path_lock(lock_path: &Path) -> io::Result<RepoLock> {
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut last_error = None;
+    for _ in 0..200 {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(file) => {
+                return Ok(RepoLock {
+                    path: lock_path.to_path_buf(),
+                    _file: file,
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("timed out waiting for {}", lock_path.display()),
+        )
+    }))
+}
+
+pub fn try_acquire_path_lock(lock_path: &Path) -> io::Result<Option<RepoLock>> {
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(lock_path)
+    {
+        Ok(file) => Ok(Some(RepoLock {
+            path: lock_path.to_path_buf(),
+            _file: file,
+        })),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+impl Drop for RepoLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 pub fn persist_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {

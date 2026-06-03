@@ -8,26 +8,19 @@ name = "lane"
 path = "src/lib.rs"
 
 [[bin]]
-name = "lane-server"
-path = "src/main.rs"
-
-[[bin]]
-name = "lane-mount"
-path = "src/mount_main.rs"
+name = "lane"
+path = "src/cli_main.rs"
 
 [dependencies]
-axum = "0.8.7"
+clap = { version = "4.6.1", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
-tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
+serde_json = "1.0.145"
+similar = "3.1.1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61.1", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 winfsp = { version = "0.13.0", default-features = false, features = ["delayload", "system"] }
 winfsp-sys = "0.12"
-
-[dev-dependencies]
-serde_json = "1.0.145"
-tower = { version = "0.5.2", features = ["util"] }
 
 [patch.crates-io]
 winfsp-sys = { path = "vendor/winfsp-sys" }

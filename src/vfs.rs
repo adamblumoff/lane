@@ -160,6 +160,22 @@ impl<W: Worktree> LaneFs<W> {
         &self.worktree
     }
 
+    pub fn base_file(&self, path: &str) -> Result<Option<Vec<u8>>, LaneFsError> {
+        let path = normalize_repo_path(path)?;
+        self.worktree.read_file(&path).map_err(LaneFsError::Io)
+    }
+
+    pub fn changed_paths(&self, lane: &str) -> Result<Vec<FilePath>, LaneFsError> {
+        self.repo
+            .overlay_paths(lane)
+            .map_err(LaneFsError::Lane)
+            .map(|paths| paths.into_iter().map(str::to_owned).collect())
+    }
+
+    pub fn discard_lane(&mut self, lane: &str) -> bool {
+        self.repo.discard_lane(lane)
+    }
+
     pub fn into_parts(self) -> (LaneRepo, W) {
         (self.repo, self.worktree)
     }
