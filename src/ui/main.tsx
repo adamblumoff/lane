@@ -2,17 +2,16 @@ import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Alert,
-  AppShell,
   Badge,
   Button,
   createTheme,
   Divider,
   Group,
   MantineProvider,
+  MultiSelect,
   NavLink,
   ScrollArea,
   Stack,
-  Tabs,
   Text,
   TextInput,
   Textarea,
@@ -20,6 +19,12 @@ import {
 } from "@mantine/core";
 import "@mantine/core/styles.css";
 import "./styles.css";
+import {
+  deriveReviewState,
+  type LaneColumn,
+  type LaneState,
+  type ReviewLine,
+} from "./compare";
 
 const DEFAULT_LANE = "agent-a";
 const DEFAULT_PATH = "demo/example.ts";
@@ -33,38 +38,11 @@ const theme = createTheme({
     'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
 });
 
-type LaneView = {
-  id: string;
-  content: string;
-  byte_len: number;
-};
-
-type FileView = {
-  path: string;
-  base: LaneView;
-  lanes: LaneView[];
-};
-
-type LaneState = {
-  storage_path: string;
-  files: FileView[];
-};
-
-type AppView = {
-  files: FileView[];
-  lanes: LaneView[];
-  activeFile: FileView | null;
-  activeView: LaneView | null;
-  canEdit: boolean;
-  changedFiles: FileView[];
-  changedPaths: Set<string>;
-  changedCountByLane: Map<string, number>;
-};
-
 function App() {
   const [state, setState] = useState<LaneState | null>(null);
   const [activeLane, setActiveLane] = useState(DEFAULT_LANE);
   const [activePath, setActivePath] = useState(DEFAULT_PATH);
+  const [selectedLaneIds, setSelectedLaneIds] = useState([DEFAULT_LANE]);
   const [buffer, setBuffer] = useState("");
   const [newLane, setNewLane] = useState(DEFAULT_NEW_LANE);
   const [error, setError] = useState("");
@@ -74,31 +52,42 @@ function App() {
     void refresh();
   }, []);
 
-  const view = useMemo(
-    () => deriveAppView(state, activePath, activeLane, buffer),
-    [activeLane, activePath, buffer, state],
+  const review = useMemo(
+    () =>
+      deriveReviewState(
+        state,
+        activePath,
+        activeLane,
+        selectedLaneIds,
+        buffer,
+      ),
+    [activeLane, activePath, buffer, selectedLaneIds, state],
+  );
+  const activeSourceContent = useMemo(
+    () => laneSourceContent(review.activeFile, activeLane),
+    [activeLane, review.activeFile],
   );
 
   useEffect(() => {
-    if (!view.activeView) {
+    if (activeSourceContent === null) {
       return;
     }
-    syncedContent.current = view.activeView.content;
-    setBuffer(view.activeView.content);
-  }, [activeLane, view.activeView]);
+    syncedContent.current = activeSourceContent;
+    setBuffer(activeSourceContent);
+  }, [activeLane, review.activePath, activeSourceContent]);
 
   useEffect(() => {
-    if (!view.canEdit || !view.activeFile || buffer === syncedContent.current) {
+    if (!review.canEdit || !review.activeFile || buffer === syncedContent.current) {
       return;
     }
 
-    const path = view.activeFile.path;
+    const path = review.activeFile.path;
     const timeout = window.setTimeout(() => {
       void saveLane(activeLane, path, buffer);
     }, 450);
 
     return () => window.clearTimeout(timeout);
-  }, [activeLane, buffer, view.activeFile, view.canEdit]);
+  }, [activeLane, buffer, review.activeFile, review.canEdit]);
 
   async function refresh() {
     await runRequest(() => apiJson<LaneState>("/api/state"));
@@ -119,10 +108,10 @@ function App() {
   }
 
   async function saveActiveEdit() {
-    if (!view.canEdit || !view.activeFile || buffer === syncedContent.current) {
+    if (!review.canEdit || !review.activeFile || buffer === syncedContent.current) {
       return true;
     }
-    return saveLane(activeLane, view.activeFile.path, buffer);
+    return saveLane(activeLane, review.activeFile.path, buffer);
   }
 
   async function createLane() {
@@ -134,14 +123,43 @@ function App() {
     if (!(await saveActiveEdit())) {
       return;
     }
-    if (view.lanes.some((existingLane) => existingLane.id === lane)) {
+    if (review.laneIds.includes(lane)) {
+      callUpLane(lane);
       setActiveLane(lane);
       return;
     }
 
     if (await runRequest(() => apiJson<LaneState>(lanePath(lane), {}))) {
+      callUpLane(lane);
       setActiveLane(lane);
     }
+  }
+
+  async function setReviewLanes(nextLaneIds: string[]) {
+    if (!(await saveActiveEdit())) {
+      return;
+    }
+    const normalizedLaneIds = nextLaneIds.filter((laneId) =>
+      review.laneIds.includes(laneId),
+    );
+    const addedLane = normalizedLaneIds.find(
+      (laneId) => !selectedLaneIds.includes(laneId),
+    );
+    setSelectedLaneIds(normalizedLaneIds);
+    if (addedLane) {
+      setActiveLane(addedLane);
+    } else if (
+      activeLane !== "base" &&
+      !normalizedLaneIds.includes(activeLane)
+    ) {
+      setActiveLane(normalizedLaneIds[0] ?? "base");
+    }
+  }
+
+  function callUpLane(lane: string) {
+    setSelectedLaneIds((laneIds) =>
+      laneIds.includes(lane) ? laneIds : [...laneIds, lane],
+    );
   }
 
   async function promoteLane() {
@@ -157,10 +175,10 @@ function App() {
   }
 
   async function promoteFile() {
-    if (!view.activeFile) {
+    if (!review.activeFile) {
       return;
     }
-    const path = view.activeFile.path;
+    const path = review.activeFile.path;
     if (!(await saveActiveEdit())) {
       return;
     }
@@ -199,6 +217,7 @@ function App() {
     if (await runRequest(() => apiJson<LaneState>("/api/reset", {}))) {
       setActiveLane(DEFAULT_LANE);
       setActivePath(DEFAULT_PATH);
+      setSelectedLaneIds([DEFAULT_LANE]);
     }
   }
 
@@ -214,19 +233,19 @@ function App() {
     }
   }
 
-  const promoteLaneLabel = `Promote lane (${view.changedFiles.length} ${
-    view.changedFiles.length === 1 ? "file" : "files"
+  const promoteLaneLabel = `Promote lane (${review.activeLaneChangedFileCount} ${
+    review.activeLaneChangedFileCount === 1 ? "file" : "files"
   })`;
-  const activeFileChanged = Boolean(
-    view.activeFile && view.changedPaths.has(view.activeFile.path),
-  );
+  const changedLaneCount = review.columns.filter((column) => column.changed).length;
+  const changedLaneText = changedLaneLabel(changedLaneCount);
+  const laneOptions = review.laneIds.map((laneId) => ({
+    value: laneId,
+    label: laneId,
+  }));
 
   return (
-    <AppShell
-      navbar={{ width: 280, breakpoint: "sm" }}
-      padding="md"
-    >
-      <AppShell.Navbar p="md">
+    <div className="app-frame">
+      <aside className="sidebar">
         <Stack h="100%" gap="md">
           <div>
             <Title order={1} size="h2">
@@ -247,24 +266,25 @@ function App() {
 
           <Stack gap={6}>
             <Text c="dimmed" fw={700} size="xs">
-              LANES
+              FILES
             </Text>
             <ScrollArea.Autosize mah="calc(100vh - 270px)">
               <Stack gap={4}>
-                {view.lanes.map((lane) => {
-                  const changedCount = view.changedCountByLane.get(lane.id) ?? 0;
+                {review.fileSummaries.map((file) => {
                   return (
                     <NavLink
-                      active={lane.id === activeLane}
-                      description={
-                        lane.id === "base" ? `${view.files.length} files` : `${changedCount} changed`
-                      }
-                      key={lane.id}
-                      label={lane.id}
-                      onClick={() => void selectLane(lane.id)}
+                      active={file.path === review.activePath}
+                      description={changedLaneLabel(file.changedLaneCount)}
+                      key={file.path}
+                      label={file.path}
+                      onClick={() => void selectFile(file.path)}
                       rightSection={
-                        <Badge color={changedCount > 0 ? "yellow" : "gray"} size="sm" variant="light">
-                          {lane.id === "base" ? view.files.length : changedCount}
+                        <Badge
+                          color={file.changedLaneCount > 0 ? "yellow" : "gray"}
+                          size="sm"
+                          variant="light"
+                        >
+                          {file.changedLaneCount}
                         </Badge>
                       }
                       variant="light"
@@ -282,14 +302,14 @@ function App() {
               onChange={(event) => setNewLane(event.currentTarget.value)}
             />
             <Button fullWidth onClick={createLane} variant="light">
-              Add lane
+              Create lane
             </Button>
           </Stack>
         </Stack>
-      </AppShell.Navbar>
+      </aside>
 
-      <AppShell.Main>
-        <Stack gap="md" h="calc(100vh - 32px)">
+      <main className="main-pane">
+        <Stack gap="md" h="100%">
           <Group align="flex-start" justify="space-between">
             <div>
               <Group gap="xs">
@@ -297,23 +317,43 @@ function App() {
                   {activeLane}
                 </Badge>
                 <Text c="dimmed" size="sm">
-                  {view.changedFiles.length} changed files
+                  {changedLaneText}
                 </Text>
               </Group>
               <Title order={2} size="h3">
-                {view.activeFile?.path ?? "No file selected"}
+                {review.activeFile?.path ?? "No file selected"}
               </Title>
             </div>
             <Group>
+              <Group className="lane-picker-wrap" gap="xs" wrap="nowrap">
+                <MultiSelect
+                  aria-label="Lanes to compare"
+                  className="lane-picker"
+                  data={laneOptions}
+                  disabled={laneOptions.length === 0}
+                  searchable
+                  value={review.visibleLaneIds}
+                  onChange={(nextLaneIds) => void setReviewLanes(nextLaneIds)}
+                />
+                {review.laneIds.length > 2 ? (
+                  <Badge className="lane-count" color="gray" variant="light">
+                    {review.visibleLaneIds.length}/{review.laneIds.length}
+                  </Badge>
+                ) : null}
+              </Group>
               <Button onClick={reset} variant="default">
                 Reset
               </Button>
-              <Button color="green" disabled={!view.canEdit || !activeFileChanged} onClick={promoteFile}>
+              <Button
+                color="green"
+                disabled={!review.canEdit || !review.activeLaneChanged}
+                onClick={promoteFile}
+              >
                 Promote file
               </Button>
               <Button
                 color="green"
-                disabled={!view.canEdit || view.changedFiles.length === 0}
+                disabled={!review.canEdit || review.activeLaneChangedFileCount === 0}
                 onClick={promoteLane}
               >
                 {promoteLaneLabel}
@@ -321,103 +361,135 @@ function App() {
             </Group>
           </Group>
 
-          <Tabs
-            color="gray"
-            value={view.activeFile?.path ?? null}
-            onChange={(value) => {
-              if (value) {
-                void selectFile(value);
-              }
-            }}
-          >
-            <Tabs.List>
-              {view.files.map((file) => {
-                const changed = view.changedPaths.has(file.path);
-                return (
-                  <Tabs.Tab
-                    key={file.path}
-                    rightSection={
-                      <Badge color={changed ? "yellow" : "gray"} size="xs" variant="light">
-                        {changed ? "changed" : "base"}
-                      </Badge>
-                    }
-                    value={file.path}
-                  >
-                    {file.path}
-                  </Tabs.Tab>
-                );
-              })}
-            </Tabs.List>
-          </Tabs>
-
-          <Textarea
-            aria-label="Lane content"
-            className="editor"
-            disabled={!view.canEdit}
-            minRows={18}
-            resize="none"
-            spellCheck={false}
-            value={buffer}
-            onChange={(event) => setBuffer(event.currentTarget.value)}
-          />
+          <div className="review-shell">
+            <div className="review-grid">
+              {review.columns.map((column) => (
+                <LaneColumnView
+                  active={column.id === activeLane}
+                  column={column}
+                  key={column.id}
+                  onSelect={() => void selectLane(column.id)}
+                  onTextChange={setBuffer}
+                  value={column.editable ? buffer : column.content}
+                />
+              ))}
+            </div>
+          </div>
         </Stack>
-      </AppShell.Main>
-    </AppShell>
+      </main>
+    </div>
   );
 }
 
-function deriveAppView(
-  state: LaneState | null,
-  activePath: string,
-  activeLane: string,
-  buffer: string,
-): AppView {
-  const files = state?.files ?? [];
-  const activeFile = files.find((file) => file.path === activePath) ?? files[0] ?? null;
-  const laneView =
-    activeFile && activeLane === "base"
-      ? activeFile.base
-      : (activeFile?.lanes.find((lane) => lane.id === activeLane) ?? null);
-  const activeView = laneView ?? activeFile?.base ?? null;
-  const canEdit = Boolean(activeFile && activeLane !== "base" && laneView);
-  const activeDraftPath = canEdit ? activeFile?.path : null;
+type LaneColumnViewProps = {
+  active: boolean;
+  column: LaneColumn;
+  value: string;
+  onSelect: () => void;
+  onTextChange: (value: string) => void;
+};
 
-  const changedFiles =
-    activeLane === "base"
-      ? []
-      : files.filter((file) => {
-          const content =
-            file.path === activeDraftPath
-              ? buffer
-              : (file.lanes.find((lane) => lane.id === activeLane)?.content ?? file.base.content);
-          return content !== file.base.content;
-        });
-  const changedPaths = new Set(changedFiles.map((file) => file.path));
-  const changedCountByLane = new Map<string, number>([["base", 0]]);
+function LaneColumnView({
+  active,
+  column,
+  value,
+  onSelect,
+  onTextChange,
+}: LaneColumnViewProps) {
+  const className = [
+    "lane-column",
+    active ? "lane-column-active" : "",
+    column.changed ? "lane-column-changed" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
-  for (const file of files) {
-    for (const lane of file.lanes) {
-      const content = file.path === activeDraftPath && lane.id === activeLane ? buffer : lane.content;
-      if (content !== file.base.content) {
-        changedCountByLane.set(lane.id, (changedCountByLane.get(lane.id) ?? 0) + 1);
-      }
-    }
-  }
+  return (
+    <section className={className}>
+      <div className="lane-column-header">
+        <button className="lane-column-select" onClick={onSelect} type="button">
+          <Group justify="space-between" gap="sm" wrap="nowrap">
+            <Text fw={700} truncate>
+              {column.id}
+            </Text>
+            <Badge
+              color={column.changed ? "yellow" : "gray"}
+              size="sm"
+              variant={column.changed ? "light" : "outline"}
+            >
+              {column.changed ? "changed" : "base"}
+            </Badge>
+          </Group>
+          <Text c="dimmed" size="xs">
+            {column.byteLen} bytes
+          </Text>
+        </button>
+      </div>
 
-  return {
-    files,
-    lanes: activeFile ? [activeFile.base, ...activeFile.lanes] : [],
-    activeFile,
-    activeView,
-    canEdit,
-    changedFiles,
-    changedPaths,
-    changedCountByLane,
-  };
+      {column.editable ? (
+        <Textarea
+          aria-label={`${column.id} lane content`}
+          className="review-editor"
+          minRows={18}
+          resize="none"
+          spellCheck={false}
+          value={value}
+          onChange={(event) => onTextChange(event.currentTarget.value)}
+        />
+      ) : (
+        <CodePanel lines={column.lines} onSelect={onSelect} />
+      )}
+    </section>
+  );
+}
+
+function CodePanel({
+  lines,
+  onSelect,
+}: {
+  lines: ReviewLine[];
+  onSelect: () => void;
+}) {
+  return (
+    <pre className="code-panel" onClick={onSelect}>
+      {lines.map((line) => (
+        <span
+          className={[
+            "code-line",
+            line.changed ? "code-line-changed" : "",
+            line.missing ? "code-line-missing" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          key={line.number}
+        >
+          <span className="code-line-number">{line.number}</span>
+          <span className="code-line-text">{line.text || " "}</span>
+        </span>
+      ))}
+    </pre>
+  );
 }
 
 function lanePath(lane: string, suffix = "") {
   return `/api/lanes/${encodeURIComponent(lane)}${suffix}`;
+}
+
+function changedLaneLabel(count: number) {
+  return `${count} changed ${count === 1 ? "lane" : "lanes"}`;
+}
+
+function laneSourceContent(
+  file: LaneState["files"][number] | null,
+  lane: string,
+) {
+  if (!file) {
+    return null;
+  }
+  if (lane === "base") {
+    return file.base.content;
+  }
+  return file.lanes.find((view) => view.id === lane)?.content ?? file.base.content;
 }
 
 async function apiJson<T>(path: string, body?: unknown): Promise<T> {
