@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lane Orchestrate"
+  short_description: "Run parallel Lane-backed agent attempts and promote the winner."
+  default_prompt: "Use Lane to try multiple isolated implementation variants, compare the results, and promote the best one."

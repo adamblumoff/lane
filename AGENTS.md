@@ -1,4 +1,10 @@
-Every change should be destructive, no legacy or backwards compatible bullshit, this application has no users or releases, treat it as such. If you add backwards compatibility, I will go apeshit on your dumbass. 
+The goal of this application is to allow agents to work on the same file at the same time in different "lanes" without copying over every file to a new directory. 
+
+This is intended to replace the git worktree flow that is very annoying and cumbersome. 
+
+This is intended to go lower level into the "file" level. 
+
+This product is still in pre-alpha. Every change should be destructive, no legacy or backwards compatible bullshit, this application has no users or releases, treat it as such. If you add backwards compatibility, I will go apeshit on your dumbass. 
 
 Don't just patch stuff all willy nilly, take a long-term maintainable approach to fixes.
 

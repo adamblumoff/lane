@@ -1,20 +1,30 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitCode, ExitStatus};
-use std::thread;
+use std::process::{Command as ProcessCommand, ExitCode};
 
 use clap::{Parser, Subcommand};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use similar::TextDiff;
 
-use crate::storage::{RepoLock, acquire_repo_lock, load_repo, persist_repo, try_acquire_path_lock};
+use crate::storage::{
+    RepoLock, acquire_repo_lock, load_repo, persist_bytes, persist_repo, try_acquire_path_lock,
+};
 use crate::vfs::{FileWorktree, LaneFs, LaneFsError};
 use crate::{FilePath, LaneRepo};
 
 const STORAGE_PATH: &str = ".lane/repo.lane";
+const EXEC_GUARD_IGNORED_DIRS: &[&str] = &[
+    ".git",
+    ".lane",
+    "coverage",
+    "dist",
+    "node_modules",
+    "target",
+];
 
 type CliResult<T> = Result<T, CliError>;
 
@@ -37,17 +47,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    #[command(about = "Run a command inside an isolated lane view")]
+    #[command(about = "Run a command inside an isolated lane view and print a JSON result")]
     Exec {
         lane: String,
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
-    },
-    #[command(about = "Run multiple lane commands in parallel from a JSON plan")]
-    RunPlan {
-        plan: PathBuf,
-        #[arg(long)]
-        json: bool,
     },
     #[command(about = "List files changed in a lane")]
     Changes {
@@ -89,9 +93,6 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
             create(&repo_root, &lane, json).map(|()| ExitCode::SUCCESS)
         }
         Command::Exec { lane, command } => exec(&repo_root, &lane, command),
-        Command::RunPlan { plan, json } => {
-            run_plan(&repo_root, &plan, json).map(|()| ExitCode::SUCCESS)
-        }
         Command::Changes { lane, json } => {
             changes(&repo_root, &lane, json).map(|()| ExitCode::SUCCESS)
         }
@@ -133,11 +134,13 @@ fn create(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
 
 #[cfg(windows)]
 fn exec(repo_root: &Path, lane: &str, command: Vec<String>) -> CliResult<ExitCode> {
-    let status = run_lane_status(repo_root, lane, &command)?;
-    if status.success() {
-        Ok(ExitCode::SUCCESS)
+    let output = run_lane(repo_root, lane, &command)?;
+    let failed = output.exit_code != Some(0) || output.escaped;
+    print_json(&output)?;
+    if failed {
+        Ok(ExitCode::FAILURE)
     } else {
-        Err(CliError::ChildFailed(status))
+        Ok(ExitCode::SUCCESS)
     }
 }
 
@@ -149,32 +152,37 @@ fn exec(_repo_root: &Path, _lane: &str, _command: Vec<String>) -> CliResult<Exit
 }
 
 #[cfg(windows)]
-fn run_lane_status(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExitStatus> {
+fn run_lane(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExecOutput> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| CliError::Message("missing command for lane exec".to_owned()))?;
+    let before = BaseSnapshot::capture(repo_root)?;
     let mounted = mount_exec_lane(repo_root, lane)?;
     let view_root = mounted.view_root();
-    Ok(command_with_lane_env(program, args, repo_root, lane, &view_root).status()?)
-}
-
-#[cfg(windows)]
-fn run_lane_output(
-    repo_root: &Path,
-    lane: &str,
-    command: &[String],
-) -> CliResult<LaneCommandOutput> {
-    let (program, args) = command
-        .split_first()
-        .ok_or_else(|| CliError::Message("missing command for lane exec".to_owned()))?;
-    let mounted = mount_exec_lane(repo_root, lane)?;
-    let view_root = mounted.view_root();
-    let output = command_with_lane_env(program, args, repo_root, lane, &view_root).output()?;
-    Ok(LaneCommandOutput {
+    let output = command_with_lane_env(program, args, lane, &view_root).output()?;
+    let changed = before.changed_paths(repo_root)?;
+    let (rolled_back, rollback_error) = if changed.is_empty() {
+        (false, None)
+    } else {
+        match before.rollback(repo_root, &changed) {
+            Ok(()) => (true, None),
+            Err(error) => (false, Some(error.to_string())),
+        }
+    };
+    let (_, fs) = open_lane_fs(repo_root)?;
+    Ok(ExecOutput {
         lane: lane.to_owned(),
-        status: output.status,
-        stdout: output.stdout,
-        stderr: output.stderr,
+        repo_root: path_label(repo_root),
+        storage_path: path_label(storage_path(repo_root)),
+        view_root: path_label(&view_root),
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        escaped: !changed.is_empty(),
+        rolled_back,
+        rollback_error,
+        escaped_paths: changed,
+        changes: collect_changes(&fs, lane)?,
     })
 }
 
@@ -182,7 +190,6 @@ fn run_lane_output(
 fn command_with_lane_env<'a>(
     program: &'a str,
     args: &'a [String],
-    repo_root: &'a Path,
     lane: &'a str,
     view_root: &'a Path,
 ) -> ProcessCommand {
@@ -191,103 +198,10 @@ fn command_with_lane_env<'a>(
         .args(args)
         .current_dir(view_root)
         .env("LANE_ID", lane)
-        .env("LANE_REPO_ROOT", repo_root)
+        .env("LANE_REPO_ROOT", view_root)
         .env("LANE_VIEW_ROOT", view_root)
-        .env("LANE_STORAGE_PATH", storage_path(repo_root));
+        .env_remove("LANE_STORAGE_PATH");
     command
-}
-
-#[cfg(not(windows))]
-fn run_lane_output(
-    _repo_root: &Path,
-    _lane: &str,
-    _command: &[String],
-) -> CliResult<LaneCommandOutput> {
-    Err(CliError::Message(
-        "lane run-plan requires Windows and WinFsp".to_owned(),
-    ))
-}
-
-struct LaneCommandOutput {
-    lane: String,
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-fn run_plan(repo_root: &Path, plan_path: &Path, json: bool) -> CliResult<()> {
-    let plan_bytes = fs::read(plan_path)?;
-    let plan: RunPlanInput = serde_json::from_slice(&plan_bytes)?;
-    if plan.lanes.is_empty() {
-        return Err(CliError::Message("run plan must include lanes".to_owned()));
-    }
-
-    let handles = plan
-        .lanes
-        .into_iter()
-        .map(|lane| {
-            let repo_root = repo_root.to_path_buf();
-            thread::spawn(move || run_plan_lane(&repo_root, lane))
-        })
-        .collect::<Vec<_>>();
-
-    let mut lanes = Vec::new();
-    for handle in handles {
-        lanes.push(
-            handle
-                .join()
-                .map_err(|_| CliError::Message("run-plan worker panicked".to_owned()))??,
-        );
-    }
-    lanes.sort_by(|left, right| left.id.cmp(&right.id));
-    let failed = lanes.iter().any(|lane| lane.exit_code != Some(0));
-    let output = RunPlanOutput {
-        repo_root: path_label(repo_root),
-        storage_path: path_label(storage_path(repo_root)),
-        failed,
-        lanes,
-    };
-
-    if json {
-        print_json(&output)?;
-    } else {
-        for lane in &output.lanes {
-            let status = lane
-                .exit_code
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "terminated".to_owned());
-            println!(
-                "{}\texit={}\t{} changes",
-                lane.id,
-                status,
-                lane.changes.len()
-            );
-        }
-    }
-
-    if failed {
-        Err(CliError::RunPlanFailed)
-    } else {
-        Ok(())
-    }
-}
-
-fn run_plan_lane(repo_root: &Path, lane: RunPlanLaneInput) -> CliResult<RunPlanLaneOutput> {
-    if lane.command.is_empty() {
-        return Err(CliError::Message(format!(
-            "lane {} has an empty command",
-            lane.id
-        )));
-    }
-    let run = run_lane_output(repo_root, &lane.id, &lane.command)?;
-    let (_, fs) = open_lane_fs(repo_root)?;
-    Ok(RunPlanLaneOutput {
-        id: lane.id,
-        exit_code: run.status.code(),
-        stdout: String::from_utf8_lossy(&run.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&run.stderr).to_string(),
-        changes: collect_changes(&fs, &run.lane)?,
-    })
 }
 
 fn changes(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
@@ -563,6 +477,159 @@ fn mount_exec_lane(repo_root: &Path, lane: &str) -> CliResult<ExecMount> {
     }
 }
 
+#[cfg(windows)]
+#[derive(Debug)]
+struct BaseSnapshot {
+    files: BTreeMap<FilePath, SnapshotFile>,
+    dirs: BTreeSet<FilePath>,
+}
+
+#[cfg(windows)]
+impl BaseSnapshot {
+    fn capture(repo_root: &Path) -> io::Result<Self> {
+        let mut files = BTreeMap::new();
+        let mut dirs = BTreeSet::new();
+        collect_base_snapshot(repo_root, repo_root, &mut files, &mut dirs)?;
+        Ok(Self { files, dirs })
+    }
+
+    fn changed_paths(&self, repo_root: &Path) -> io::Result<Vec<FilePath>> {
+        let after = Self::capture(repo_root)?;
+        let mut paths = BTreeSet::new();
+        paths.extend(self.files.keys().cloned());
+        paths.extend(after.files.keys().cloned());
+        paths.extend(self.dirs.iter().cloned());
+        paths.extend(after.dirs.iter().cloned());
+        Ok(paths
+            .into_iter()
+            .filter(|path| {
+                self.files.get(path) != after.files.get(path)
+                    || self.dirs.contains(path) != after.dirs.contains(path)
+            })
+            .collect())
+    }
+
+    fn rollback(&self, repo_root: &Path, paths: &[FilePath]) -> io::Result<()> {
+        let after = Self::capture(repo_root)?;
+        for path in paths {
+            if self.files.get(path) == after.files.get(path) {
+                continue;
+            }
+            match self.files.get(path) {
+                Some(file) => restore_file(&repo_root.join(path), &file.bytes)?,
+                None => remove_created_file(&repo_root.join(path))?,
+            }
+        }
+        for path in paths.iter().filter(|path| self.dirs.contains(*path)) {
+            if !repo_root.join(path).is_dir() {
+                fs::create_dir_all(repo_root.join(path))?;
+            }
+        }
+        let mut created_dirs = paths
+            .iter()
+            .filter(|path| {
+                !self.dirs.contains(*path)
+                    && after.dirs.contains(*path)
+                    && !self.files.contains_key(*path)
+            })
+            .collect::<Vec<_>>();
+        created_dirs.sort_by_key(|path| std::cmp::Reverse(path_depth(path)));
+        for path in created_dirs {
+            remove_created_dir(repo_root, path)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotFile {
+    bytes: Vec<u8>,
+}
+
+#[cfg(windows)]
+fn collect_base_snapshot(
+    repo_root: &Path,
+    directory: &Path,
+    files: &mut BTreeMap<FilePath, SnapshotFile>,
+    dirs: &mut BTreeSet<FilePath>,
+) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(repo_root)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if should_skip_exec_guard_dir(relative) {
+                continue;
+            }
+            let label = relative.to_string_lossy().replace('\\', "/");
+            if !label.is_empty() {
+                dirs.insert(label);
+            }
+            collect_base_snapshot(repo_root, &path, files, dirs)?;
+        } else if file_type.is_file() {
+            let Some(file) = snapshot_file(&path)? else {
+                continue;
+            };
+            files.insert(relative.to_string_lossy().replace('\\', "/"), file);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn should_skip_exec_guard_dir(relative: &Path) -> bool {
+    relative.components().next().is_some_and(|component| {
+        let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        EXEC_GUARD_IGNORED_DIRS.contains(&name.as_str())
+    })
+}
+
+#[cfg(windows)]
+fn snapshot_file(path: &Path) -> io::Result<Option<SnapshotFile>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(SnapshotFile { bytes })),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn restore_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    }
+    persist_bytes(path, bytes)
+}
+
+#[cfg(windows)]
+fn remove_created_file(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn remove_created_dir(repo_root: &Path, path: &str) -> io::Result<()> {
+    let directory = repo_root.join(path);
+    match fs::remove_dir(directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn path_depth(path: &str) -> usize {
+    path.split('/').count()
+}
+
 fn path_label(path: impl AsRef<Path>) -> String {
     path.as_ref().display().to_string()
 }
@@ -580,31 +647,19 @@ struct CreateOutput<'a> {
     storage_path: String,
 }
 
-#[derive(Deserialize)]
-struct RunPlanInput {
-    lanes: Vec<RunPlanLaneInput>,
-}
-
-#[derive(Deserialize)]
-struct RunPlanLaneInput {
-    id: String,
-    command: Vec<String>,
-}
-
 #[derive(Serialize)]
-struct RunPlanOutput {
+struct ExecOutput {
+    lane: String,
     repo_root: String,
     storage_path: String,
-    failed: bool,
-    lanes: Vec<RunPlanLaneOutput>,
-}
-
-#[derive(Serialize)]
-struct RunPlanLaneOutput {
-    id: String,
+    view_root: String,
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
+    escaped: bool,
+    rolled_back: bool,
+    rollback_error: Option<String>,
+    escaped_paths: Vec<FilePath>,
     changes: Vec<ChangeOutput>,
 }
 
@@ -671,8 +726,6 @@ pub enum CliError {
     Json(serde_json::Error),
     #[cfg(windows)]
     WinFsp(winfsp::FspError),
-    ChildFailed(ExitStatus),
-    RunPlanFailed,
     Message(String),
 }
 
@@ -685,8 +738,6 @@ impl fmt::Display for CliError {
             Self::Json(error) => write!(f, "{error}"),
             #[cfg(windows)]
             Self::WinFsp(error) => write!(f, "{}", format_winfsp_error(error)),
-            Self::ChildFailed(status) => write!(f, "lane exec command failed with {status}"),
-            Self::RunPlanFailed => write!(f, "one or more run-plan lanes failed"),
             Self::Message(message) => write!(f, "{message}"),
         }
     }

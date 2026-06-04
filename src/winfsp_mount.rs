@@ -158,13 +158,13 @@ impl LaneWinFsp {
             .list_dir(&self.lane, path)
             .map_err(map_fs_error)?;
         for dir in self.created_dirs.borrow().iter() {
-            if let Some(name) = direct_child(path, dir) {
-                if !entries.iter().any(|entry| entry.name == name) {
-                    entries.push(DirEntry {
-                        name,
-                        kind: DirEntryKind::Directory,
-                    });
-                }
+            if let Some(name) = direct_child(path, dir)
+                && !entries.iter().any(|entry| entry.name == name)
+            {
+                entries.push(DirEntry {
+                    name,
+                    kind: DirEntryKind::Directory,
+                });
             }
         }
         entries.sort_by(|left, right| left.name.cmp(&right.name));

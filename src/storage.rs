@@ -38,7 +38,7 @@ pub fn acquire_path_lock(lock_path: &Path) -> io::Result<RepoLock> {
         match OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&lock_path)
+            .open(lock_path)
         {
             Ok(file) => {
                 return Ok(RepoLock {
