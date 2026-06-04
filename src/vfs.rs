@@ -89,21 +89,35 @@ impl FileWorktree {
 
 impl Worktree for FileWorktree {
     fn read_file(&self, path: &str) -> io::Result<Option<Vec<u8>>> {
-        match fs::read(self.file_path(path)) {
+        let file_path = self.file_path(path);
+        if file_path.is_dir() {
+            return Ok(None);
+        }
+        match fs::read(&file_path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::IsADirectory => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied && file_path.is_dir() => {
+                Ok(None)
+            }
             Err(error) => Err(error),
         }
     }
 
     fn write_file(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        persist_bytes(&self.file_path(path), bytes)
+        let file_path = self.file_path(path);
+        if file_path.is_dir() {
+            fs::remove_dir_all(&file_path)?;
+        }
+        persist_bytes(&file_path, bytes)
     }
 
     fn remove_file(&mut self, path: &str) -> io::Result<()> {
         match fs::remove_file(self.file_path(path)) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(()),
             Err(error) => Err(error),
         }
     }

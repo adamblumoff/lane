@@ -1,30 +1,21 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
+use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use similar::TextDiff;
 
-use crate::storage::{
-    RepoLock, acquire_repo_lock, load_repo, persist_bytes, persist_repo, try_acquire_path_lock,
-};
+use crate::materialize::{MaterializeError, MaterializeTimings, run_materialized};
+use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
 use crate::vfs::{FileWorktree, LaneFs, LaneFsError};
 use crate::{FilePath, LaneRepo};
 
 const STORAGE_PATH: &str = ".lane/repo.lane";
-const EXEC_GUARD_IGNORED_DIRS: &[&str] = &[
-    ".git",
-    ".lane",
-    "coverage",
-    "dist",
-    "node_modules",
-    "target",
-];
 
 type CliResult<T> = Result<T, CliError>;
 
@@ -47,7 +38,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    #[command(about = "Run a command inside an isolated lane view and print a JSON result")]
+    #[command(about = "Run a command in a lane through the real repo and print a JSON result")]
     Exec {
         lane: String,
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
@@ -132,10 +123,11 @@ fn create(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
     Ok(())
 }
 
-#[cfg(windows)]
 fn exec(repo_root: &Path, lane: &str, command: Vec<String>) -> CliResult<ExitCode> {
     let output = run_lane(repo_root, lane, &command)?;
-    let failed = output.exit_code != Some(0) || output.escaped;
+    let failed = output.exit_code != Some(0)
+        || output.worker_error.is_some()
+        || output.restore_error.is_some();
     print_json(&output)?;
     if failed {
         Ok(ExitCode::FAILURE)
@@ -144,67 +136,92 @@ fn exec(repo_root: &Path, lane: &str, command: Vec<String>) -> CliResult<ExitCod
     }
 }
 
-#[cfg(not(windows))]
-fn exec(_repo_root: &Path, _lane: &str, _command: Vec<String>) -> CliResult<ExitCode> {
-    Err(CliError::Message(
-        "lane exec requires Windows and WinFsp".to_owned(),
-    ))
-}
-
-#[cfg(windows)]
 fn run_lane(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExecOutput> {
+    let total_start = Instant::now();
     let (program, args) = command
         .split_first()
         .ok_or_else(|| CliError::Message("missing command for lane exec".to_owned()))?;
-    let before = BaseSnapshot::capture(repo_root)?;
-    let mounted = mount_exec_lane(repo_root, lane)?;
-    let view_root = mounted.view_root();
-    let output = command_with_lane_env(program, args, lane, &view_root).output()?;
-    let changed = before.changed_paths(repo_root)?;
-    let (rolled_back, rollback_error) = if changed.is_empty() {
-        (false, None)
-    } else {
-        match before.rollback(repo_root, &changed) {
-            Ok(()) => (true, None),
-            Err(error) => (false, Some(error.to_string())),
-        }
+    let storage_path = storage_path(repo_root);
+    let lock_wait_start = Instant::now();
+    let _lock = acquire_repo_lock(&storage_path)?;
+    let lock_wait_ms = elapsed_ms(lock_wait_start);
+    let lock_held_start = Instant::now();
+    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
+    fs.create_lane(lane)?;
+
+    let materialized = run_materialized(repo_root, &mut fs, lane, || {
+        run_raw_worker(program, args, lane, repo_root)
+    })?;
+
+    if materialized.restore_error.is_none() {
+        persist_repo(&storage_path, fs.repo())?;
+    }
+    let changes = collect_changes(&fs, lane)?;
+    let timings = ExecTimings {
+        total_ms: elapsed_ms(total_start),
+        lock_wait_ms,
+        lock_held_ms: elapsed_ms(lock_held_start),
+        materialize: materialized.timings,
     };
-    let (_, fs) = open_lane_fs(repo_root)?;
+    let worker = materialized.output;
+
     Ok(ExecOutput {
         lane: lane.to_owned(),
         repo_root: path_label(repo_root),
-        storage_path: path_label(storage_path(repo_root)),
-        view_root: path_label(&view_root),
-        exit_code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        escaped: !changed.is_empty(),
-        rolled_back,
-        rollback_error,
-        escaped_paths: changed,
-        changes: collect_changes(&fs, lane)?,
+        storage_path: path_label(&storage_path),
+        workspace_root: path_label(repo_root),
+        mode: "raw_repo",
+        projected_paths: materialized.projected_paths,
+        exit_code: worker.exit_code,
+        stdout: worker.stdout,
+        stderr: worker.stderr,
+        worker_error: worker.worker_error,
+        restored: materialized.restored,
+        restore_error: materialized.restore_error,
+        changed_paths: materialized.changed_paths,
+        timings,
+        changes,
     })
 }
 
-#[cfg(windows)]
+fn run_raw_worker(program: &str, args: &[String], lane: &str, repo_root: &Path) -> WorkerOutput {
+    match command_with_lane_env(program, args, lane, repo_root).output() {
+        Ok(output) => WorkerOutput {
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            worker_error: None,
+        },
+        Err(error) => WorkerOutput {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            worker_error: Some(error.to_string()),
+        },
+    }
+}
+
 fn command_with_lane_env<'a>(
     program: &'a str,
     args: &'a [String],
     lane: &'a str,
-    view_root: &'a Path,
+    repo_root: &'a Path,
 ) -> ProcessCommand {
+    let repo_root_label = path_label(repo_root);
     let mut command = ProcessCommand::new(program);
     command
         .args(args)
-        .current_dir(view_root)
+        .current_dir(repo_root)
         .env("LANE_ID", lane)
-        .env("LANE_REPO_ROOT", view_root)
-        .env("LANE_VIEW_ROOT", view_root)
+        .env("LANE_REPO_ROOT", &repo_root_label)
+        .env("LANE_VIEW_ROOT", &repo_root_label)
+        .env("LANE_EXEC_MODE", "raw_repo")
         .env_remove("LANE_STORAGE_PATH");
     command
 }
 
 fn changes(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
+    let _lock = acquire_repo_lock(&storage_path(repo_root))?;
     let (_, fs) = open_lane_fs(repo_root)?;
     let output = ChangesOutput {
         lane,
@@ -226,6 +243,7 @@ fn changes(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
 }
 
 fn diff(repo_root: &Path, lane: &str, paths: Vec<String>) -> CliResult<()> {
+    let _lock = acquire_repo_lock(&storage_path(repo_root))?;
     let (_, fs) = open_lane_fs(repo_root)?;
     let changes = if paths.is_empty() {
         collect_changes(&fs, lane)?
@@ -423,220 +441,34 @@ fn storage_path(repo_root: &Path) -> PathBuf {
     repo_root.join(STORAGE_PATH)
 }
 
-#[cfg(windows)]
-struct ExecMount {
-    mounted: crate::winfsp_mount::MountedLane,
-    _drive_lock: Option<RepoLock>,
-}
-
-#[cfg(windows)]
-impl ExecMount {
-    fn view_root(&self) -> PathBuf {
-        self.mounted.view_root()
-    }
-}
-
-#[cfg(windows)]
-fn mount_exec_lane(repo_root: &Path, lane: &str) -> CliResult<ExecMount> {
-    use crate::winfsp_mount::{MountOptions, mount_hidden};
-
-    let mut last_error = None;
-    for letter in (b'D'..=b'Z').rev() {
-        let drive_root = format!("{}:\\", letter as char);
-        if Path::new(&drive_root).exists() {
-            continue;
-        }
-        let lock_path = std::env::temp_dir().join(format!("lane-drive-{}.lock", letter as char));
-        let Some(drive_lock) = try_acquire_path_lock(&lock_path)? else {
-            continue;
-        };
-        let mount_path = PathBuf::from(format!("{}:", letter as char));
-        match mount_hidden(MountOptions {
-            repo_root: repo_root.to_path_buf(),
-            lane: lane.to_owned(),
-            mount_path,
-        }) {
-            Ok(mounted) => {
-                return Ok(ExecMount {
-                    mounted,
-                    _drive_lock: Some(drive_lock),
-                });
-            }
-            Err(error) => {
-                last_error = Some(error);
-            }
-        }
-    }
-
-    if let Some(error) = last_error {
-        Err(error.into())
-    } else {
-        Err(CliError::Message(
-            "no free drive letter available for lane exec".to_owned(),
-        ))
-    }
-}
-
-#[cfg(windows)]
-#[derive(Debug)]
-struct BaseSnapshot {
-    files: BTreeMap<FilePath, SnapshotFile>,
-    dirs: BTreeSet<FilePath>,
-}
-
-#[cfg(windows)]
-impl BaseSnapshot {
-    fn capture(repo_root: &Path) -> io::Result<Self> {
-        let mut files = BTreeMap::new();
-        let mut dirs = BTreeSet::new();
-        collect_base_snapshot(repo_root, repo_root, &mut files, &mut dirs)?;
-        Ok(Self { files, dirs })
-    }
-
-    fn changed_paths(&self, repo_root: &Path) -> io::Result<Vec<FilePath>> {
-        let after = Self::capture(repo_root)?;
-        let mut paths = BTreeSet::new();
-        paths.extend(self.files.keys().cloned());
-        paths.extend(after.files.keys().cloned());
-        paths.extend(self.dirs.iter().cloned());
-        paths.extend(after.dirs.iter().cloned());
-        Ok(paths
-            .into_iter()
-            .filter(|path| {
-                self.files.get(path) != after.files.get(path)
-                    || self.dirs.contains(path) != after.dirs.contains(path)
-            })
-            .collect())
-    }
-
-    fn rollback(&self, repo_root: &Path, paths: &[FilePath]) -> io::Result<()> {
-        let after = Self::capture(repo_root)?;
-        for path in paths {
-            if self.files.get(path) == after.files.get(path) {
-                continue;
-            }
-            match self.files.get(path) {
-                Some(file) => restore_file(&repo_root.join(path), &file.bytes)?,
-                None => remove_created_file(&repo_root.join(path))?,
-            }
-        }
-        for path in paths.iter().filter(|path| self.dirs.contains(*path)) {
-            if !repo_root.join(path).is_dir() {
-                fs::create_dir_all(repo_root.join(path))?;
-            }
-        }
-        let mut created_dirs = paths
-            .iter()
-            .filter(|path| {
-                !self.dirs.contains(*path)
-                    && after.dirs.contains(*path)
-                    && !self.files.contains_key(*path)
-            })
-            .collect::<Vec<_>>();
-        created_dirs.sort_by_key(|path| std::cmp::Reverse(path_depth(path)));
-        for path in created_dirs {
-            remove_created_dir(repo_root, path)?;
-        }
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SnapshotFile {
-    bytes: Vec<u8>,
-}
-
-#[cfg(windows)]
-fn collect_base_snapshot(
-    repo_root: &Path,
-    directory: &Path,
-    files: &mut BTreeMap<FilePath, SnapshotFile>,
-    dirs: &mut BTreeSet<FilePath>,
-) -> io::Result<()> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let path = entry.path();
-        let relative = path
-            .strip_prefix(repo_root)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            if should_skip_exec_guard_dir(relative) {
-                continue;
-            }
-            let label = relative.to_string_lossy().replace('\\', "/");
-            if !label.is_empty() {
-                dirs.insert(label);
-            }
-            collect_base_snapshot(repo_root, &path, files, dirs)?;
-        } else if file_type.is_file() {
-            let Some(file) = snapshot_file(&path)? else {
-                continue;
-            };
-            files.insert(relative.to_string_lossy().replace('\\', "/"), file);
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn should_skip_exec_guard_dir(relative: &Path) -> bool {
-    relative.components().next().is_some_and(|component| {
-        let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        EXEC_GUARD_IGNORED_DIRS.contains(&name.as_str())
-    })
-}
-
-#[cfg(windows)]
-fn snapshot_file(path: &Path) -> io::Result<Option<SnapshotFile>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(SnapshotFile { bytes })),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(windows)]
-fn restore_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if path.is_dir() {
-        fs::remove_dir_all(path)?;
-    }
-    persist_bytes(path, bytes)
-}
-
-#[cfg(windows)]
-fn remove_created_file(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(windows)]
-fn remove_created_dir(repo_root: &Path, path: &str) -> io::Result<()> {
-    let directory = repo_root.join(path);
-    match fs::remove_dir(directory) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(windows)]
-fn path_depth(path: &str) -> usize {
-    path.split('/').count()
-}
-
 fn path_label(path: impl AsRef<Path>) -> String {
-    path.as_ref().display().to_string()
+    display_path(path.as_ref())
+}
+
+#[cfg(windows)]
+fn display_path(path: &Path) -> String {
+    let label = path.display().to_string();
+    if let Some(path) = label.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{path}")
+    } else if let Some(path) = label.strip_prefix(r"\\?\") {
+        path.to_owned()
+    } else {
+        label
+    }
+}
+
+#[cfg(not(windows))]
+fn display_path(path: &Path) -> String {
+    path.display().to_string()
 }
 
 fn print_json(output: &impl Serialize) -> CliResult<()> {
     println!("{}", serde_json::to_string(output)?);
     Ok(())
+}
+
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
 #[derive(Serialize)]
@@ -647,20 +479,38 @@ struct CreateOutput<'a> {
     storage_path: String,
 }
 
+struct WorkerOutput {
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    worker_error: Option<String>,
+}
+
 #[derive(Serialize)]
 struct ExecOutput {
     lane: String,
     repo_root: String,
     storage_path: String,
-    view_root: String,
+    workspace_root: String,
+    mode: &'static str,
+    projected_paths: Vec<FilePath>,
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
-    escaped: bool,
-    rolled_back: bool,
-    rollback_error: Option<String>,
-    escaped_paths: Vec<FilePath>,
+    worker_error: Option<String>,
+    restored: bool,
+    restore_error: Option<String>,
+    changed_paths: Vec<FilePath>,
+    timings: ExecTimings,
     changes: Vec<ChangeOutput>,
+}
+
+#[derive(Serialize)]
+struct ExecTimings {
+    total_ms: u64,
+    lock_wait_ms: u64,
+    lock_held_ms: u64,
+    materialize: MaterializeTimings,
 }
 
 #[derive(Serialize)]
@@ -723,9 +573,8 @@ pub enum CliError {
     Io(io::Error),
     LaneFs(LaneFsError),
     Lane(crate::LaneError),
+    Materialize(String),
     Json(serde_json::Error),
-    #[cfg(windows)]
-    WinFsp(winfsp::FspError),
     Message(String),
 }
 
@@ -735,9 +584,8 @@ impl fmt::Display for CliError {
             Self::Io(error) => write!(f, "{error}"),
             Self::LaneFs(error) => write!(f, "{error}"),
             Self::Lane(error) => write!(f, "{error:?}"),
+            Self::Materialize(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
-            #[cfg(windows)]
-            Self::WinFsp(error) => write!(f, "{}", format_winfsp_error(error)),
             Self::Message(message) => write!(f, "{message}"),
         }
     }
@@ -763,39 +611,14 @@ impl From<crate::LaneError> for CliError {
     }
 }
 
+impl From<MaterializeError> for CliError {
+    fn from(error: MaterializeError) -> Self {
+        Self::Materialize(error.to_string())
+    }
+}
+
 impl From<serde_json::Error> for CliError {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error)
-    }
-}
-
-#[cfg(windows)]
-impl From<winfsp::FspError> for CliError {
-    fn from(error: winfsp::FspError) -> Self {
-        Self::WinFsp(error)
-    }
-}
-
-#[cfg(windows)]
-fn format_winfsp_error(error: &winfsp::FspError) -> String {
-    match error {
-        winfsp::FspError::HRESULT(code) => {
-            format!(
-                "HRESULT 0x{:08X}; NTSTATUS 0x{:08X}",
-                *code as u32,
-                error.to_ntstatus() as u32
-            )
-        }
-        winfsp::FspError::WIN32(code) => {
-            format!(
-                "WIN32 0x{code:08X}; NTSTATUS 0x{:08X}",
-                error.to_ntstatus() as u32
-            )
-        }
-        winfsp::FspError::NTSTATUS(code) => format!("NTSTATUS 0x{:08X}", *code as u32),
-        winfsp::FspError::IO(kind) => {
-            format!("IO {kind:?}; NTSTATUS 0x{:08X}", error.to_ntstatus() as u32)
-        }
-        _ => format!("{error}; NTSTATUS 0x{:08X}", error.to_ntstatus() as u32),
     }
 }

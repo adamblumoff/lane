@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 
 #[test]
-fn cli_exec_runs_command_in_lane_view_and_promotes_output() {
+fn cli_exec_runs_command_in_raw_repo_and_promotes_output() {
     let repo = TempRepo::new();
     repo.write("src/example.ts", b"export const mode = 'base';\n");
 
@@ -19,13 +19,24 @@ fn cli_exec_runs_command_in_lane_view_and_promotes_output() {
         "pwsh",
         "-NoProfile",
         "-Command",
-        "$ErrorActionPreference = \"Stop\"; if ((Resolve-Path $env:LANE_REPO_ROOT).Path -ne (Get-Location).ProviderPath) { throw \"LANE_REPO_ROOT must be the lane view\" }; if ($env:LANE_STORAGE_PATH) { throw \"LANE_STORAGE_PATH leaked\" }; Set-Content -Path src/example.ts -Value \"export const mode = 'agent-a';\" -NoNewline; Set-Content -Path src/created.ts -Value \"export const created = true;\" -NoNewline",
+        "$ErrorActionPreference = \"Stop\"; if ((Resolve-Path $env:LANE_REPO_ROOT).ProviderPath -ne (Get-Location).ProviderPath) { throw \"LANE_REPO_ROOT must be the repo root\" }; if ($env:LANE_STORAGE_PATH) { throw \"LANE_STORAGE_PATH leaked\" }; if ($env:LANE_EXEC_MODE -ne \"raw_repo\") { throw \"expected raw_repo mode\" }; Set-Content -Path src/example.ts -Value \"export const mode = 'agent-a';\" -NoNewline; Set-Content -Path src/created.ts -Value \"export const created = true;\" -NoNewline",
     ]);
     assert_eq!(exec_result["lane"], "agent-a");
+    assert_eq!(exec_result["mode"], "raw_repo");
     assert_eq!(exec_result["exit_code"], 0);
-    assert_eq!(exec_result["escaped"], false);
-    assert_eq!(exec_result["rolled_back"], false);
-    assert!(exec_result["escaped_paths"].as_array().unwrap().is_empty());
+    assert_eq!(exec_result["worker_error"], Value::Null);
+    assert_eq!(exec_result["restored"], true);
+    assert_eq!(exec_result["restore_error"], Value::Null);
+    assert!(
+        exec_result["projected_paths"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        string_array(&exec_result["changed_paths"]),
+        vec!["src/created.ts", "src/example.ts"]
+    );
     assert_eq!(change_statuses(&exec_result), {
         let mut expected = BTreeMap::new();
         expected.insert("src/created.ts".to_owned(), "created".to_owned());
@@ -93,6 +104,101 @@ fn cli_exec_runs_command_in_lane_view_and_promotes_output() {
 }
 
 #[test]
+fn cli_exec_projects_existing_lane_without_counting_it_as_worker_change() {
+    let repo = TempRepo::new();
+    repo.write("src/example.ts", b"export const mode = 'base';\n");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/created.ts -Value \"export const created = true;\" -NoNewline",
+    ]);
+
+    let result = repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; if (-not (Test-Path -LiteralPath src/created.ts)) { throw \"missing projected lane file\" }",
+    ]);
+
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], true);
+    assert_eq!(
+        string_array(&result["projected_paths"]),
+        vec!["src/created.ts"]
+    );
+    assert!(result["changed_paths"].as_array().unwrap().is_empty());
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/created.ts".to_owned(), "created".to_owned());
+        expected
+    });
+    assert!(!repo.path().join("src/created.ts").exists());
+    assert_eq!(
+        change_statuses(&repo.run_json(["changes", "agent-a", "--json"])),
+        {
+            let mut expected = BTreeMap::new();
+            expected.insert("src/created.ts".to_owned(), "created".to_owned());
+            expected
+        }
+    );
+}
+
+#[test]
+fn cli_exec_deleting_lane_created_file_clears_overlay() {
+    let repo = TempRepo::new();
+    repo.write("src/example.ts", b"export const mode = 'base';\n");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/created.ts -Value \"export const created = true;\" -NoNewline",
+    ]);
+
+    let result = repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Remove-Item -LiteralPath src/created.ts",
+    ]);
+
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], false);
+    assert_eq!(
+        string_array(&result["projected_paths"]),
+        vec!["src/created.ts"]
+    );
+    assert_eq!(
+        string_array(&result["changed_paths"]),
+        vec!["src/created.ts"]
+    );
+    assert!(result["changes"].as_array().unwrap().is_empty());
+    assert!(!repo.path().join("src/created.ts").exists());
+    assert!(
+        repo.run_json(["changes", "agent-a", "--json"])["changes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn cli_exec_preserves_parallel_lane_outputs() {
     let repo = TempRepo::new();
     repo.write("src/feature.ts", b"export const approach = 'base';");
@@ -122,8 +228,10 @@ fn cli_exec_preserves_parallel_lane_outputs() {
     assert_eq!(exec_b["lane"], "approach-b");
     assert_eq!(exec_a["exit_code"], 0);
     assert_eq!(exec_b["exit_code"], 0);
-    assert_eq!(exec_a["escaped"], false);
-    assert_eq!(exec_b["escaped"], false);
+    assert_eq!(exec_a["worker_error"], Value::Null);
+    assert_eq!(exec_b["worker_error"], Value::Null);
+    assert_eq!(exec_a["restored"], true);
+    assert_eq!(exec_b["restored"], true);
 
     assert_eq!(
         fs::read(repo.path().join("src/feature.ts")).unwrap(),
@@ -196,8 +304,8 @@ fn cli_parent_can_orchestrate_five_parallel_lane_execs_directly() {
     assert_eq!(exec_outputs.len(), 5);
     for output in &exec_outputs {
         assert_eq!(output["exit_code"], 0);
-        assert_eq!(output["escaped"], false);
-        assert_eq!(output["rolled_back"], false);
+        assert_eq!(output["worker_error"], Value::Null);
+        assert_eq!(output["restored"], true);
         assert_eq!(output["changes"].as_array().unwrap().len(), 2);
     }
 
@@ -256,8 +364,9 @@ fn cli_exec_returns_json_for_child_failure() {
     let result = output_json(&output);
     assert_eq!(result["lane"], "failing-lane");
     assert_eq!(result["exit_code"], 7);
-    assert_eq!(result["escaped"], false);
-    assert_eq!(result["rolled_back"], false);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], false);
+    assert_eq!(result["restore_error"], Value::Null);
     assert!(
         result["stderr"]
             .as_str()
@@ -268,129 +377,169 @@ fn cli_exec_returns_json_for_child_failure() {
 }
 
 #[test]
-fn cli_exec_rolls_back_absolute_modified_file_escape() {
+fn cli_exec_captures_and_restores_raw_modified_file() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';");
     let original_path = ps_single_quoted_path(&repo.path().join("src/login.tsx"));
 
     let output = run_lane_exec(
         repo.path(),
-        "escape-attempt",
+        "raw-modify",
         &format!(
-            "$ErrorActionPreference = \"Stop\"; Set-Content -LiteralPath {original_path} -Value \"export const design = 'escaped';\" -NoNewline"
+            "$ErrorActionPreference = \"Stop\"; Set-Content -LiteralPath {original_path} -Value \"export const design = 'raw';\" -NoNewline"
         ),
     );
 
-    assert!(!output.status.success());
+    assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let result = output_json(&output);
-    assert_eq!(result["lane"], "escape-attempt");
+    assert_eq!(result["lane"], "raw-modify");
     assert_eq!(result["exit_code"], 0);
-    assert_eq!(result["escaped"], true);
-    assert_eq!(result["rolled_back"], true);
-    assert_eq!(result["rollback_error"], Value::Null);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], true);
+    assert_eq!(result["restore_error"], Value::Null);
     assert_eq!(
-        string_array(&result["escaped_paths"]),
+        string_array(&result["changed_paths"]),
         vec!["src/login.tsx"]
     );
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/login.tsx".to_owned(), "modified".to_owned());
+        expected
+    });
     assert_eq!(
         fs::read(repo.path().join("src/login.tsx")).unwrap(),
         b"export const design = 'base';"
     );
-    assert!(change_statuses(&repo.run_json(["changes", "escape-attempt", "--json"])).is_empty());
+    assert_eq!(
+        change_statuses(&repo.run_json(["changes", "raw-modify", "--json"])),
+        {
+            let mut expected = BTreeMap::new();
+            expected.insert("src/login.tsx".to_owned(), "modified".to_owned());
+            expected
+        }
+    );
 }
 
 #[test]
-fn cli_exec_rolls_back_absolute_created_file_escape() {
+fn cli_exec_captures_and_restores_raw_created_file() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';");
-    let original_path = ps_single_quoted_path(&repo.path().join("src/nested/escaped.ts"));
+    let original_path = ps_single_quoted_path(&repo.path().join("src/nested/raw.ts"));
     let original_parent = ps_single_quoted_path(&repo.path().join("src/nested"));
 
     let output = run_lane_exec(
         repo.path(),
-        "escape-create",
+        "raw-create",
         &format!(
-            "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Path {original_parent} -Force | Out-Null; Set-Content -LiteralPath {original_path} -Value \"export const escaped = true;\" -NoNewline"
+            "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Path {original_parent} -Force | Out-Null; Set-Content -LiteralPath {original_path} -Value \"export const raw = true;\" -NoNewline"
         ),
     );
 
-    assert!(!output.status.success());
+    assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let result = output_json(&output);
-    assert_eq!(result["lane"], "escape-create");
+    assert_eq!(result["lane"], "raw-create");
     assert_eq!(result["exit_code"], 0);
-    assert_eq!(result["escaped"], true);
-    assert_eq!(result["rolled_back"], true);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], true);
+    assert_eq!(result["restore_error"], Value::Null);
     assert_eq!(
-        string_array(&result["escaped_paths"]),
-        vec!["src/nested", "src/nested/escaped.ts"]
+        string_array(&result["changed_paths"]),
+        vec!["src/nested", "src/nested/raw.ts"]
     );
-    assert!(!repo.path().join("src/nested/escaped.ts").exists());
+    assert!(!repo.path().join("src/nested/raw.ts").exists());
     assert!(!repo.path().join("src/nested").exists());
-    assert!(change_statuses(&repo.run_json(["changes", "escape-create", "--json"])).is_empty());
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/nested/raw.ts".to_owned(), "created".to_owned());
+        expected
+    });
+    assert_eq!(
+        change_statuses(&repo.run_json(["changes", "raw-create", "--json"])),
+        {
+            let mut expected = BTreeMap::new();
+            expected.insert("src/nested/raw.ts".to_owned(), "created".to_owned());
+            expected
+        }
+    );
 }
 
 #[test]
-fn cli_exec_rolls_back_absolute_deleted_file_escape() {
+fn cli_exec_captures_and_restores_raw_deleted_file() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';");
     let original_path = ps_single_quoted_path(&repo.path().join("src/login.tsx"));
 
     let output = run_lane_exec(
         repo.path(),
-        "escape-delete",
+        "raw-delete",
         &format!("$ErrorActionPreference = \"Stop\"; Remove-Item -LiteralPath {original_path}"),
     );
 
-    assert!(!output.status.success());
+    assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let result = output_json(&output);
-    assert_eq!(result["lane"], "escape-delete");
+    assert_eq!(result["lane"], "raw-delete");
     assert_eq!(result["exit_code"], 0);
-    assert_eq!(result["escaped"], true);
-    assert_eq!(result["rolled_back"], true);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], true);
+    assert_eq!(result["restore_error"], Value::Null);
     assert_eq!(
-        string_array(&result["escaped_paths"]),
+        string_array(&result["changed_paths"]),
         vec!["src/login.tsx"]
     );
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/login.tsx".to_owned(), "deleted".to_owned());
+        expected
+    });
     assert_eq!(
         fs::read(repo.path().join("src/login.tsx")).unwrap(),
         b"export const design = 'base';"
     );
-    assert!(change_statuses(&repo.run_json(["changes", "escape-delete", "--json"])).is_empty());
+    assert_eq!(
+        change_statuses(&repo.run_json(["changes", "raw-delete", "--json"])),
+        {
+            let mut expected = BTreeMap::new();
+            expected.insert("src/login.tsx".to_owned(), "deleted".to_owned());
+            expected
+        }
+    );
 }
 
 #[test]
-fn cli_exec_rolls_back_absolute_created_empty_dir_escape() {
+fn cli_exec_captures_and_restores_raw_created_empty_dir() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';");
     let original_dir = ps_single_quoted_path(&repo.path().join("src/empty-real-dir"));
 
     let output = run_lane_exec(
         repo.path(),
-        "escape-empty-dir-create",
+        "raw-empty-dir-create",
         &format!(
             "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Path {original_dir} -Force | Out-Null"
         ),
     );
 
-    assert!(!output.status.success());
+    assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let result = output_json(&output);
-    assert_eq!(result["lane"], "escape-empty-dir-create");
+    assert_eq!(result["lane"], "raw-empty-dir-create");
     assert_eq!(result["exit_code"], 0);
-    assert_eq!(result["escaped"], true);
-    assert_eq!(result["rolled_back"], true);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], true);
+    assert_eq!(result["restore_error"], Value::Null);
     assert_eq!(
-        string_array(&result["escaped_paths"]),
+        string_array(&result["changed_paths"]),
         vec!["src/empty-real-dir"]
     );
+    assert!(result["changes"].as_array().unwrap().is_empty());
     assert!(!repo.path().join("src/empty-real-dir").exists());
 }
 
 #[test]
-fn cli_exec_rolls_back_absolute_deleted_empty_dir_escape() {
+fn cli_exec_captures_and_restores_raw_deleted_empty_dir() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';");
     fs::create_dir_all(repo.path().join("src/empty-real-dir")).unwrap();
@@ -398,26 +547,28 @@ fn cli_exec_rolls_back_absolute_deleted_empty_dir_escape() {
 
     let output = run_lane_exec(
         repo.path(),
-        "escape-empty-dir-delete",
+        "raw-empty-dir-delete",
         &format!("$ErrorActionPreference = \"Stop\"; Remove-Item -LiteralPath {original_dir}"),
     );
 
-    assert!(!output.status.success());
+    assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let result = output_json(&output);
-    assert_eq!(result["lane"], "escape-empty-dir-delete");
+    assert_eq!(result["lane"], "raw-empty-dir-delete");
     assert_eq!(result["exit_code"], 0);
-    assert_eq!(result["escaped"], true);
-    assert_eq!(result["rolled_back"], true);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], true);
+    assert_eq!(result["restore_error"], Value::Null);
     assert_eq!(
-        string_array(&result["escaped_paths"]),
+        string_array(&result["changed_paths"]),
         vec!["src/empty-real-dir"]
     );
+    assert!(result["changes"].as_array().unwrap().is_empty());
     assert!(repo.path().join("src/empty-real-dir").is_dir());
 }
 
 #[test]
-fn cli_exec_rolls_back_absolute_file_replaced_by_dir_escape() {
+fn cli_exec_captures_and_restores_raw_file_replaced_by_dir() {
     let repo = TempRepo::new();
     repo.write("src/swap", b"base file");
     let original_path = ps_single_quoted_path(&repo.path().join("src/swap"));
@@ -425,32 +576,52 @@ fn cli_exec_rolls_back_absolute_file_replaced_by_dir_escape() {
 
     let output = run_lane_exec(
         repo.path(),
-        "escape-file-to-dir",
+        "raw-file-to-dir",
         &format!(
             "$ErrorActionPreference = \"Stop\"; Remove-Item -LiteralPath {original_path}; New-Item -ItemType Directory -Path {original_path} -Force | Out-Null; Set-Content -LiteralPath {nested_path} -Value nested -NoNewline"
         ),
     );
 
-    assert!(!output.status.success());
+    assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let result = output_json(&output);
-    assert_eq!(result["lane"], "escape-file-to-dir");
+    assert_eq!(result["lane"], "raw-file-to-dir");
     assert_eq!(result["exit_code"], 0);
-    assert_eq!(result["escaped"], true);
-    assert_eq!(result["rolled_back"], true);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], true);
+    assert_eq!(result["restore_error"], Value::Null);
     assert_eq!(
-        string_array(&result["escaped_paths"]),
+        string_array(&result["changed_paths"]),
         vec!["src/swap", "src/swap/nested.txt"]
     );
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/swap".to_owned(), "deleted".to_owned());
+        expected.insert("src/swap/nested.txt".to_owned(), "created".to_owned());
+        expected
+    });
     assert_eq!(
         fs::read(repo.path().join("src/swap")).unwrap(),
         b"base file"
     );
     assert!(repo.path().join("src/swap").is_file());
+
+    let promoted = repo.run_json(["promote-lane", "raw-file-to-dir", "--json"]);
+    assert_eq!(change_statuses_from_key(&promoted, "promoted"), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/swap".to_owned(), "deleted".to_owned());
+        expected.insert("src/swap/nested.txt".to_owned(), "created".to_owned());
+        expected
+    });
+    assert!(repo.path().join("src/swap").is_dir());
+    assert_eq!(
+        fs::read(repo.path().join("src/swap/nested.txt")).unwrap(),
+        b"nested"
+    );
 }
 
 #[test]
-fn cli_exec_rolls_back_absolute_dir_replaced_by_file_escape() {
+fn cli_exec_captures_and_restores_raw_dir_replaced_by_file() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';");
     fs::create_dir_all(repo.path().join("src/swap")).unwrap();
@@ -459,28 +630,49 @@ fn cli_exec_rolls_back_absolute_dir_replaced_by_file_escape() {
 
     let output = run_lane_exec(
         repo.path(),
-        "escape-dir-to-file",
+        "raw-dir-to-file",
         &format!(
             "$ErrorActionPreference = \"Stop\"; Remove-Item -Recurse -LiteralPath {original_path}; Set-Content -LiteralPath {original_path} -Value \"now a file\" -NoNewline"
         ),
     );
 
-    assert!(!output.status.success());
+    assert!(output.status.success());
     assert!(output.stderr.is_empty());
     let result = output_json(&output);
-    assert_eq!(result["lane"], "escape-dir-to-file");
+    assert_eq!(result["lane"], "raw-dir-to-file");
     assert_eq!(result["exit_code"], 0);
-    assert_eq!(result["escaped"], true);
-    assert_eq!(result["rolled_back"], true);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], true);
+    assert_eq!(result["restore_error"], Value::Null);
     assert_eq!(
-        string_array(&result["escaped_paths"]),
+        string_array(&result["changed_paths"]),
         vec!["src/swap", "src/swap/original.txt"]
     );
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/swap".to_owned(), "created".to_owned());
+        expected.insert("src/swap/original.txt".to_owned(), "deleted".to_owned());
+        expected
+    });
     assert!(repo.path().join("src/swap").is_dir());
     assert_eq!(
         fs::read(repo.path().join("src/swap/original.txt")).unwrap(),
         b"original"
     );
+
+    let promoted = repo.run_json(["promote-lane", "raw-dir-to-file", "--json"]);
+    assert_eq!(change_statuses_from_key(&promoted, "promoted"), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/swap".to_owned(), "created".to_owned());
+        expected.insert("src/swap/original.txt".to_owned(), "deleted".to_owned());
+        expected
+    });
+    assert!(repo.path().join("src/swap").is_file());
+    assert_eq!(
+        fs::read(repo.path().join("src/swap")).unwrap(),
+        b"now a file"
+    );
+    assert!(!repo.path().join("src/swap/original.txt").exists());
 }
 
 struct TempRepo {

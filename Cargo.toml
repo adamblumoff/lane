@@ -16,11 +16,3 @@ clap = { version = "4.6.1", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 similar = "3.1.1"
-
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.61.1", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
-winfsp = { version = "0.13.0", default-features = false, features = ["delayload", "system"] }
-winfsp-sys = "0.12"
-
-[patch.crates-io]
-winfsp-sys = { path = "vendor/winfsp-sys" }

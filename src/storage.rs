@@ -28,7 +28,7 @@ pub fn acquire_repo_lock(storage_path: &Path) -> io::Result<RepoLock> {
     acquire_path_lock(&lock_path)
 }
 
-pub fn acquire_path_lock(lock_path: &Path) -> io::Result<RepoLock> {
+fn acquire_path_lock(lock_path: &Path) -> io::Result<RepoLock> {
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -60,24 +60,6 @@ pub fn acquire_path_lock(lock_path: &Path) -> io::Result<RepoLock> {
             format!("timed out waiting for {}", lock_path.display()),
         )
     }))
-}
-
-pub fn try_acquire_path_lock(lock_path: &Path) -> io::Result<Option<RepoLock>> {
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(lock_path)
-    {
-        Ok(file) => Ok(Some(RepoLock {
-            path: lock_path.to_path_buf(),
-            _file: file,
-        })),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(None),
-        Err(error) => Err(error),
-    }
 }
 
 impl Drop for RepoLock {

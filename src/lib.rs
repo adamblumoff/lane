@@ -3,11 +3,9 @@ use std::fmt;
 use std::ops::Range;
 
 pub mod cli;
+pub(crate) mod materialize;
 pub mod storage;
 pub mod vfs;
-
-#[cfg(windows)]
-pub mod winfsp_mount;
 
 pub type FilePath = String;
 pub type LaneId = String;
