@@ -3,15 +3,13 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitCode};
-use std::time::Instant;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use similar::TextDiff;
 
-use crate::materialize::{MaterializeError, MaterializeTimings, run_materialized};
-use crate::storage::{acquire_raw_repo_lock, acquire_repo_lock, load_repo, persist_repo};
+use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
 use crate::vfs::{FileWorktree, LaneFs, LaneFsError};
 use crate::{FilePath, LaneRepo};
 
@@ -38,7 +36,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    #[command(about = "Run a command in a lane through the real repo and print a JSON result")]
+    #[command(about = "Run a command in a lane through a virtual mounted lane view")]
     Exec {
         lane: String,
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
@@ -83,7 +81,7 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
         Command::Create { lane, json } => {
             create(&repo_root, &lane, json).map(|()| ExitCode::SUCCESS)
         }
-        Command::Exec { lane, command } => exec(&repo_root, &lane, command),
+        Command::Exec { lane, command } => exec(&repo_root, &lane, &command),
         Command::Changes { lane, json } => {
             changes(&repo_root, &lane, json).map(|()| ExitCode::SUCCESS)
         }
@@ -123,12 +121,12 @@ fn create(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
     Ok(())
 }
 
-fn exec(repo_root: &Path, lane: &str, command: Vec<String>) -> CliResult<ExitCode> {
-    let output = run_lane(repo_root, lane, &command)?;
-    let failed = output.exit_code != Some(0)
-        || output.worker_error.is_some()
-        || output.restore_error.is_some();
-    print_json(&output)?;
+#[cfg(windows)]
+fn exec(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExitCode> {
+    let run = crate::virtual_exec::run_virtual_lane(repo_root, lane, command)
+        .map_err(|error| CliError::Message(error.to_string()))?;
+    let failed = run.failed;
+    print_json(&run.output)?;
     if failed {
         Ok(ExitCode::FAILURE)
     } else {
@@ -136,180 +134,15 @@ fn exec(repo_root: &Path, lane: &str, command: Vec<String>) -> CliResult<ExitCod
     }
 }
 
-fn run_lane(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExecOutput> {
-    let total_start = Instant::now();
-    let (program, args) = command
-        .split_first()
-        .ok_or_else(|| CliError::Message("missing command for lane exec".to_owned()))?;
-    let storage_path = storage_path(repo_root);
-
-    let pre_storage_lock_wait_start = Instant::now();
-    let pre_storage_lock = acquire_repo_lock(&storage_path)?;
-    let pre_storage_lock_wait_ms = elapsed_ms(pre_storage_lock_wait_start);
-    let pre_storage_lock_held_start = Instant::now();
-    let (_, mut fs) = open_lane_fs(repo_root)?;
-    fs.create_lane(lane)?;
-    let pre_storage_lock_held_ms = elapsed_ms(pre_storage_lock_held_start);
-    drop(pre_storage_lock);
-
-    let raw_lock_wait_start = Instant::now();
-    let raw_lock = acquire_raw_repo_lock(&storage_path)?;
-    let raw_lock_wait_ms = elapsed_ms(raw_lock_wait_start);
-    let raw_lock_held_start = Instant::now();
-    let mut materialized = run_materialized(repo_root, &fs, lane, || {
-        run_raw_worker(program, args, lane, repo_root)
-    })?;
-    let raw_lock_held_ms = elapsed_ms(raw_lock_held_start);
-    drop(raw_lock);
-
-    let post_storage_lock_wait_start = Instant::now();
-    let post_storage_lock = acquire_repo_lock(&storage_path)?;
-    let post_storage_lock_wait_ms = elapsed_ms(post_storage_lock_wait_start);
-    let post_storage_lock_held_start = Instant::now();
-    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
-    fs.create_lane(lane)?;
-    let mut materialize_timings = materialized.timings;
-    if let Some(changes_to_ingest) = materialized.changes_to_ingest.take() {
-        let ingest_start = Instant::now();
-        changes_to_ingest.ingest_into(&mut fs, lane)?;
-        materialize_timings.ingest_ms = elapsed_ms(ingest_start);
-    }
-    if materialized.restore_error.is_none() {
-        persist_repo(&storage_path, fs.repo())?;
-    }
-    let changes = collect_changes(&fs, lane)?;
-    let post_storage_lock_held_ms = elapsed_ms(post_storage_lock_held_start);
-    drop(post_storage_lock);
-    finish_exec_output(ExecOutputContext {
-        total_start,
-        repo_root,
-        lane,
-        storage_path,
-        materialized,
-        breakdown: WorkerTimingBreakdown {
-            pre_storage_lock_wait_ms,
-            pre_storage_lock_held_ms,
-            raw_lock_wait_ms,
-            raw_lock_held_ms,
-            post_storage_lock_wait_ms,
-            post_storage_lock_held_ms,
-        },
-        materialize_timings,
-        changes,
-    })
-}
-
-struct WorkerTimingBreakdown {
-    pre_storage_lock_wait_ms: u64,
-    pre_storage_lock_held_ms: u64,
-    raw_lock_wait_ms: u64,
-    raw_lock_held_ms: u64,
-    post_storage_lock_wait_ms: u64,
-    post_storage_lock_held_ms: u64,
-}
-
-struct ExecOutputContext<'a> {
-    total_start: Instant,
-    repo_root: &'a Path,
-    lane: &'a str,
-    storage_path: PathBuf,
-    materialized: crate::materialize::MaterializedRun<WorkerOutput>,
-    breakdown: WorkerTimingBreakdown,
-    materialize_timings: MaterializeTimings,
-    changes: Vec<ChangeOutput>,
-}
-
-fn finish_exec_output(input: ExecOutputContext<'_>) -> CliResult<ExecOutput> {
-    let ExecOutputContext {
-        total_start,
-        repo_root,
-        lane,
-        storage_path,
-        materialized,
-        breakdown,
-        materialize_timings,
-        changes,
-    } = input;
-    let storage_lock_wait_ms =
-        breakdown.pre_storage_lock_wait_ms + breakdown.post_storage_lock_wait_ms;
-    let storage_lock_held_ms =
-        breakdown.pre_storage_lock_held_ms + breakdown.post_storage_lock_held_ms;
-    let lock_wait_ms = storage_lock_wait_ms + breakdown.raw_lock_wait_ms;
-    let lock_held_ms = storage_lock_held_ms + breakdown.raw_lock_held_ms;
-    let timings = ExecTimings {
-        total_ms: elapsed_ms(total_start),
-        lock_wait_ms,
-        lock_held_ms,
-        storage_lock_wait_ms,
-        storage_lock_held_ms,
-        raw_lock_wait_ms: breakdown.raw_lock_wait_ms,
-        raw_lock_held_ms: breakdown.raw_lock_held_ms,
-        pre_worker_lock_ms: breakdown.pre_storage_lock_held_ms + materialize_timings.pre_worker_ms,
-        worker_ms: materialize_timings.worker_ms,
-        post_worker_lock_ms: materialize_timings.post_worker_ms
-            + breakdown.post_storage_lock_held_ms,
-        materialize: materialize_timings,
-    };
-    let worker = materialized.output;
-
-    Ok(ExecOutput {
-        lane: lane.to_owned(),
-        repo_root: path_label(repo_root),
-        storage_path: path_label(&storage_path),
-        workspace_root: path_label(repo_root),
-        mode: "raw_repo",
-        projected_paths: materialized.projected_paths,
-        exit_code: worker.exit_code,
-        stdout: worker.stdout,
-        stderr: worker.stderr,
-        worker_error: worker.worker_error,
-        restored: materialized.restored,
-        restore_error: materialized.restore_error,
-        changed_paths: materialized.changed_paths,
-        timings,
-        changes,
-    })
-}
-
-fn run_raw_worker(program: &str, args: &[String], lane: &str, repo_root: &Path) -> WorkerOutput {
-    match command_with_lane_env(program, args, lane, repo_root).output() {
-        Ok(output) => WorkerOutput {
-            exit_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            worker_error: None,
-        },
-        Err(error) => WorkerOutput {
-            exit_code: None,
-            stdout: String::new(),
-            stderr: String::new(),
-            worker_error: Some(error.to_string()),
-        },
-    }
-}
-
-fn command_with_lane_env<'a>(
-    program: &'a str,
-    args: &'a [String],
-    lane: &'a str,
-    repo_root: &'a Path,
-) -> ProcessCommand {
-    let repo_root_label = path_label(repo_root);
-    let mut command = ProcessCommand::new(program);
-    command
-        .args(args)
-        .current_dir(repo_root)
-        .env("LANE_ID", lane)
-        .env("LANE_REPO_ROOT", &repo_root_label)
-        .env("LANE_VIEW_ROOT", &repo_root_label)
-        .env("LANE_EXEC_MODE", "raw_repo")
-        .env_remove("LANE_STORAGE_PATH");
-    command
+#[cfg(not(windows))]
+fn exec(_repo_root: &Path, _lane: &str, _command: &[String]) -> CliResult<ExitCode> {
+    Err(CliError::Message(
+        "lane exec requires the WinFsp virtual filesystem on Windows".to_owned(),
+    ))
 }
 
 fn changes(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
     let storage_path = storage_path(repo_root);
-    let _raw_lock = acquire_raw_repo_lock(&storage_path)?;
     let _lock = acquire_repo_lock(&storage_path)?;
     let (_, fs) = open_lane_fs(repo_root)?;
     let output = ChangesOutput {
@@ -333,7 +166,6 @@ fn changes(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
 
 fn diff(repo_root: &Path, lane: &str, paths: Vec<String>) -> CliResult<()> {
     let storage_path = storage_path(repo_root);
-    let _raw_lock = acquire_raw_repo_lock(&storage_path)?;
     let _lock = acquire_repo_lock(&storage_path)?;
     let (_, fs) = open_lane_fs(repo_root)?;
     let changes = if paths.is_empty() {
@@ -361,7 +193,6 @@ fn diff(repo_root: &Path, lane: &str, paths: Vec<String>) -> CliResult<()> {
 
 fn promote(repo_root: &Path, lane: &str, path: &str, json: bool) -> CliResult<()> {
     let storage_path = storage_path(repo_root);
-    let _raw_lock = acquire_raw_repo_lock(&storage_path)?;
     let _lock = acquire_repo_lock(&storage_path)?;
     let (storage_path, mut fs) = open_lane_fs(repo_root)?;
     let before = change_for_path(&fs, lane, path)?;
@@ -389,7 +220,6 @@ fn promote(repo_root: &Path, lane: &str, path: &str, json: bool) -> CliResult<()
 
 fn promote_lane(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
     let storage_path = storage_path(repo_root);
-    let _raw_lock = acquire_raw_repo_lock(&storage_path)?;
     let _lock = acquire_repo_lock(&storage_path)?;
     let (storage_path, mut fs) = open_lane_fs(repo_root)?;
     let before = collect_changes(&fs, lane)?;
@@ -416,7 +246,6 @@ fn promote_lane(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
 
 fn discard(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
     let storage_path = storage_path(repo_root);
-    let _raw_lock = acquire_raw_repo_lock(&storage_path)?;
     let _lock = acquire_repo_lock(&storage_path)?;
     let (storage_path, mut fs) = open_lane_fs(repo_root)?;
     let discarded_changes = collect_changes(&fs, lane).map_or(0, |changes| changes.len());
@@ -564,57 +393,12 @@ fn print_json(output: &impl Serialize) -> CliResult<()> {
     Ok(())
 }
 
-fn elapsed_ms(start: Instant) -> u64 {
-    start.elapsed().as_millis().min(u64::MAX as u128) as u64
-}
-
 #[derive(Serialize)]
 struct CreateOutput<'a> {
     lane: &'a str,
     created: bool,
     repo_root: String,
     storage_path: String,
-}
-
-struct WorkerOutput {
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-    worker_error: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ExecOutput {
-    lane: String,
-    repo_root: String,
-    storage_path: String,
-    workspace_root: String,
-    mode: &'static str,
-    projected_paths: Vec<FilePath>,
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-    worker_error: Option<String>,
-    restored: bool,
-    restore_error: Option<String>,
-    changed_paths: Vec<FilePath>,
-    timings: ExecTimings,
-    changes: Vec<ChangeOutput>,
-}
-
-#[derive(Serialize)]
-struct ExecTimings {
-    total_ms: u64,
-    lock_wait_ms: u64,
-    lock_held_ms: u64,
-    storage_lock_wait_ms: u64,
-    storage_lock_held_ms: u64,
-    raw_lock_wait_ms: u64,
-    raw_lock_held_ms: u64,
-    pre_worker_lock_ms: u64,
-    worker_ms: u64,
-    post_worker_lock_ms: u64,
-    materialize: MaterializeTimings,
 }
 
 #[derive(Serialize)]
@@ -677,7 +461,6 @@ pub enum CliError {
     Io(io::Error),
     LaneFs(LaneFsError),
     Lane(crate::LaneError),
-    Materialize(String),
     Json(serde_json::Error),
     Message(String),
 }
@@ -688,7 +471,6 @@ impl fmt::Display for CliError {
             Self::Io(error) => write!(f, "{error}"),
             Self::LaneFs(error) => write!(f, "{error}"),
             Self::Lane(error) => write!(f, "{error:?}"),
-            Self::Materialize(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
             Self::Message(message) => write!(f, "{message}"),
         }
@@ -712,12 +494,6 @@ impl From<LaneFsError> for CliError {
 impl From<crate::LaneError> for CliError {
     fn from(error: crate::LaneError) -> Self {
         Self::Lane(error)
-    }
-}
-
-impl From<MaterializeError> for CliError {
-    fn from(error: MaterializeError) -> Self {
-        Self::Materialize(error.to_string())
     }
 }
 

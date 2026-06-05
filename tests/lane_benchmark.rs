@@ -49,6 +49,7 @@ fn benchmark_git_worktrees_recorded_previous_lane_and_current_lane() {
         "mode": "git_worktree_vs_recorded_previous_lane_vs_current_lane",
         "rounds": rounds,
         "benchmark_order": ["git_worktree", "previous_lane", "current_lane"],
+        "current_exec_mode": "virtual_mount",
         "variants": VARIANTS,
         "base_files": BASE_FILES,
         "git_worktree": {
@@ -269,7 +270,7 @@ fn run_lane_flow(lane_bin: &Path, lane_root: &Path) -> LaneMetrics {
     }
     let cleanup_ms = elapsed_ms(cleanup_start);
     LaneMetrics {
-        mode: "deterministic_exec_capture",
+        mode: "virtual_mount".to_owned(),
         repo_dirs: 1,
         attempt_ms,
         compare_ms,
@@ -284,7 +285,7 @@ fn run_lane_flow(lane_bin: &Path, lane_root: &Path) -> LaneMetrics {
 
 #[derive(Debug, Serialize)]
 struct LaneMetrics {
-    mode: &'static str,
+    mode: String,
     repo_dirs: u64,
     attempt_ms: u64,
     compare_ms: u64,
@@ -457,7 +458,10 @@ fn average_worktree_metrics(rounds: &[BenchmarkRound]) -> AverageWorktreeMetrics
 fn average_lane_metrics(rounds: &[BenchmarkRound]) -> AverageLaneMetrics {
     let count = rounds.len();
     AverageLaneMetrics {
-        mode: "deterministic_exec_capture".to_owned(),
+        mode: rounds
+            .first()
+            .map(|round| round.current_lane.mode.clone())
+            .unwrap_or_else(|| "unknown".to_owned()),
         repo_dirs: average(
             rounds.iter().map(|round| round.current_lane.repo_dirs),
             count,

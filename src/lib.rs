@@ -3,9 +3,10 @@ use std::fmt;
 use std::ops::Range;
 
 pub mod cli;
-pub(crate) mod materialize;
 pub mod storage;
 pub mod vfs;
+#[cfg(windows)]
+pub(crate) mod virtual_exec;
 
 pub type FilePath = String;
 pub type LaneId = String;

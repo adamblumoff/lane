@@ -2,6 +2,7 @@
 name = "lane"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 
 [lib]
 name = "lane"
@@ -17,3 +18,10 @@ notify = "8.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 similar = "3.1.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52.0", features = ["Win32_Foundation"] }
+winfsp_wrs = "0.4.1"
+
+[build-dependencies]
+winfsp_build = "0.1.1"
