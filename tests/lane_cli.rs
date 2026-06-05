@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -27,6 +27,11 @@ fn cli_exec_runs_command_in_raw_repo_and_promotes_output() {
     assert_eq!(exec_result["worker_error"], Value::Null);
     assert_eq!(exec_result["restored"], true);
     assert_eq!(exec_result["restore_error"], Value::Null);
+    assert!(exec_result["timings"]["pre_worker_lock_ms"].is_u64());
+    assert!(exec_result["timings"]["worker_ms"].is_u64());
+    assert!(exec_result["timings"]["post_worker_lock_ms"].is_u64());
+    assert!(exec_result["timings"]["storage_lock_held_ms"].is_u64());
+    assert!(exec_result["timings"]["raw_lock_held_ms"].is_u64());
     assert!(
         exec_result["projected_paths"]
             .as_array()
@@ -153,6 +158,50 @@ fn cli_exec_projects_existing_lane_without_counting_it_as_worker_change() {
 }
 
 #[test]
+fn cli_exec_projects_existing_lane_deletion_without_counting_it_as_worker_change() {
+    let repo = TempRepo::new();
+    repo.write("src/example.ts", b"export const mode = 'base';\n");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Remove-Item -LiteralPath src/example.ts",
+    ]);
+
+    let result = repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; if (Test-Path -LiteralPath src/example.ts) { throw \"projected lane deletion still exists\" }",
+    ]);
+
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], true);
+    assert_eq!(
+        string_array(&result["projected_paths"]),
+        vec!["src/example.ts"]
+    );
+    assert!(result["changed_paths"].as_array().unwrap().is_empty());
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/example.ts".to_owned(), "deleted".to_owned());
+        expected
+    });
+    assert_eq!(
+        fs::read(repo.path().join("src/example.ts")).unwrap(),
+        b"export const mode = 'base';\n"
+    );
+}
+
+#[test]
 fn cli_exec_deleting_lane_created_file_clears_overlay() {
     let repo = TempRepo::new();
     repo.write("src/example.ts", b"export const mode = 'base';\n");
@@ -267,6 +316,45 @@ fn cli_exec_preserves_parallel_lane_outputs() {
         fs::read(repo.path().join("src/b.ts")).unwrap(),
         b"export const b = true;"
     );
+}
+
+#[test]
+fn cli_exec_releases_storage_lock_while_worker_runs() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;");
+    let marker = repo.path().join(".lane/worker-started.txt");
+    let marker_arg = ps_single_quoted_path(&marker);
+
+    let root = repo.path().to_path_buf();
+    let job = thread::spawn(move || {
+        run_lane_exec(
+            &root,
+            "slow-worker",
+            &format!(
+                "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Path .lane -Force | Out-Null; Set-Content -LiteralPath {marker_arg} -Value started -NoNewline; Start-Sleep -Milliseconds 1500; Set-Content -Path src/slow.ts -Value \"export const slow = true;\" -NoNewline"
+            ),
+        )
+    });
+
+    wait_for_path(&marker);
+    let storage_command_start = Instant::now();
+    let created = repo.run_json(["create", "observer", "--json"]);
+    assert_eq!(created["created"], true);
+    assert!(
+        storage_command_start.elapsed() < Duration::from_millis(1000),
+        "storage command waited for the raw worker"
+    );
+
+    let output = assert_success(job.join().unwrap());
+    let result = output_json(&output);
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restore_error"], Value::Null);
+    assert!(result["timings"]["storage_lock_held_ms"].as_u64().unwrap() < 1000);
+    assert!(result["timings"]["raw_lock_held_ms"].as_u64().unwrap() >= 1000);
+
+    let existing = repo.run_json(["create", "observer", "--json"]);
+    assert_eq!(existing["created"], false);
 }
 
 #[test]
@@ -418,6 +506,44 @@ fn cli_exec_captures_and_restores_raw_modified_file() {
             expected.insert("src/login.tsx".to_owned(), "modified".to_owned());
             expected
         }
+    );
+}
+
+#[test]
+fn cli_exec_full_scan_fallback_captures_and_restores_raw_modified_file() {
+    let repo = TempRepo::new();
+    repo.write("src/login.tsx", b"export const design = 'base';");
+    let original_path = ps_single_quoted_path(&repo.path().join("src/login.tsx"));
+
+    let output = run_lane_exec_with_env(
+        repo.path(),
+        "raw-modify-fallback",
+        &format!(
+            "$ErrorActionPreference = \"Stop\"; Set-Content -LiteralPath {original_path} -Value \"export const design = 'fallback';\" -NoNewline"
+        ),
+        &[("LANE_EXEC_DISABLE_WATCHER", "1")],
+    );
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let result = output_json(&output);
+    assert_eq!(result["lane"], "raw-modify-fallback");
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["restored"], true);
+    assert_eq!(result["restore_error"], Value::Null);
+    assert_eq!(
+        string_array(&result["changed_paths"]),
+        vec!["src/login.tsx"]
+    );
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/login.tsx".to_owned(), "modified".to_owned());
+        expected
+    });
+    assert_eq!(
+        fs::read(repo.path().join("src/login.tsx")).unwrap(),
+        b"export const design = 'base';"
     );
 }
 
@@ -739,16 +865,38 @@ impl Drop for TempRepo {
 }
 
 fn run_lane_exec(repo_root: &Path, lane: &str, script: &str) -> Output {
+    run_lane_exec_with_env(repo_root, lane, script, &[])
+}
+
+fn run_lane_exec_with_env(
+    repo_root: &Path,
+    lane: &str,
+    script: &str,
+    envs: &[(&str, &str)],
+) -> Output {
     Command::new(env!("CARGO_BIN_EXE_lane"))
         .arg("--repo-root")
         .arg(repo_root)
         .args(["exec", lane, "--", "pwsh", "-NoProfile", "-Command", script])
+        .envs(envs.iter().copied())
         .output()
         .unwrap()
 }
 
 fn ps_single_quoted_path(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "''"))
+}
+
+fn wait_for_path(path: &Path) {
+    let start = Instant::now();
+    while !path.exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "timed out waiting for {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn assert_success(output: Output) -> Output {

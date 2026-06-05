@@ -11,7 +11,7 @@ use serde::Serialize;
 use similar::TextDiff;
 
 use crate::materialize::{MaterializeError, MaterializeTimings, run_materialized};
-use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
+use crate::storage::{acquire_raw_repo_lock, acquire_repo_lock, load_repo, persist_repo};
 use crate::vfs::{FileWorktree, LaneFs, LaneFsError};
 use crate::{FilePath, LaneRepo};
 
@@ -142,26 +142,113 @@ fn run_lane(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExecO
         .split_first()
         .ok_or_else(|| CliError::Message("missing command for lane exec".to_owned()))?;
     let storage_path = storage_path(repo_root);
-    let lock_wait_start = Instant::now();
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let lock_wait_ms = elapsed_ms(lock_wait_start);
-    let lock_held_start = Instant::now();
-    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
-    fs.create_lane(lane)?;
 
-    let materialized = run_materialized(repo_root, &mut fs, lane, || {
+    let pre_storage_lock_wait_start = Instant::now();
+    let pre_storage_lock = acquire_repo_lock(&storage_path)?;
+    let pre_storage_lock_wait_ms = elapsed_ms(pre_storage_lock_wait_start);
+    let pre_storage_lock_held_start = Instant::now();
+    let (_, mut fs) = open_lane_fs(repo_root)?;
+    fs.create_lane(lane)?;
+    let pre_storage_lock_held_ms = elapsed_ms(pre_storage_lock_held_start);
+    drop(pre_storage_lock);
+
+    let raw_lock_wait_start = Instant::now();
+    let raw_lock = acquire_raw_repo_lock(&storage_path)?;
+    let raw_lock_wait_ms = elapsed_ms(raw_lock_wait_start);
+    let raw_lock_held_start = Instant::now();
+    let mut materialized = run_materialized(repo_root, &fs, lane, || {
         run_raw_worker(program, args, lane, repo_root)
     })?;
+    let raw_lock_held_ms = elapsed_ms(raw_lock_held_start);
+    drop(raw_lock);
 
+    let post_storage_lock_wait_start = Instant::now();
+    let post_storage_lock = acquire_repo_lock(&storage_path)?;
+    let post_storage_lock_wait_ms = elapsed_ms(post_storage_lock_wait_start);
+    let post_storage_lock_held_start = Instant::now();
+    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
+    fs.create_lane(lane)?;
+    let mut materialize_timings = materialized.timings;
+    if let Some(changes_to_ingest) = materialized.changes_to_ingest.take() {
+        let ingest_start = Instant::now();
+        changes_to_ingest.ingest_into(&mut fs, lane)?;
+        materialize_timings.ingest_ms = elapsed_ms(ingest_start);
+    }
     if materialized.restore_error.is_none() {
         persist_repo(&storage_path, fs.repo())?;
     }
     let changes = collect_changes(&fs, lane)?;
+    let post_storage_lock_held_ms = elapsed_ms(post_storage_lock_held_start);
+    drop(post_storage_lock);
+    finish_exec_output(ExecOutputContext {
+        total_start,
+        repo_root,
+        lane,
+        storage_path,
+        materialized,
+        breakdown: WorkerTimingBreakdown {
+            pre_storage_lock_wait_ms,
+            pre_storage_lock_held_ms,
+            raw_lock_wait_ms,
+            raw_lock_held_ms,
+            post_storage_lock_wait_ms,
+            post_storage_lock_held_ms,
+        },
+        materialize_timings,
+        changes,
+    })
+}
+
+struct WorkerTimingBreakdown {
+    pre_storage_lock_wait_ms: u64,
+    pre_storage_lock_held_ms: u64,
+    raw_lock_wait_ms: u64,
+    raw_lock_held_ms: u64,
+    post_storage_lock_wait_ms: u64,
+    post_storage_lock_held_ms: u64,
+}
+
+struct ExecOutputContext<'a> {
+    total_start: Instant,
+    repo_root: &'a Path,
+    lane: &'a str,
+    storage_path: PathBuf,
+    materialized: crate::materialize::MaterializedRun<WorkerOutput>,
+    breakdown: WorkerTimingBreakdown,
+    materialize_timings: MaterializeTimings,
+    changes: Vec<ChangeOutput>,
+}
+
+fn finish_exec_output(input: ExecOutputContext<'_>) -> CliResult<ExecOutput> {
+    let ExecOutputContext {
+        total_start,
+        repo_root,
+        lane,
+        storage_path,
+        materialized,
+        breakdown,
+        materialize_timings,
+        changes,
+    } = input;
+    let storage_lock_wait_ms =
+        breakdown.pre_storage_lock_wait_ms + breakdown.post_storage_lock_wait_ms;
+    let storage_lock_held_ms =
+        breakdown.pre_storage_lock_held_ms + breakdown.post_storage_lock_held_ms;
+    let lock_wait_ms = storage_lock_wait_ms + breakdown.raw_lock_wait_ms;
+    let lock_held_ms = storage_lock_held_ms + breakdown.raw_lock_held_ms;
     let timings = ExecTimings {
         total_ms: elapsed_ms(total_start),
         lock_wait_ms,
-        lock_held_ms: elapsed_ms(lock_held_start),
-        materialize: materialized.timings,
+        lock_held_ms,
+        storage_lock_wait_ms,
+        storage_lock_held_ms,
+        raw_lock_wait_ms: breakdown.raw_lock_wait_ms,
+        raw_lock_held_ms: breakdown.raw_lock_held_ms,
+        pre_worker_lock_ms: breakdown.pre_storage_lock_held_ms + materialize_timings.pre_worker_ms,
+        worker_ms: materialize_timings.worker_ms,
+        post_worker_lock_ms: materialize_timings.post_worker_ms
+            + breakdown.post_storage_lock_held_ms,
+        materialize: materialize_timings,
     };
     let worker = materialized.output;
 
@@ -221,12 +308,14 @@ fn command_with_lane_env<'a>(
 }
 
 fn changes(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
-    let _lock = acquire_repo_lock(&storage_path(repo_root))?;
+    let storage_path = storage_path(repo_root);
+    let _raw_lock = acquire_raw_repo_lock(&storage_path)?;
+    let _lock = acquire_repo_lock(&storage_path)?;
     let (_, fs) = open_lane_fs(repo_root)?;
     let output = ChangesOutput {
         lane,
         repo_root: path_label(repo_root),
-        storage_path: path_label(storage_path(repo_root)),
+        storage_path: path_label(storage_path),
         changes: collect_changes(&fs, lane)?,
     };
 
@@ -243,7 +332,9 @@ fn changes(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
 }
 
 fn diff(repo_root: &Path, lane: &str, paths: Vec<String>) -> CliResult<()> {
-    let _lock = acquire_repo_lock(&storage_path(repo_root))?;
+    let storage_path = storage_path(repo_root);
+    let _raw_lock = acquire_raw_repo_lock(&storage_path)?;
+    let _lock = acquire_repo_lock(&storage_path)?;
     let (_, fs) = open_lane_fs(repo_root)?;
     let changes = if paths.is_empty() {
         collect_changes(&fs, lane)?
@@ -269,7 +360,9 @@ fn diff(repo_root: &Path, lane: &str, paths: Vec<String>) -> CliResult<()> {
 }
 
 fn promote(repo_root: &Path, lane: &str, path: &str, json: bool) -> CliResult<()> {
-    let _lock = acquire_repo_lock(&storage_path(repo_root))?;
+    let storage_path = storage_path(repo_root);
+    let _raw_lock = acquire_raw_repo_lock(&storage_path)?;
+    let _lock = acquire_repo_lock(&storage_path)?;
     let (storage_path, mut fs) = open_lane_fs(repo_root)?;
     let before = change_for_path(&fs, lane, path)?;
     fs.promote_file(lane, path)?;
@@ -295,7 +388,9 @@ fn promote(repo_root: &Path, lane: &str, path: &str, json: bool) -> CliResult<()
 }
 
 fn promote_lane(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
-    let _lock = acquire_repo_lock(&storage_path(repo_root))?;
+    let storage_path = storage_path(repo_root);
+    let _raw_lock = acquire_raw_repo_lock(&storage_path)?;
+    let _lock = acquire_repo_lock(&storage_path)?;
     let (storage_path, mut fs) = open_lane_fs(repo_root)?;
     let before = collect_changes(&fs, lane)?;
     fs.promote_lane(lane)?;
@@ -320,7 +415,9 @@ fn promote_lane(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
 }
 
 fn discard(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
-    let _lock = acquire_repo_lock(&storage_path(repo_root))?;
+    let storage_path = storage_path(repo_root);
+    let _raw_lock = acquire_raw_repo_lock(&storage_path)?;
+    let _lock = acquire_repo_lock(&storage_path)?;
     let (storage_path, mut fs) = open_lane_fs(repo_root)?;
     let discarded_changes = collect_changes(&fs, lane).map_or(0, |changes| changes.len());
     let removed = fs.discard_lane(lane);
@@ -510,6 +607,13 @@ struct ExecTimings {
     total_ms: u64,
     lock_wait_ms: u64,
     lock_held_ms: u64,
+    storage_lock_wait_ms: u64,
+    storage_lock_held_ms: u64,
+    raw_lock_wait_ms: u64,
+    raw_lock_held_ms: u64,
+    pre_worker_lock_ms: u64,
+    worker_ms: u64,
+    post_worker_lock_ms: u64,
     materialize: MaterializeTimings,
 }
 

@@ -28,6 +28,11 @@ pub fn acquire_repo_lock(storage_path: &Path) -> io::Result<RepoLock> {
     acquire_path_lock(&lock_path)
 }
 
+pub fn acquire_raw_repo_lock(storage_path: &Path) -> io::Result<RepoLock> {
+    let lock_path = storage_path.with_file_name("raw-exec.lock");
+    acquire_path_lock(&lock_path)
+}
+
 fn acquire_path_lock(lock_path: &Path) -> io::Result<RepoLock> {
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)?;

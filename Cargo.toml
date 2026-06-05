@@ -13,6 +13,7 @@ path = "src/cli_main.rs"
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
+notify = "8.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 similar = "3.1.1"
