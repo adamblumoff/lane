@@ -99,10 +99,7 @@ fn promote_lane_promotes_every_changed_path_for_lane() {
             .unwrap(),
         b"{\"mode\":\"fast\"}\n"
     );
-    assert_eq!(
-        repo.overlay_paths("agent-a").unwrap(),
-        vec![PATH, SETTINGS_PATH]
-    );
+    assert_eq!(repo.overlay_paths("agent-a").unwrap(), Vec::<&str>::new());
     assert_eq!(repo.overlay_paths("agent-b").unwrap(), vec![PATH]);
     assert_eq!(
         repo.promote_lane(
@@ -194,7 +191,7 @@ fn promote_returns_new_base_and_preserves_other_lane_projections() {
         repo.read(PATH, "agent-b", &promoted).unwrap(),
         b"export const mode = 'safe';\n"
     );
-    assert_eq!(repo.overlay_paths("agent-a").unwrap(), vec![PATH]);
+    assert_eq!(repo.overlay_paths("agent-a").unwrap(), Vec::<&str>::new());
     assert_eq!(repo.overlay_paths("agent-b").unwrap(), vec![PATH]);
 }
 
@@ -223,7 +220,7 @@ fn untouched_lanes_follow_promoted_base() {
 }
 
 #[test]
-fn promoted_lanes_do_not_follow_later_base_changes() {
+fn non_overlapping_promoted_lanes_follow_later_base_changes() {
     let mut repo = seeded_repo();
     repo.create_lane("badabing").unwrap();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
@@ -242,9 +239,9 @@ fn promoted_lanes_do_not_follow_later_base_changes() {
 
     let promoted = repo.promote(PATH, "agent-a", &badabing).unwrap();
 
-    assert_eq!(promoted, b"export const mode = 'fast';\n");
+    assert_eq!(promoted, b"export const mode = 'fast';\nbadabing\n");
     assert_eq!(repo.read(PATH, "agent-a", &promoted).unwrap(), promoted);
-    assert_eq!(repo.read(PATH, "badabing", &promoted).unwrap(), badabing);
+    assert_eq!(repo.read(PATH, "badabing", &promoted).unwrap(), promoted);
 }
 
 #[test]
@@ -339,6 +336,143 @@ fn repo_state_round_trips() {
     assert_eq!(
         decoded.read(PATH, "agent-a", BASE).unwrap(),
         b"export const mode = 'fast';\n"
+    );
+}
+
+#[test]
+fn snapshot_replacement_is_stored_as_byte_ops() {
+    let mut repo = seeded_repo();
+    let base = b"alpha=1\nbeta=2\ngamma=3\n";
+    let edited = b"alpha=10\nbeta=2\ngamma=30\n";
+
+    repo.replace("src/math.txt", "agent-a", base, edited.to_vec())
+        .unwrap();
+
+    let ops = repo
+        .change_ops("src/math.txt", "agent-a", Some(base))
+        .unwrap();
+    assert_eq!(ops.len(), 2);
+    assert_eq!(ops[0].base_start, 7);
+    assert_eq!(ops[0].base_end, 7);
+    assert_eq!(ops[0].inserted_len, 1);
+    assert_eq!(ops[1].base_start, 22);
+    assert_eq!(ops[1].base_end, 22);
+    assert_eq!(ops[1].inserted_len, 1);
+    assert_eq!(repo.read("src/math.txt", "agent-a", base).unwrap(), edited);
+}
+
+#[test]
+fn non_overlapping_same_file_ops_compose_after_promotion() {
+    let mut repo = seeded_repo();
+    let base = b"alpha=1\nbeta=2\n";
+    repo.write("src/math.txt", "agent-a", base, 6..7, b"10".to_vec())
+        .unwrap();
+    repo.write("src/math.txt", "agent-b", base, 13..14, b"20".to_vec())
+        .unwrap();
+
+    let promoted = repo.promote("src/math.txt", "agent-a", base).unwrap();
+
+    assert_eq!(promoted, b"alpha=10\nbeta=2\n");
+    assert_eq!(
+        repo.read("src/math.txt", "agent-b", &promoted).unwrap(),
+        b"alpha=10\nbeta=20\n"
+    );
+    assert_eq!(
+        repo.change_ops("src/math.txt", "agent-b", Some(&promoted))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn overlapping_same_file_ops_remain_alternatives_after_promotion() {
+    let mut repo = seeded_repo();
+    let base = b"mode=base\n";
+    repo.write("src/mode.txt", "agent-a", base, 5..9, b"fast".to_vec())
+        .unwrap();
+    repo.write("src/mode.txt", "agent-b", base, 5..9, b"safe".to_vec())
+        .unwrap();
+
+    let before = repo
+        .change_ops("src/mode.txt", "agent-a", Some(base))
+        .unwrap();
+    assert_eq!(before[0].conflicts_with, vec!["agent-b".to_owned()]);
+
+    let promoted = repo.promote("src/mode.txt", "agent-a", base).unwrap();
+
+    assert_eq!(promoted, b"mode=fast\n");
+    assert_eq!(
+        repo.read("src/mode.txt", "agent-b", &promoted).unwrap(),
+        b"mode=safe\n"
+    );
+    assert!(
+        !repo
+            .change_ops("src/mode.txt", "agent-b", Some(&promoted))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn same_position_inserts_have_deterministic_order_without_conflict() {
+    let mut repo = seeded_repo();
+    let base = b"tail\n";
+    repo.write(
+        "src/imports.txt",
+        "agent-a",
+        base,
+        0..0,
+        b"use a;\n".to_vec(),
+    )
+    .unwrap();
+    repo.write(
+        "src/imports.txt",
+        "agent-b",
+        base,
+        0..0,
+        b"use b;\n".to_vec(),
+    )
+    .unwrap();
+
+    assert!(
+        repo.change_ops("src/imports.txt", "agent-a", Some(base))
+            .unwrap()[0]
+            .conflicts_with
+            .is_empty()
+    );
+
+    let promoted = repo.promote("src/imports.txt", "agent-a", base).unwrap();
+
+    assert_eq!(promoted, b"use a;\ntail\n");
+    assert_eq!(
+        repo.read("src/imports.txt", "agent-b", &promoted).unwrap(),
+        b"use a;\nuse b;\ntail\n"
+    );
+}
+
+#[test]
+fn same_position_inserts_into_empty_file_are_not_create_conflicts() {
+    let mut repo = seeded_repo();
+    let base = b"";
+    repo.write("src/empty.txt", "agent-a", base, 0..0, b"a".to_vec())
+        .unwrap();
+    repo.write("src/empty.txt", "agent-b", base, 0..0, b"b".to_vec())
+        .unwrap();
+
+    assert!(
+        repo.change_ops("src/empty.txt", "agent-a", Some(base))
+            .unwrap()[0]
+            .conflicts_with
+            .is_empty()
+    );
+
+    let promoted = repo.promote("src/empty.txt", "agent-a", base).unwrap();
+
+    assert_eq!(promoted, b"a");
+    assert_eq!(
+        repo.read("src/empty.txt", "agent-b", &promoted).unwrap(),
+        b"ab"
     );
 }
 

@@ -25,7 +25,7 @@ use winfsp_wrs::{
 
 use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
 use crate::vfs::{DirEntryKind, FileWorktree, LaneFs, LaneFsError};
-use crate::{FilePath, LaneError};
+use crate::{FilePath, LaneError, LaneOpSummary};
 
 const STORAGE_PATH: &str = ".lane/repo.lane";
 
@@ -1373,11 +1373,15 @@ fn change_for_path(
         (Some(_), Some(_)) => VirtualChangeStatus::Modified,
         (None, None) => return Ok(None),
     };
+    let ops = fs
+        .change_ops(lane, &path)
+        .map_err(status_from_lane_fs_error)?;
     Ok(Some(VirtualChangeOutput {
         path,
         status,
         base_size: base.as_ref().map(Vec::len),
         lane_size: lane_bytes.as_ref().map(Vec::len),
+        ops,
     }))
 }
 
@@ -1396,8 +1400,8 @@ fn status_from_lane_error(error: LaneError) -> i32 {
         LaneError::BaseChanged { .. } => STATUS_ACCESS_DENIED,
         LaneError::ReservedLane(_) => STATUS_INVALID_PARAMETER,
         LaneError::RangeOutOfBounds { .. }
-        | LaneError::BlobMissing(_)
-        | LaneError::ExtentOutOfBounds => STATUS_INVALID_PARAMETER,
+        | LaneError::OperationOutOfBounds { .. }
+        | LaneError::OperationConflict { .. } => STATUS_INVALID_PARAMETER,
     }
 }
 
@@ -1492,6 +1496,7 @@ struct VirtualChangeOutput {
     status: VirtualChangeStatus,
     base_size: Option<usize>,
     lane_size: Option<usize>,
+    ops: Vec<LaneOpSummary>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]

@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::storage::persist_bytes;
-use crate::{FilePath, LaneError, LaneRepo};
+use crate::{FilePath, LaneError, LaneOpSummary, LaneRepo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirEntry {
@@ -226,6 +226,14 @@ impl<W: Worktree> LaneFs<W> {
             .overlay_paths(lane)
             .map_err(LaneFsError::Lane)
             .map(|paths| paths.into_iter().map(str::to_owned).collect())
+    }
+
+    pub fn change_ops(&self, lane: &str, path: &str) -> Result<Vec<LaneOpSummary>, LaneFsError> {
+        let path = normalize_repo_path(path)?;
+        let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
+        self.repo
+            .change_ops(&path, lane, base.as_deref())
+            .map_err(LaneFsError::Lane)
     }
 
     pub fn discard_lane(&mut self, lane: &str) -> bool {

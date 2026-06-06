@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Range;
 
+use serde::Serialize;
+use similar::{Algorithm, DiffTag, capture_diff_slices};
+
 pub mod cli;
 pub mod storage;
 pub mod vfs;
@@ -10,6 +13,8 @@ pub(crate) mod virtual_exec;
 
 pub type FilePath = String;
 pub type LaneId = String;
+
+const STORAGE_MAGIC: &[u8] = b"LANEREPO\0\0\0\x03";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaneRepo {
@@ -23,10 +28,31 @@ pub struct PromotedFile {
     pub bytes: Option<Vec<u8>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LaneOpSummary {
+    pub op_id: String,
+    pub lane: LaneId,
+    pub path: FilePath,
+    pub kind: LaneOpKind,
+    pub base_start: u64,
+    pub base_end: u64,
+    pub inserted_len: u64,
+    pub order_key: String,
+    pub conflicts_with: Vec<LaneId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneOpKind {
+    Create,
+    Insert,
+    Delete,
+    Replace,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LaneFile {
     base: BaseState,
-    blobs: Vec<Vec<u8>>,
     lanes: BTreeMap<LaneId, LaneEntry>,
 }
 
@@ -44,20 +70,16 @@ enum LaneEntry {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LaneView {
-    extents: Vec<Extent>,
+    ops: Vec<FileOp>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Extent {
-    source: Source,
-    start: u64,
-    len: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Source {
-    Base,
-    Blob(u64),
+struct FileOp {
+    id: u64,
+    base_start: u64,
+    base_len: u64,
+    order: u64,
+    inserted: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,8 +89,8 @@ pub enum LaneError {
     BaseMissing { path: FilePath },
     BaseChanged { path: FilePath },
     RangeOutOfBounds { start: u64, end: u64, len: u64 },
-    BlobMissing(u64),
-    ExtentOutOfBounds,
+    OperationOutOfBounds { path: FilePath },
+    OperationConflict { path: FilePath },
 }
 
 impl LaneRepo {
@@ -132,6 +154,19 @@ impl LaneRepo {
             .ok_or_else(|| LaneError::BaseMissing {
                 path: path.to_owned(),
             })
+    }
+
+    pub fn change_ops(
+        &self,
+        path: &str,
+        lane: &str,
+        base: Option<&[u8]>,
+    ) -> Result<Vec<LaneOpSummary>, LaneError> {
+        self.ensure_lane(lane)?;
+        let Some(file) = self.files.get(path) else {
+            return Ok(Vec::new());
+        };
+        file.change_ops(path, lane, base)
     }
 
     pub fn write_path(
@@ -297,7 +332,7 @@ impl LaneRepo {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"LANEREPO\0\0\0\x02");
+        bytes.extend_from_slice(STORAGE_MAGIC);
 
         write_u64(&mut bytes, self.lanes.len() as u64);
         for lane in &self.lanes {
@@ -318,35 +353,22 @@ impl LaneRepo {
                 }
             }
 
-            write_u64(&mut bytes, file.blobs.len() as u64);
-            for blob in &file.blobs {
-                write_bytes(&mut bytes, blob);
-            }
-
             write_u64(&mut bytes, file.lanes.len() as u64);
             for (lane, entry) in &file.lanes {
                 write_bytes(&mut bytes, lane.as_bytes());
                 match entry {
+                    LaneEntry::Deleted => bytes.push(0),
                     LaneEntry::Present(view) => {
                         bytes.push(1);
-                        write_u64(&mut bytes, view.extents.len() as u64);
-                        for extent in &view.extents {
-                            match extent.source {
-                                Source::Base => {
-                                    bytes.push(0);
-                                    write_u64(&mut bytes, extent.start);
-                                    write_u64(&mut bytes, extent.len);
-                                }
-                                Source::Blob(blob_id) => {
-                                    bytes.push(1);
-                                    write_u64(&mut bytes, blob_id);
-                                    write_u64(&mut bytes, extent.start);
-                                    write_u64(&mut bytes, extent.len);
-                                }
-                            }
+                        write_u64(&mut bytes, view.ops.len() as u64);
+                        for op in &view.ops {
+                            write_u64(&mut bytes, op.id);
+                            write_u64(&mut bytes, op.base_start);
+                            write_u64(&mut bytes, op.base_len);
+                            write_u64(&mut bytes, op.order);
+                            write_bytes(&mut bytes, &op.inserted);
                         }
                     }
-                    LaneEntry::Deleted => bytes.push(0),
                 }
             }
         }
@@ -356,7 +378,7 @@ impl LaneRepo {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut cursor = Cursor::new(bytes);
-        cursor.expect(b"LANEREPO\0\0\0\x02")?;
+        cursor.expect(STORAGE_MAGIC)?;
 
         let mut lanes = BTreeSet::new();
         for _ in 0..cursor.read_u64()? {
@@ -375,30 +397,24 @@ impl LaneRepo {
                 tag => return Err(DecodeError::InvalidBase(tag)),
             };
 
-            let mut blobs = Vec::new();
-            for _ in 0..cursor.read_u64()? {
-                blobs.push(cursor.read_bytes()?.to_vec());
-            }
-
             let mut overlays = BTreeMap::new();
             for _ in 0..cursor.read_u64()? {
                 let lane = read_string(&mut cursor)?;
                 let entry = match cursor.read_byte()? {
                     0 => LaneEntry::Deleted,
                     1 => {
-                        let mut extents = Vec::new();
+                        let mut ops = Vec::new();
                         for _ in 0..cursor.read_u64()? {
-                            let source = match cursor.read_byte()? {
-                                0 => Source::Base,
-                                1 => Source::Blob(cursor.read_u64()?),
-                                tag => return Err(DecodeError::InvalidSource(tag)),
-                            };
-                            let start = cursor.read_u64()?;
-                            let len = cursor.read_u64()?;
-                            extents.push(Extent { source, start, len });
+                            ops.push(FileOp {
+                                id: cursor.read_u64()?,
+                                base_start: cursor.read_u64()?,
+                                base_len: cursor.read_u64()?,
+                                order: cursor.read_u64()?,
+                                inserted: cursor.read_bytes()?.to_vec(),
+                            });
                         }
                         LaneEntry::Present(LaneView {
-                            extents: normalize_extents_checked(extents)?,
+                            ops: normalize_ops_checked(ops)?,
                         })
                     }
                     tag => return Err(DecodeError::InvalidEntry(tag)),
@@ -410,7 +426,6 @@ impl LaneRepo {
                 path,
                 LaneFile {
                     base,
-                    blobs,
                     lanes: overlays,
                 },
             );
@@ -464,7 +479,6 @@ impl LaneFile {
     fn new(base: Option<&[u8]>) -> Self {
         Self {
             base: BaseState::for_content(base),
-            blobs: Vec::new(),
             lanes: BTreeMap::new(),
         }
     }
@@ -477,10 +491,25 @@ impl LaneFile {
     ) -> Result<Option<Vec<u8>>, LaneError> {
         self.ensure_base(path, base)?;
         match self.lanes.get(lane) {
-            Some(LaneEntry::Present(view)) => self.render(view, base.unwrap_or_default()).map(Some),
+            Some(LaneEntry::Present(view)) => {
+                render_ops(path, base.unwrap_or_default(), &view.ops).map(Some)
+            }
             Some(LaneEntry::Deleted) => Ok(None),
             None => Ok(base.map(<[u8]>::to_vec)),
         }
+    }
+
+    fn change_ops(
+        &self,
+        path: &str,
+        lane: &str,
+        base: Option<&[u8]>,
+    ) -> Result<Vec<LaneOpSummary>, LaneError> {
+        self.ensure_base(path, base)?;
+        let Some(entry) = self.lanes.get(lane) else {
+            return Ok(Vec::new());
+        };
+        Ok(self.summarize_entry(path, lane, entry, base))
     }
 
     fn replace(
@@ -491,7 +520,7 @@ impl LaneFile {
         content: Option<Vec<u8>>,
     ) -> Result<(), LaneError> {
         self.ensure_base(path, base)?;
-        let entry = self.entry_for_content(base, content);
+        let entry = entry_for_content(base, content);
         match entry {
             Some(entry) => {
                 self.lanes.insert(lane.to_owned(), entry);
@@ -511,16 +540,46 @@ impl LaneFile {
     ) -> Result<Option<Vec<u8>>, LaneError> {
         self.ensure_base(path, base)?;
         let promoted = self.read(path, lane, base)?;
-
-        let lanes: Vec<_> = self.lanes.keys().cloned().collect();
-        let mut preserved = BTreeMap::new();
-        for lane_id in lanes {
-            let bytes = self.read(path, &lane_id, base)?;
-            preserved.insert(lane_id, self.entry_for_snapshot(bytes));
-        }
+        let promoted_entry = self.lanes.get(lane).cloned();
+        let old_entries = self.lanes.clone();
+        let old_views = old_entries
+            .iter()
+            .map(|(lane_id, entry)| {
+                self.read(path, lane_id, base)
+                    .map(|bytes| (lane_id.clone(), entry.clone(), bytes))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         self.base = BaseState::for_content(promoted.as_deref());
-        self.lanes = preserved;
+        self.lanes.clear();
+
+        for (lane_id, entry, old_bytes) in old_views {
+            let content = if lane_id == lane {
+                promoted.clone()
+            } else if let (
+                Some(LaneEntry::Present(promoted_view)),
+                LaneEntry::Present(view),
+                Some(old_base),
+            ) = (&promoted_entry, &entry, base)
+            {
+                if entries_conflict(&promoted_view.ops, &view.ops, false) {
+                    old_bytes
+                } else {
+                    Some(render_ops(
+                        path,
+                        old_base,
+                        &combined_ops(&promoted_view.ops, &view.ops),
+                    )?)
+                }
+            } else {
+                old_bytes
+            };
+
+            if let Some(next_entry) = entry_for_content(promoted.as_deref(), content) {
+                self.lanes.insert(lane_id, next_entry);
+            }
+        }
+
         Ok(promoted)
     }
 
@@ -534,78 +593,6 @@ impl LaneFile {
 
     fn is_empty(&self) -> bool {
         self.lanes.is_empty()
-    }
-
-    fn render(&self, view: &LaneView, base: &[u8]) -> Result<Vec<u8>, LaneError> {
-        let mut bytes = Vec::with_capacity(extents_len(&view.extents) as usize);
-        for extent in &view.extents {
-            let source = match extent.source {
-                Source::Base => base,
-                Source::Blob(blob_id) => self
-                    .blobs
-                    .get(blob_id as usize)
-                    .ok_or(LaneError::BlobMissing(blob_id))?,
-            };
-            let start: usize = extent
-                .start
-                .try_into()
-                .map_err(|_| LaneError::ExtentOutOfBounds)?;
-            let len: usize = extent
-                .len
-                .try_into()
-                .map_err(|_| LaneError::ExtentOutOfBounds)?;
-            let end = start.checked_add(len).ok_or(LaneError::ExtentOutOfBounds)?;
-            let slice = source.get(start..end).ok_or(LaneError::ExtentOutOfBounds)?;
-            bytes.extend_from_slice(slice);
-        }
-        Ok(bytes)
-    }
-
-    fn push_blob(&mut self, bytes: Vec<u8>) -> u64 {
-        let blob_id = self.blobs.len() as u64;
-        self.blobs.push(bytes);
-        blob_id
-    }
-
-    fn entry_for_content(
-        &mut self,
-        base: Option<&[u8]>,
-        content: Option<Vec<u8>>,
-    ) -> Option<LaneEntry> {
-        if content.as_deref() == base {
-            return None;
-        }
-        match content {
-            Some(bytes) => {
-                let blob_id = self.push_blob(bytes);
-                let len = self.blobs[blob_id as usize].len() as u64;
-                Some(LaneEntry::Present(LaneView {
-                    extents: vec![Extent {
-                        source: Source::Blob(blob_id),
-                        start: 0,
-                        len,
-                    }],
-                }))
-            }
-            None => Some(LaneEntry::Deleted),
-        }
-    }
-
-    fn entry_for_snapshot(&mut self, content: Option<Vec<u8>>) -> LaneEntry {
-        match content {
-            Some(bytes) => {
-                let blob_id = self.push_blob(bytes);
-                let len = self.blobs[blob_id as usize].len() as u64;
-                LaneEntry::Present(LaneView {
-                    extents: vec![Extent {
-                        source: Source::Blob(blob_id),
-                        start: 0,
-                        len,
-                    }],
-                })
-            }
-            None => LaneEntry::Deleted,
-        }
     }
 
     fn ensure_base(&self, path: &str, base: Option<&[u8]>) -> Result<(), LaneError> {
@@ -623,21 +610,76 @@ impl LaneFile {
             let LaneEntry::Present(view) = entry else {
                 continue;
             };
-            for extent in &view.extents {
-                let Source::Blob(blob_id) = extent.source else {
-                    continue;
-                };
-                let source_len = self
-                    .blobs
-                    .get(blob_id as usize)
-                    .ok_or(DecodeError::BlobMissing(blob_id))?
-                    .len() as u64;
-                if extent.start > source_len || extent.len > source_len - extent.start {
-                    return Err(DecodeError::ExtentOutOfBounds);
-                }
-            }
+            validate_ops(&view.ops)?;
         }
         Ok(())
+    }
+
+    fn summarize_entry(
+        &self,
+        path: &str,
+        lane: &str,
+        entry: &LaneEntry,
+        base: Option<&[u8]>,
+    ) -> Vec<LaneOpSummary> {
+        match entry {
+            LaneEntry::Present(view) => view
+                .ops
+                .iter()
+                .map(|op| self.summarize_op(path, lane, op, base))
+                .collect(),
+            LaneEntry::Deleted => vec![LaneOpSummary {
+                op_id: format!("{lane}:delete"),
+                lane: lane.to_owned(),
+                path: path.to_owned(),
+                kind: LaneOpKind::Delete,
+                base_start: 0,
+                base_end: base.map(|bytes| bytes.len() as u64).unwrap_or(0),
+                inserted_len: 0,
+                order_key: format!("00000000000000000000:{lane}:delete"),
+                conflicts_with: self
+                    .lanes
+                    .iter()
+                    .filter_map(|(other_lane, other_entry)| {
+                        (other_lane != lane && entry_conflicts_with_delete(other_entry, base))
+                            .then_some(other_lane.clone())
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    fn summarize_op(
+        &self,
+        path: &str,
+        lane: &str,
+        op: &FileOp,
+        base: Option<&[u8]>,
+    ) -> LaneOpSummary {
+        let base_missing = base.is_none();
+        LaneOpSummary {
+            op_id: format!("{lane}:{}", op.id),
+            lane: lane.to_owned(),
+            path: path.to_owned(),
+            kind: op_kind(op, base_missing),
+            base_start: op.base_start,
+            base_end: op.base_start + op.base_len,
+            inserted_len: op.inserted.len() as u64,
+            order_key: order_key(lane, op),
+            conflicts_with: self.conflicts_for_op(lane, op, base_missing),
+        }
+    }
+
+    fn conflicts_for_op(&self, lane: &str, op: &FileOp, base_missing: bool) -> Vec<LaneId> {
+        self.lanes
+            .iter()
+            .filter_map(|(other_lane, other_entry)| {
+                if other_lane == lane {
+                    return None;
+                }
+                entry_conflicts_with_op(other_entry, op, base_missing).then_some(other_lane.clone())
+            })
+            .collect()
     }
 }
 
@@ -648,9 +690,8 @@ pub enum DecodeError {
     InvalidUtf8,
     InvalidBase(u8),
     InvalidEntry(u8),
-    InvalidSource(u8),
-    BlobMissing(u64),
-    ExtentOutOfBounds,
+    OperationConflict,
+    OperationOutOfBounds,
     OverlayLaneMissing(LaneId),
     TrailingBytes,
 }
@@ -662,6 +703,195 @@ impl fmt::Display for DecodeError {
 }
 
 impl std::error::Error for DecodeError {}
+
+fn entry_for_content(base: Option<&[u8]>, content: Option<Vec<u8>>) -> Option<LaneEntry> {
+    if content.as_deref() == base {
+        return None;
+    }
+    match content {
+        Some(bytes) => Some(LaneEntry::Present(LaneView {
+            ops: diff_to_ops(base.unwrap_or_default(), &bytes, base.is_none()),
+        })),
+        None if base.is_some() => Some(LaneEntry::Deleted),
+        None => None,
+    }
+}
+
+fn diff_to_ops(base: &[u8], content: &[u8], base_missing: bool) -> Vec<FileOp> {
+    if base_missing || is_probably_binary(base) || is_probably_binary(content) {
+        return coarse_replace_ops(base, content);
+    }
+
+    let mut ops = Vec::new();
+    for diff_op in capture_diff_slices(Algorithm::Myers, base, content) {
+        let (tag, old_range, new_range) = diff_op.as_tag_tuple();
+        if tag == DiffTag::Equal {
+            continue;
+        }
+        let id = ops.len() as u64 + 1;
+        ops.push(FileOp {
+            id,
+            base_start: old_range.start as u64,
+            base_len: (old_range.end - old_range.start) as u64,
+            order: id,
+            inserted: content[new_range].to_vec(),
+        });
+    }
+    ops
+}
+
+fn coarse_replace_ops(base: &[u8], content: &[u8]) -> Vec<FileOp> {
+    if base == content {
+        Vec::new()
+    } else {
+        vec![FileOp {
+            id: 1,
+            base_start: 0,
+            base_len: base.len() as u64,
+            order: 1,
+            inserted: content.to_vec(),
+        }]
+    }
+}
+
+fn render_ops(path: &str, base: &[u8], ops: &[FileOp]) -> Result<Vec<u8>, LaneError> {
+    let mut rendered = Vec::new();
+    let mut cursor = 0usize;
+    for op in sorted_ops(ops) {
+        let start =
+            usize::try_from(op.base_start).map_err(|_| LaneError::OperationOutOfBounds {
+                path: path.to_owned(),
+            })?;
+        let len = usize::try_from(op.base_len).map_err(|_| LaneError::OperationOutOfBounds {
+            path: path.to_owned(),
+        })?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| LaneError::OperationOutOfBounds {
+                path: path.to_owned(),
+            })?;
+        if start < cursor || end > base.len() {
+            return Err(LaneError::OperationConflict {
+                path: path.to_owned(),
+            });
+        }
+        rendered.extend_from_slice(&base[cursor..start]);
+        rendered.extend_from_slice(&op.inserted);
+        cursor = end;
+    }
+    rendered.extend_from_slice(&base[cursor..]);
+    Ok(rendered)
+}
+
+fn sorted_ops(ops: &[FileOp]) -> Vec<&FileOp> {
+    let mut sorted = ops.iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| {
+        left.base_start
+            .cmp(&right.base_start)
+            .then(left.base_len.cmp(&right.base_len))
+            .then(left.order.cmp(&right.order))
+            .then(left.id.cmp(&right.id))
+    });
+    sorted
+}
+
+fn combined_ops(left: &[FileOp], right: &[FileOp]) -> Vec<FileOp> {
+    let mut ops = left.to_vec();
+    ops.extend_from_slice(right);
+    ops
+}
+
+fn entries_conflict(left: &[FileOp], right: &[FileOp], base_missing: bool) -> bool {
+    left.iter().any(|left_op| {
+        right
+            .iter()
+            .any(|right_op| ops_conflict(left_op, right_op, base_missing))
+    })
+}
+
+fn entry_conflicts_with_op(entry: &LaneEntry, op: &FileOp, base_missing: bool) -> bool {
+    match entry {
+        LaneEntry::Deleted => !base_missing,
+        LaneEntry::Present(view) => view
+            .ops
+            .iter()
+            .any(|other| ops_conflict(op, other, base_missing)),
+    }
+}
+
+fn entry_conflicts_with_delete(entry: &LaneEntry, base: Option<&[u8]>) -> bool {
+    match entry {
+        LaneEntry::Deleted => false,
+        LaneEntry::Present(view) => base
+            .map(|bytes| !bytes.is_empty() && !view.ops.is_empty())
+            .unwrap_or(!view.ops.is_empty()),
+    }
+}
+
+fn ops_conflict(left: &FileOp, right: &FileOp, base_missing: bool) -> bool {
+    if base_missing {
+        return true;
+    }
+    let left_range = op_range(left);
+    let right_range = op_range(right);
+    if left.base_len == 0 && right.base_len == 0 {
+        return false;
+    }
+    if left.base_len == 0 {
+        return right_range.start < left_range.start && left_range.start < right_range.end;
+    }
+    if right.base_len == 0 {
+        return left_range.start < right_range.start && right_range.start < left_range.end;
+    }
+    left_range.start < right_range.end && right_range.start < left_range.end
+}
+
+fn op_range(op: &FileOp) -> Range<u64> {
+    op.base_start..op.base_start + op.base_len
+}
+
+fn op_kind(op: &FileOp, base_missing: bool) -> LaneOpKind {
+    if base_missing {
+        LaneOpKind::Create
+    } else if op.base_len == 0 {
+        LaneOpKind::Insert
+    } else if op.inserted.is_empty() {
+        LaneOpKind::Delete
+    } else {
+        LaneOpKind::Replace
+    }
+}
+
+fn order_key(lane: &str, op: &FileOp) -> String {
+    format!("{:020}:{lane}:{:020}", op.base_start, op.order)
+}
+
+fn is_probably_binary(bytes: &[u8]) -> bool {
+    bytes.contains(&0)
+}
+
+fn validate_ops(ops: &[FileOp]) -> Result<(), DecodeError> {
+    let mut cursor = 0u64;
+    for op in sorted_ops(ops) {
+        let end = op
+            .base_start
+            .checked_add(op.base_len)
+            .ok_or(DecodeError::OperationOutOfBounds)?;
+        if op.base_start < cursor {
+            return Err(DecodeError::OperationConflict);
+        }
+        cursor = end;
+    }
+    Ok(())
+}
+
+fn normalize_ops_checked(ops: Vec<FileOp>) -> Result<Vec<FileOp>, DecodeError> {
+    validate_ops(&ops)?;
+    Ok(ops
+        .into_iter()
+        .filter(|op| op.base_len > 0 || !op.inserted.is_empty())
+        .collect())
+}
 
 fn ensure_user_lane(lane: &str) -> Result<(), LaneError> {
     if lane.trim().is_empty() || lane == "base" {
@@ -681,31 +911,6 @@ fn ensure_valid_range(range: Range<u64>, len: u64) -> Result<(), LaneError> {
     } else {
         Ok(())
     }
-}
-
-fn extents_len(extents: &[Extent]) -> u64 {
-    extents.iter().map(|extent| extent.len).sum()
-}
-
-fn normalize_extents_checked(extents: Vec<Extent>) -> Result<Vec<Extent>, DecodeError> {
-    let mut normalized: Vec<Extent> = Vec::new();
-    for extent in extents.into_iter().filter(|extent| extent.len > 0) {
-        if let Some(previous) = normalized.last_mut()
-            && previous.source == extent.source
-            && previous
-                .start
-                .checked_add(previous.len)
-                .is_some_and(|end| end == extent.start)
-        {
-            previous.len = previous
-                .len
-                .checked_add(extent.len)
-                .ok_or(DecodeError::ExtentOutOfBounds)?;
-            continue;
-        }
-        normalized.push(extent);
-    }
-    Ok(normalized)
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {

@@ -11,7 +11,7 @@ use similar::TextDiff;
 
 use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
 use crate::vfs::{FileWorktree, LaneFs, LaneFsError};
-use crate::{FilePath, LaneRepo};
+use crate::{FilePath, LaneOpSummary, LaneRepo};
 
 const STORAGE_PATH: &str = ".lane/repo.lane";
 
@@ -294,11 +294,13 @@ fn change_for_path(
         (Some(_), Some(_)) => ChangeStatus::Modified,
         (None, None) => return Ok(None),
     };
+    let ops = fs.change_ops(lane, &path)?;
     Ok(Some(ChangeOutput {
         path,
         status,
         base_size: base.as_ref().map(Vec::len),
         lane_size: lane_bytes.as_ref().map(Vec::len),
+        ops,
         base,
         lane: lane_bytes,
     }))
@@ -415,6 +417,7 @@ struct ChangeOutput {
     status: ChangeStatus,
     base_size: Option<usize>,
     lane_size: Option<usize>,
+    ops: Vec<LaneOpSummary>,
     #[serde(skip_serializing)]
     base: Option<Vec<u8>>,
     #[serde(skip_serializing)]
