@@ -353,11 +353,12 @@ fn run_lane_wedge(
 
         let reset_start = Instant::now();
         for attempt in 0..attempts {
-            run_checked(Command::new(lane_bin).arg("--repo-root").arg(root).args([
-                "discard",
-                &lane_name(attempt),
-                "--json",
-            ]));
+            run_checked(
+                Command::new(lane_bin)
+                    .arg("--repo-root")
+                    .arg(root)
+                    .args(["discard", &lane_name(attempt)]),
+            );
         }
         let reset_ms = elapsed_ms(reset_start);
 
@@ -481,7 +482,6 @@ fn promote_lane_selection(lane_bin: &Path, root: &Path, cycle: usize, attempts: 
                 "promote",
                 &lane_name(attempt),
                 &path,
-                "--json",
             ]));
             fs::metadata(root.join(path)).unwrap().len()
         })
@@ -513,11 +513,12 @@ fn git_changed_path_count(root: &Path) -> usize {
 }
 
 fn lane_changed_path_count(lane_bin: &Path, root: &Path, attempt: usize) -> usize {
-    let stdout = run_checked(Command::new(lane_bin).arg("--repo-root").arg(root).args([
-        "changes",
-        &lane_name(attempt),
-        "--json",
-    ]));
+    let stdout = run_checked(
+        Command::new(lane_bin)
+            .arg("--repo-root")
+            .arg(root)
+            .args(["changes", &lane_name(attempt)]),
+    );
     let value: Value = serde_json::from_slice(&stdout).unwrap();
     value["changes"].as_array().unwrap().len()
 }

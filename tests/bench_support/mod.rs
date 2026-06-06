@@ -372,7 +372,7 @@ fn run_lane_flow(lane_bin: &Path, lane_root: &Path, worker: WorkerKind) -> FlowM
             Command::new(lane_bin)
                 .arg("--repo-root")
                 .arg(lane_root)
-                .args(["changes", variant.name, "--json"]),
+                .args(["changes", variant.name]),
         );
     }
     let compare_ms = elapsed_ms(compare_start);
@@ -383,7 +383,7 @@ fn run_lane_flow(lane_bin: &Path, lane_root: &Path, worker: WorkerKind) -> FlowM
         Command::new(lane_bin)
             .arg("--repo-root")
             .arg(lane_root)
-            .args(["promote-lane", VARIANTS[WINNER].name, "--json"]),
+            .args(["promote-lane", VARIANTS[WINNER].name]),
     );
     let promote_ms = elapsed_ms(promote_start);
     let promoted_shared = read_shared(lane_root);
@@ -395,7 +395,7 @@ fn run_lane_flow(lane_bin: &Path, lane_root: &Path, worker: WorkerKind) -> FlowM
             Command::new(lane_bin)
                 .arg("--repo-root")
                 .arg(lane_root)
-                .args(["discard", variant.name, "--json"]),
+                .args(["discard", variant.name]),
         );
     }
     let cleanup_ms = elapsed_ms(cleanup_start);

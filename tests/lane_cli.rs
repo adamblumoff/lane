@@ -51,7 +51,7 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
     );
     assert!(!repo.path().join("src/created.ts").exists());
 
-    let changes = repo.run_json(["changes", "agent-a", "--json"]);
+    let changes = repo.run_json(["changes", "agent-a"]);
     assert_eq!(change_statuses(&changes), {
         let mut expected = BTreeMap::new();
         expected.insert("src/created.ts".to_owned(), "created".to_owned());
@@ -66,7 +66,7 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
     assert!(diff.contains("+export const mode = 'agent-a';"));
     assert!(diff.contains("+++ agent-a/src/created.ts"));
 
-    let promoted_file = repo.run_json(["promote", "agent-a", "src/example.ts", "--json"]);
+    let promoted_file = repo.run_json(["promote", "agent-a", "src/example.ts"]);
     assert_eq!(change_statuses_from_key(&promoted_file, "promoted"), {
         let mut expected = BTreeMap::new();
         expected.insert("src/example.ts".to_owned(), "modified".to_owned());
@@ -78,14 +78,14 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
     );
     assert!(!repo.path().join("src/created.ts").exists());
 
-    let remaining = repo.run_json(["changes", "agent-a", "--json"]);
+    let remaining = repo.run_json(["changes", "agent-a"]);
     assert_eq!(change_statuses(&remaining), {
         let mut expected = BTreeMap::new();
         expected.insert("src/created.ts".to_owned(), "created".to_owned());
         expected
     });
 
-    let promoted_lane = repo.run_json(["promote-lane", "agent-a", "--json"]);
+    let promoted_lane = repo.run_json(["promote-lane", "agent-a"]);
     assert_eq!(change_statuses_from_key(&promoted_lane, "promoted"), {
         let mut expected = BTreeMap::new();
         expected.insert("src/created.ts".to_owned(), "created".to_owned());
@@ -96,10 +96,10 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
         b"export const created = true;"
     );
 
-    let empty = repo.run_json(["changes", "agent-a", "--json"]);
+    let empty = repo.run_json(["changes", "agent-a"]);
     assert!(empty["changes"].as_array().unwrap().is_empty());
 
-    let discarded = repo.run_json(["discard", "agent-a", "--json"]);
+    let discarded = repo.run_json(["discard", "agent-a"]);
     assert_eq!(discarded["removed"], true);
     assert_eq!(discarded["discarded_changes"], 0);
 }
@@ -225,7 +225,7 @@ fn cli_exec_deleting_lane_created_file_clears_overlay() {
     assert!(result["changes"].as_array().unwrap().is_empty());
     assert!(!repo.path().join("src/created.ts").exists());
     assert!(
-        repo.run_json(["changes", "agent-a", "--json"])["changes"]
+        repo.run_json(["changes", "agent-a"])["changes"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -270,7 +270,7 @@ fn cli_exec_preserves_parallel_lane_outputs() {
         b"export const approach = 'base';"
     );
     assert_eq!(
-        change_statuses(&repo.run_json(["changes", "approach-a", "--json"])),
+        change_statuses(&repo.run_json(["changes", "approach-a"])),
         {
             let mut expected = BTreeMap::new();
             expected.insert("src/a.ts".to_owned(), "created".to_owned());
@@ -279,7 +279,7 @@ fn cli_exec_preserves_parallel_lane_outputs() {
         }
     );
     assert_eq!(
-        change_statuses(&repo.run_json(["changes", "approach-b", "--json"])),
+        change_statuses(&repo.run_json(["changes", "approach-b"])),
         {
             let mut expected = BTreeMap::new();
             expected.insert("src/b.ts".to_owned(), "created".to_owned());
@@ -288,7 +288,7 @@ fn cli_exec_preserves_parallel_lane_outputs() {
         }
     );
 
-    repo.run_json(["promote-lane", "approach-b", "--json"]);
+    repo.run_json(["promote-lane", "approach-b"]);
 
     assert_eq!(
         fs::read(repo.path().join("src/feature.ts")).unwrap(),
@@ -325,36 +325,30 @@ fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops()
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/math.txt', \"alpha=1`nbeta=20`ngamma=3`n\")",
     ]);
 
-    let changes = repo.run_json(["changes", "agent-a", "--json"]);
+    let changes = repo.run_json(["changes", "agent-a"]);
     let ops = changes["changes"][0]["ops"].as_array().unwrap();
     assert_eq!(ops.len(), 2);
     let op_id = ops[0]["op_id"].as_str().unwrap().to_owned();
 
-    let promoted = repo.run_json([
-        "promote-ops",
-        "agent-a",
-        "src/math.txt",
-        "--json",
-        op_id.as_str(),
-    ]);
+    let promoted = repo.run_json(["promote-ops", "agent-a", "src/math.txt", op_id.as_str()]);
     assert_eq!(string_array(&promoted["promoted_ops"]), vec![op_id]);
     assert_eq!(
         fs::read(repo.path().join("src/math.txt")).unwrap(),
         b"alpha=10\nbeta=2\ngamma=3\n"
     );
 
-    let remaining_a = repo.run_json(["changes", "agent-a", "--json"]);
+    let remaining_a = repo.run_json(["changes", "agent-a"]);
     let remaining_a_ops = remaining_a["changes"][0]["ops"].as_array().unwrap();
     assert_eq!(remaining_a_ops.len(), 1);
     assert_eq!(remaining_a_ops[0]["op_id"], "agent-a:2");
-    let remaining_b = repo.run_json(["changes", "agent-b", "--json"]);
+    let remaining_b = repo.run_json(["changes", "agent-b"]);
     assert_eq!(change_statuses(&remaining_b), {
         let mut expected = BTreeMap::new();
         expected.insert("src/math.txt".to_owned(), "modified".to_owned());
         expected
     });
 
-    repo.run_json(["promote-lane", "agent-b", "--json"]);
+    repo.run_json(["promote-lane", "agent-b"]);
     assert_eq!(
         fs::read(repo.path().join("src/math.txt")).unwrap(),
         b"alpha=10\nbeta=20\ngamma=3\n"
@@ -385,7 +379,7 @@ fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=1`nb=X`nc=3`n\")",
     ]);
 
-    let conflicts = repo.run_json(["conflicts", "agent-a", "--json"]);
+    let conflicts = repo.run_json(["conflicts", "agent-a"]);
     assert_eq!(conflicts["conflicts"].as_array().unwrap().len(), 1);
     let conflict_ops = conflicts["conflicts"][0]["ops"].as_array().unwrap();
     assert_eq!(conflict_ops.len(), 1);
@@ -395,7 +389,7 @@ fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
         vec!["agent-b"]
     );
 
-    let promoted = repo.run_json(["promote-clean", "agent-a", "--json"]);
+    let promoted = repo.run_json(["promote-clean", "agent-a"]);
     assert_eq!(promoted["promoted_ops"].as_array().unwrap().len(), 1);
     assert_eq!(promoted["promoted_ops"][0]["path"], "src/vars.txt");
     assert_eq!(
@@ -408,7 +402,7 @@ fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
         b"a=A\nb=2\nc=C\n"
     );
 
-    let remaining_a = repo.run_json(["changes", "agent-a", "--json"]);
+    let remaining_a = repo.run_json(["changes", "agent-a"]);
     let remaining_a_ops = remaining_a["changes"][0]["ops"].as_array().unwrap();
     assert_eq!(remaining_a_ops.len(), 1);
     assert_eq!(remaining_a_ops[0]["op_id"], "agent-a:2");
@@ -417,10 +411,91 @@ fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
         vec!["agent-b"]
     );
 
-    repo.run_json(["promote-lane", "agent-b", "--json"]);
+    repo.run_json(["promote-lane", "agent-b"]);
     assert_eq!(
         fs::read(repo.path().join("src/vars.txt")).unwrap(),
         b"a=A\nb=X\nc=C\n"
+    );
+}
+
+#[test]
+fn cli_review_groups_clean_ops_and_conflict_decisions_json_first() {
+    let repo = TempRepo::new();
+    repo.write("src/vars.txt", b"a=1\nb=2\nc=3\nd=4\n");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=A`nb=B`nc=3`nd=4`n\")",
+    ]);
+    repo.run_json([
+        "exec",
+        "agent-b",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=1`nb=X`nc=C`nd=4`n\")",
+    ]);
+    repo.run_json([
+        "exec",
+        "agent-c",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=1`nb=2`nc=3`nd=D`n\")",
+    ]);
+
+    let review = repo.run_json(["review"]);
+    assert_eq!(review["lane"], Value::Null);
+    assert_eq!(review["summary"]["lanes"], 3);
+    assert_eq!(review["summary"]["changed_paths"], 1);
+    assert_eq!(review["summary"]["clean_ops"], 3);
+    assert_eq!(review["summary"]["conflicted_ops"], 2);
+    assert_eq!(review["summary"]["conflict_groups"], 1);
+
+    let path = &review["paths"][0];
+    assert_eq!(path["path"], "src/vars.txt");
+    assert_eq!(path["lanes"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        review_op_ids(&path["clean_ops"]),
+        vec!["agent-a:1", "agent-b:2", "agent-c:1"]
+    );
+
+    let conflict = &path["conflicts"][0];
+    assert_eq!(conflict["range_start"], 6);
+    assert_eq!(conflict["range_end"], 7);
+    assert_eq!(string_array(&conflict["lanes"]), vec!["agent-a", "agent-b"]);
+    assert_eq!(
+        review_op_ids(&conflict["ops"]),
+        vec!["agent-a:2", "agent-b:1"]
+    );
+    assert_eq!(conflict["ops"][0]["base"]["utf8"], "2");
+    assert_eq!(conflict["ops"][0]["inserted"]["utf8"], "B");
+    assert_eq!(conflict["ops"][1]["inserted"]["utf8"], "X");
+
+    let agent_a_review = repo.run_json(["review", "agent-a"]);
+    assert_eq!(agent_a_review["lane"], "agent-a");
+    assert_eq!(agent_a_review["summary"]["lanes"], 1);
+    assert_eq!(agent_a_review["summary"]["clean_ops"], 1);
+    assert_eq!(agent_a_review["summary"]["conflicted_ops"], 1);
+    assert_eq!(
+        review_op_ids(&agent_a_review["paths"][0]["conflicts"][0]["ops"]),
+        vec!["agent-a:2"]
+    );
+
+    repo.run_json(["promote-clean", "agent-a"]);
+    let after_clean = repo.run_json(["review", "agent-a"]);
+    assert_eq!(after_clean["summary"]["clean_ops"], 0);
+    assert_eq!(after_clean["summary"]["conflicted_ops"], 1);
+    assert_eq!(
+        review_op_ids(&after_clean["paths"][0]["conflicts"][0]["ops"]),
+        vec!["agent-a:2"]
     );
 }
 
@@ -448,9 +523,9 @@ fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=1`nb=X`nc=3`n\")",
     ]);
 
-    repo.run_json(["promote-clean", "agent-a", "--json"]);
+    repo.run_json(["promote-clean", "agent-a"]);
 
-    let shown = repo.run_json(["show-op", "agent-a", "src/vars.txt", "agent-a:2", "--json"]);
+    let shown = repo.run_json(["show-op", "agent-a", "src/vars.txt", "agent-a:2"]);
     assert_eq!(shown["op"]["op_id"], "agent-a:2");
     assert_eq!(shown["base"]["utf8"], "2");
     assert_eq!(shown["inserted"]["utf8"], "B");
@@ -467,8 +542,7 @@ fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
         "src/vars.txt".to_owned(),
         "agent-a:2".to_owned(),
         "--with-file".to_owned(),
-        replacement.display().to_string(),
-        "--json".to_owned(),
+        replacement.display().to_string().to_owned(),
     ]));
 
     assert_eq!(resolved["resolved_op"]["op_id"], "agent-a:2");
@@ -479,12 +553,12 @@ fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
         b"a=A\nb=Y\nc=C\n"
     );
 
-    let agent_b = repo.run_json(["changes", "agent-b", "--json"]);
+    let agent_b = repo.run_json(["changes", "agent-b"]);
     let agent_b_ops = agent_b["changes"][0]["ops"].as_array().unwrap();
     assert_eq!(agent_b_ops.len(), 1);
     assert_eq!(agent_b_ops[0]["inserted_len"], 1);
     assert_eq!(
-        repo.run_json(["conflicts", "agent-b", "--json"])["conflicts"]
+        repo.run_json(["conflicts", "agent-b"])["conflicts"]
             .as_array()
             .unwrap()
             .len(),
@@ -516,7 +590,7 @@ fn cli_exec_releases_storage_lock_while_worker_runs() {
 
     wait_for_path(&marker);
     let storage_command_start = Instant::now();
-    let created = repo.run_json(["create", "observer", "--json"]);
+    let created = repo.run_json(["create", "observer"]);
     assert_eq!(created["created"], true);
     assert!(
         storage_command_start.elapsed() < Duration::from_millis(1000),
@@ -529,7 +603,7 @@ fn cli_exec_releases_storage_lock_while_worker_runs() {
     assert_eq!(result["worker_error"], Value::Null);
     assert!(result["timings"]["storage_lock_held_ms"].as_u64().unwrap() < 1000);
 
-    let existing = repo.run_json(["create", "observer", "--json"]);
+    let existing = repo.run_json(["create", "observer"]);
     assert_eq!(existing["created"], false);
     let _ = fs::remove_file(marker);
 }
@@ -579,18 +653,15 @@ fn cli_parent_can_orchestrate_five_parallel_lane_execs_directly() {
     );
 
     for (lane, design) in variants {
-        assert_eq!(
-            change_statuses(&repo.run_json(["changes", lane, "--json"])),
-            {
-                let mut expected = BTreeMap::new();
-                expected.insert(format!("src/{design}.tsx"), "created".to_owned());
-                expected.insert("src/login.tsx".to_owned(), "modified".to_owned());
-                expected
-            }
-        );
+        assert_eq!(change_statuses(&repo.run_json(["changes", lane])), {
+            let mut expected = BTreeMap::new();
+            expected.insert(format!("src/{design}.tsx"), "created".to_owned());
+            expected.insert("src/login.tsx".to_owned(), "modified".to_owned());
+            expected
+        });
     }
 
-    repo.run_json(["promote-lane", "login-enterprise", "--json"]);
+    repo.run_json(["promote-lane", "login-enterprise"]);
     assert_eq!(
         fs::read(repo.path().join("src/login.tsx")).unwrap(),
         b"export const design = 'enterprise';"
@@ -606,7 +677,7 @@ fn cli_parent_can_orchestrate_five_parallel_lane_execs_directly() {
 
     for (lane, _) in variants {
         if lane != "login-enterprise" {
-            let discarded = repo.run_json(["discard", lane, "--json"]);
+            let discarded = repo.run_json(["discard", lane]);
             assert_eq!(discarded["removed"], true);
         }
     }
@@ -664,7 +735,7 @@ fn cli_exec_buffers_chunked_writes_until_worker_finishes() {
     });
     assert!(!repo.path().join("src/big.bin").exists());
 
-    repo.run_json(["promote-lane", "chunked", "--json"]);
+    repo.run_json(["promote-lane", "chunked"]);
     assert_eq!(
         fs::metadata(repo.path().join("src/big.bin")).unwrap().len(),
         1 << 20
@@ -699,7 +770,7 @@ fn cli_exec_creates_nested_file_in_new_directory() {
     });
     assert!(!repo.path().join("src/nested").exists());
 
-    repo.run_json(["promote-lane", "nested-create", "--json"]);
+    repo.run_json(["promote-lane", "nested-create"]);
     assert_eq!(
         fs::read(repo.path().join("src/nested/created.ts")).unwrap(),
         b"export const created = true;"
@@ -738,7 +809,7 @@ fn cli_exec_replaces_file_with_directory_tree() {
         b"base file"
     );
 
-    repo.run_json(["promote-lane", "file-to-dir", "--json"]);
+    repo.run_json(["promote-lane", "file-to-dir"]);
     assert!(repo.path().join("src/swap").is_dir());
     assert_eq!(
         fs::read(repo.path().join("src/swap/nested.txt")).unwrap(),
@@ -779,7 +850,7 @@ fn cli_exec_replaces_directory_tree_with_file() {
         b"original"
     );
 
-    repo.run_json(["promote-lane", "dir-to-file", "--json"]);
+    repo.run_json(["promote-lane", "dir-to-file"]);
     assert!(repo.path().join("src/swap").is_file());
     assert_eq!(
         fs::read(repo.path().join("src/swap")).unwrap(),
@@ -822,7 +893,7 @@ fn cli_exec_runs_agent_like_process_with_git_view_and_atomic_save() {
     );
     assert!(!repo.path().join("src/login.tsx.tmp").exists());
 
-    repo.run_json(["promote-lane", "agent-realish", "--json"]);
+    repo.run_json(["promote-lane", "agent-realish"]);
     assert_eq!(
         fs::read(repo.path().join("src/login.tsx")).unwrap(),
         b"export const design = 'agent-realish';"
@@ -1086,6 +1157,15 @@ fn string_array(value: &Value) -> Vec<String> {
         .unwrap()
         .iter()
         .map(|value| value.as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn review_op_ids(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value["op"]["op_id"].as_str().unwrap().to_owned())
         .collect()
 }
 
