@@ -362,6 +362,69 @@ fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops()
 }
 
 #[test]
+fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
+    let repo = TempRepo::new();
+    repo.write("src/vars.txt", b"a=1\nb=2\nc=3\n");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=A`nb=B`nc=C`n\")",
+    ]);
+    repo.run_json([
+        "exec",
+        "agent-b",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=1`nb=X`nc=3`n\")",
+    ]);
+
+    let conflicts = repo.run_json(["conflicts", "agent-a", "--json"]);
+    assert_eq!(conflicts["conflicts"].as_array().unwrap().len(), 1);
+    let conflict_ops = conflicts["conflicts"][0]["ops"].as_array().unwrap();
+    assert_eq!(conflict_ops.len(), 1);
+    assert_eq!(conflict_ops[0]["op_id"], "agent-a:2");
+    assert_eq!(
+        string_array(&conflict_ops[0]["conflicts_with"]),
+        vec!["agent-b"]
+    );
+
+    let promoted = repo.run_json(["promote-clean", "agent-a", "--json"]);
+    assert_eq!(promoted["promoted_ops"].as_array().unwrap().len(), 1);
+    assert_eq!(promoted["promoted_ops"][0]["path"], "src/vars.txt");
+    assert_eq!(
+        string_array(&promoted["promoted_ops"][0]["ops"]),
+        vec!["agent-a:1", "agent-a:3"]
+    );
+    assert_eq!(promoted["conflicts"][0]["ops"][0]["op_id"], "agent-a:2");
+    assert_eq!(
+        fs::read(repo.path().join("src/vars.txt")).unwrap(),
+        b"a=A\nb=2\nc=C\n"
+    );
+
+    let remaining_a = repo.run_json(["changes", "agent-a", "--json"]);
+    let remaining_a_ops = remaining_a["changes"][0]["ops"].as_array().unwrap();
+    assert_eq!(remaining_a_ops.len(), 1);
+    assert_eq!(remaining_a_ops[0]["op_id"], "agent-a:2");
+    assert_eq!(
+        string_array(&remaining_a_ops[0]["conflicts_with"]),
+        vec!["agent-b"]
+    );
+
+    repo.run_json(["promote-lane", "agent-b", "--json"]);
+    assert_eq!(
+        fs::read(repo.path().join("src/vars.txt")).unwrap(),
+        b"a=A\nb=X\nc=C\n"
+    );
+}
+
+#[test]
 fn cli_exec_releases_storage_lock_while_worker_runs() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");

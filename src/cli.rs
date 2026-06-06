@@ -48,6 +48,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    #[command(about = "List lane operations that conflict with other lanes")]
+    Conflicts {
+        lane: String,
+        #[arg(long)]
+        json: bool,
+    },
     #[command(about = "Show a text diff for a lane")]
     Diff { lane: String, paths: Vec<String> },
     #[command(about = "Promote one lane file into the normal repo")]
@@ -68,6 +74,12 @@ enum Command {
     },
     #[command(about = "Promote every changed file in a lane")]
     PromoteLane {
+        lane: String,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(about = "Promote every non-conflicting operation in a lane")]
+    PromoteClean {
         lane: String,
         #[arg(long)]
         json: bool,
@@ -94,6 +106,9 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
         Command::Changes { lane, json } => {
             changes(&repo_root, &lane, json).map(|()| ExitCode::SUCCESS)
         }
+        Command::Conflicts { lane, json } => {
+            conflicts(&repo_root, &lane, json).map(|()| ExitCode::SUCCESS)
+        }
         Command::Diff { lane, paths } => diff(&repo_root, &lane, paths).map(|()| ExitCode::SUCCESS),
         Command::Promote { lane, path, json } => {
             promote(&repo_root, &lane, &path, json).map(|()| ExitCode::SUCCESS)
@@ -106,6 +121,9 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
         } => promote_ops(&repo_root, &lane, &path, &ops, json).map(|()| ExitCode::SUCCESS),
         Command::PromoteLane { lane, json } => {
             promote_lane(&repo_root, &lane, json).map(|()| ExitCode::SUCCESS)
+        }
+        Command::PromoteClean { lane, json } => {
+            promote_clean(&repo_root, &lane, json).map(|()| ExitCode::SUCCESS)
         }
         Command::Discard { lane, json } => {
             discard(&repo_root, &lane, json).map(|()| ExitCode::SUCCESS)
@@ -174,6 +192,36 @@ fn changes(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
     } else {
         for change in &output.changes {
             println!("{}\t{}", change.status.short(), change.path);
+        }
+    }
+    Ok(())
+}
+
+fn conflicts(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
+    let storage_path = storage_path(repo_root);
+    let _lock = acquire_repo_lock(&storage_path)?;
+    let (_, fs) = open_lane_fs(repo_root)?;
+    let output = ConflictsOutput {
+        lane,
+        repo_root: path_label(repo_root),
+        storage_path: path_label(storage_path),
+        conflicts: collect_conflicts(&fs, lane)?,
+    };
+
+    if json {
+        print_json(&output)?;
+    } else if output.conflicts.is_empty() {
+        println!("no conflicts in lane {lane}");
+    } else {
+        for change in &output.conflicts {
+            for op in &change.ops {
+                println!(
+                    "{}\t{}\tconflicts with {}",
+                    change.path,
+                    op.op_id,
+                    op.conflicts_with.join(",")
+                );
+            }
         }
     }
     Ok(())
@@ -293,6 +341,46 @@ fn promote_lane(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
     Ok(())
 }
 
+fn promote_clean(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
+    let storage_path = storage_path(repo_root);
+    let _lock = acquire_repo_lock(&storage_path)?;
+    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
+    let before = collect_changes(&fs, lane)?;
+    let promoted = filter_change_ops(&before, |op| op.conflicts_with.is_empty());
+    let conflicts = filter_change_ops(&before, |op| !op.conflicts_with.is_empty());
+    let promoted_ops = grouped_ops(&promoted);
+
+    for path_ops in &promoted_ops {
+        fs.promote_ops_file(lane, &path_ops.path, &path_ops.ops)?;
+    }
+    if !promoted_ops.is_empty() {
+        persist_repo(&storage_path, fs.repo())?;
+    }
+
+    let output = PromoteCleanOutput {
+        lane,
+        repo_root: path_label(repo_root),
+        storage_path: path_label(&storage_path),
+        promoted_ops,
+        promoted,
+        conflicts,
+    };
+    if json {
+        print_json(&output)?;
+    } else if output.promoted_ops.is_empty() {
+        println!("no clean operations promoted from lane {lane}");
+    } else {
+        for path_ops in &output.promoted_ops {
+            println!(
+                "promoted {} clean op(s) from lane {lane}: {}",
+                path_ops.ops.len(),
+                path_ops.path
+            );
+        }
+    }
+    Ok(())
+}
+
 fn discard(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
     let storage_path = storage_path(repo_root);
     let _lock = acquire_repo_lock(&storage_path)?;
@@ -324,6 +412,45 @@ fn collect_changes(fs: &LaneFs<FileWorktree>, lane: &str) -> CliResult<Vec<Chang
         .map(|path| change_for_path(fs, lane, path))
         .collect::<CliResult<Vec<_>>>()
         .map(|changes| changes.into_iter().flatten().collect())
+}
+
+fn collect_conflicts(fs: &LaneFs<FileWorktree>, lane: &str) -> CliResult<Vec<ChangeOutput>> {
+    collect_changes(fs, lane)
+        .map(|changes| filter_change_ops(&changes, |op| !op.conflicts_with.is_empty()))
+}
+
+fn filter_change_ops(
+    changes: &[ChangeOutput],
+    keep: impl Fn(&LaneOpSummary) -> bool,
+) -> Vec<ChangeOutput> {
+    changes
+        .iter()
+        .filter_map(|change| {
+            let ops = change
+                .ops
+                .iter()
+                .filter(|op| keep(op))
+                .cloned()
+                .collect::<Vec<_>>();
+            if ops.is_empty() {
+                None
+            } else {
+                let mut filtered = change.clone();
+                filtered.ops = ops;
+                Some(filtered)
+            }
+        })
+        .collect()
+}
+
+fn grouped_ops(changes: &[ChangeOutput]) -> Vec<PathOpsOutput> {
+    changes
+        .iter()
+        .map(|change| PathOpsOutput {
+            path: change.path.clone(),
+            ops: change.ops.iter().map(|op| op.op_id.clone()).collect(),
+        })
+        .collect()
 }
 
 fn change_for_path(
@@ -460,6 +587,14 @@ struct ChangesOutput<'a> {
     changes: Vec<ChangeOutput>,
 }
 
+#[derive(Serialize)]
+struct ConflictsOutput<'a> {
+    lane: &'a str,
+    repo_root: String,
+    storage_path: String,
+    conflicts: Vec<ChangeOutput>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct ChangeOutput {
     path: FilePath,
@@ -507,6 +642,22 @@ struct PromoteOpsOutput<'a> {
     storage_path: String,
     promoted_ops: Vec<String>,
     promoted: Vec<ChangeOutput>,
+}
+
+#[derive(Serialize)]
+struct PromoteCleanOutput<'a> {
+    lane: &'a str,
+    repo_root: String,
+    storage_path: String,
+    promoted_ops: Vec<PathOpsOutput>,
+    promoted: Vec<ChangeOutput>,
+    conflicts: Vec<ChangeOutput>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PathOpsOutput {
+    path: FilePath,
+    ops: Vec<String>,
 }
 
 #[derive(Serialize)]
