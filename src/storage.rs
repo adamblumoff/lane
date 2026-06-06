@@ -6,9 +6,12 @@ use std::time::Duration;
 
 use crate::LaneRepo;
 
+const LOCK_RETRY_ATTEMPTS: usize = 1200;
+const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
+
 pub fn load_repo(path: &Path) -> io::Result<Option<LaneRepo>> {
     match fs::read(path) {
-        Ok(bytes) => LaneRepo::from_bytes(&bytes).map(Some).map_err(decode_error),
+        Ok(bytes) => Ok(LaneRepo::from_bytes(&bytes).ok()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
@@ -34,7 +37,7 @@ fn acquire_path_lock(lock_path: &Path) -> io::Result<RepoLock> {
     }
 
     let mut last_error = None;
-    for _ in 0..200 {
+    for _ in 0..LOCK_RETRY_ATTEMPTS {
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -46,9 +49,9 @@ fn acquire_path_lock(lock_path: &Path) -> io::Result<RepoLock> {
                     _file: file,
                 });
             }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            Err(error) if is_lock_contention(&error) => {
                 last_error = Some(error);
-                thread::sleep(Duration::from_millis(25));
+                thread::sleep(LOCK_RETRY_DELAY);
             }
             Err(error) => return Err(error),
         }
@@ -60,6 +63,11 @@ fn acquire_path_lock(lock_path: &Path) -> io::Result<RepoLock> {
             format!("timed out waiting for {}", lock_path.display()),
         )
     }))
+}
+
+fn is_lock_contention(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::AlreadyExists
+        || (cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied)
 }
 
 impl Drop for RepoLock {
@@ -140,8 +148,4 @@ fn windows_path(path: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
 
     path.as_os_str().encode_wide().chain(Some(0)).collect()
-}
-
-fn decode_error(error: crate::DecodeError) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error)
 }

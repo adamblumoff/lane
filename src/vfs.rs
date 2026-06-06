@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -23,7 +23,7 @@ pub trait Worktree {
     fn read_file(&self, path: &str) -> io::Result<Option<Vec<u8>>>;
     fn write_file(&mut self, path: &str, bytes: &[u8]) -> io::Result<()>;
     fn remove_file(&mut self, path: &str) -> io::Result<()>;
-    fn list_files(&self) -> io::Result<Vec<FilePath>>;
+    fn list_dir(&self, path: &str) -> io::Result<Vec<DirEntry>>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +46,15 @@ impl MemoryWorktree {
     }
 }
 
+fn normalize_memory_dir(path: &str) -> String {
+    let path = path.trim_matches(['/', '\\']);
+    if path == "." {
+        String::new()
+    } else {
+        path.replace('\\', "/")
+    }
+}
+
 impl Worktree for MemoryWorktree {
     fn read_file(&self, path: &str) -> io::Result<Option<Vec<u8>>> {
         Ok(self.files.get(path).cloned())
@@ -61,8 +70,38 @@ impl Worktree for MemoryWorktree {
         Ok(())
     }
 
-    fn list_files(&self) -> io::Result<Vec<FilePath>> {
-        Ok(self.files.keys().cloned().collect())
+    fn list_dir(&self, path: &str) -> io::Result<Vec<DirEntry>> {
+        let directory = normalize_memory_dir(path);
+        let prefix = if directory.is_empty() {
+            String::new()
+        } else {
+            format!("{directory}/")
+        };
+        let mut entries = BTreeMap::new();
+        for file in self.files.keys() {
+            let Some(tail) = file.strip_prefix(&prefix) else {
+                continue;
+            };
+            if tail.is_empty() || tail == file && !directory.is_empty() {
+                continue;
+            }
+            let (name, kind) = match tail.split_once('/') {
+                Some((name, _)) => (name, DirEntryKind::Directory),
+                None => (tail, DirEntryKind::File),
+            };
+            entries
+                .entry(name.to_owned())
+                .and_modify(|entry| {
+                    if kind == DirEntryKind::Directory {
+                        *entry = DirEntryKind::Directory;
+                    }
+                })
+                .or_insert(kind);
+        }
+        Ok(entries
+            .into_iter()
+            .map(|(name, kind)| DirEntry { name, kind })
+            .collect())
     }
 }
 
@@ -122,11 +161,39 @@ impl Worktree for FileWorktree {
         }
     }
 
-    fn list_files(&self) -> io::Result<Vec<FilePath>> {
-        let mut files = Vec::new();
-        collect_files(&self.root_path, &self.root_path, &mut files)?;
-        files.sort();
-        Ok(files)
+    fn list_dir(&self, path: &str) -> io::Result<Vec<DirEntry>> {
+        let directory = self.file_path(path);
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        };
+        let mut dir_entries = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_empty() && name == ".lane" {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            let kind = if file_type.is_dir() {
+                DirEntryKind::Directory
+            } else if file_type.is_file() {
+                DirEntryKind::File
+            } else {
+                continue;
+            };
+            dir_entries.push(DirEntry { name, kind });
+        }
+        dir_entries.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(dir_entries)
     }
 }
 
@@ -134,31 +201,6 @@ impl Worktree for FileWorktree {
 pub struct LaneFs<W> {
     repo: LaneRepo,
     worktree: W,
-}
-
-fn collect_files(root_path: &Path, directory: &Path, files: &mut Vec<FilePath>) -> io::Result<()> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let path = entry.path();
-        let relative = path
-            .strip_prefix(root_path)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        if relative
-            .components()
-            .next()
-            .is_some_and(|component| component.as_os_str() == ".lane")
-        {
-            continue;
-        }
-
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_files(root_path, &path, files)?;
-        } else if file_type.is_file() {
-            files.push(relative.to_string_lossy().replace('\\', "/"));
-        }
-    }
-    Ok(())
 }
 
 impl<W: Worktree> LaneFs<W> {
@@ -254,24 +296,44 @@ impl<W: Worktree> LaneFs<W> {
         } else {
             format!("{directory}/")
         };
-        let mut paths = self.worktree.list_files().map_err(LaneFsError::Io)?;
-        paths.extend(
-            self.repo
-                .overlay_paths(lane)
-                .map_err(LaneFsError::Lane)?
-                .into_iter()
-                .map(str::to_owned),
-        );
-
         let mut entries = BTreeMap::new();
-        for path in paths.into_iter().collect::<BTreeSet<_>>() {
+        for entry in self
+            .worktree
+            .list_dir(&directory)
+            .map_err(LaneFsError::Io)?
+        {
+            let child = child_path(&directory, &entry.name);
+            match entry.kind {
+                DirEntryKind::Directory => {
+                    if self
+                        .repo
+                        .read_path(&child, lane, None)
+                        .is_ok_and(|entry| entry.is_none())
+                    {
+                        entries.insert(entry.name, DirEntryKind::Directory);
+                    }
+                }
+                DirEntryKind::File => {
+                    if self.read_file(lane, &child)?.is_some() {
+                        entries.insert(entry.name, DirEntryKind::File);
+                    }
+                }
+            }
+        }
+
+        for path in self
+            .repo
+            .overlay_paths(lane)
+            .map_err(LaneFsError::Lane)?
+            .into_iter()
+        {
             let Some(tail) = path.strip_prefix(&prefix) else {
                 continue;
             };
             if tail.is_empty() || tail == path && !directory.is_empty() {
                 continue;
             }
-            if self.read_file(lane, &path)?.is_none() {
+            if self.read_file(lane, path)?.is_none() {
                 continue;
             }
             let (name, kind) = match tail.split_once('/') {
@@ -346,6 +408,14 @@ impl<W: Worktree> LaneFs<W> {
         }
         self.repo = draft;
         Ok(promoted.into_iter().map(|file| file.path).collect())
+    }
+}
+
+fn child_path(parent: &str, child: &str) -> FilePath {
+    if parent.is_empty() {
+        child.to_owned()
+    } else {
+        format!("{parent}/{child}")
     }
 }
 

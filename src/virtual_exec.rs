@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component as PathComponent, Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,9 +12,10 @@ use std::time::Instant;
 
 use serde::Serialize;
 use windows_sys::Win32::Foundation::{
-    STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW, STATUS_FILE_IS_A_DIRECTORY,
-    STATUS_INVALID_PARAMETER, STATUS_NO_SUCH_FILE, STATUS_NOT_A_DIRECTORY,
-    STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
+    STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW, STATUS_DIRECTORY_NOT_EMPTY,
+    STATUS_FILE_IS_A_DIRECTORY, STATUS_INVALID_PARAMETER, STATUS_NO_SUCH_FILE,
+    STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND,
+    STATUS_OBJECT_PATH_NOT_FOUND,
 };
 use winfsp_wrs::{
     CleanupFlags, CreateFileInfo, CreateOptions, DirInfo, FileAccessRights, FileAttributes,
@@ -117,7 +118,7 @@ fn start_mount(
         security,
         metrics,
     });
-    let mut last_collision = None;
+    let mut last_unavailable = None;
     for letter in (b'D'..=b'Z').rev().map(char::from) {
         let Some(mount_point) = try_allocate_mount_point(letter)? else {
             continue;
@@ -128,8 +129,8 @@ fn start_mount(
         let params = winfsp_params()?;
         match FileSystem::start(params, Some(mount_point.mount_name.as_ucstr()), context) {
             Ok(file_system) => return Ok((mount_point, file_system, state)),
-            Err(STATUS_OBJECT_NAME_COLLISION) => {
-                last_collision = Some(letter);
+            Err(STATUS_OBJECT_NAME_COLLISION | STATUS_ACCESS_DENIED) => {
+                last_unavailable = Some(letter);
             }
             Err(status) => {
                 return Err(VirtualExecError::message(format!(
@@ -139,8 +140,8 @@ fn start_mount(
         }
     }
 
-    let suffix = last_collision
-        .map(|letter| format!("; last collision was {letter}:"))
+    let suffix = last_unavailable
+        .map(|letter| format!("; last unavailable candidate was {letter}:"))
         .unwrap_or_default();
     Err(VirtualExecError::message(format!(
         "no free drive letter available for virtual lane mount{suffix}"
@@ -158,6 +159,9 @@ fn winfsp_params() -> Result<Params, VirtualExecError> {
         .set_case_preserved_names(true)
         .set_unicode_on_disk(true)
         .set_post_cleanup_when_modified_only(false)
+        .set_file_info_timeout(0)
+        .set_dir_info_timeout(0)
+        .set_security_timeout(0)
         .set_file_system_name(u16cstr!("Lane"))
         .map_err(|_| VirtualExecError::message("WinFsp filesystem name is too long"))?;
     Ok(params)
@@ -165,8 +169,10 @@ fn winfsp_params() -> Result<Params, VirtualExecError> {
 
 fn try_allocate_mount_point(letter: char) -> io::Result<Option<MountPoint>> {
     let workspace_path = PathBuf::from(format!("{letter}:\\"));
-    if workspace_path.exists() {
-        return Ok(None);
+    match workspace_path.try_exists() {
+        Ok(true) => return Ok(None),
+        Ok(false) => {}
+        Err(_) => return Ok(None),
     }
     let lock_dir = env::temp_dir().join("lane").join("mounts");
     fs::create_dir_all(&lock_dir)?;
@@ -241,7 +247,8 @@ fn virtual_command<'a>(
     mount_path: &'a Path,
 ) -> ProcessCommand {
     let mount_label = path_label(mount_path);
-    let mut command = ProcessCommand::new(program);
+    let safe_directory = git_safe_directory_label(mount_path);
+    let mut command = ProcessCommand::new(resolve_program(program));
     command
         .args(args)
         .current_dir(mount_path)
@@ -249,8 +256,66 @@ fn virtual_command<'a>(
         .env("LANE_REPO_ROOT", &mount_label)
         .env("LANE_VIEW_ROOT", &mount_label)
         .env("LANE_EXEC_MODE", "virtual_mount")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "safe.directory")
+        .env("GIT_CONFIG_VALUE_0", safe_directory)
         .env_remove("LANE_STORAGE_PATH");
     command
+}
+
+fn git_safe_directory_label(path: &Path) -> String {
+    path_label(path).replace('\\', "/")
+}
+
+fn resolve_program(program: &str) -> PathBuf {
+    let path = Path::new(program);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            PathComponent::RootDir | PathComponent::Prefix(_) | PathComponent::ParentDir
+        )
+    }) {
+        return path.to_path_buf();
+    }
+    if path.components().count() > 1 {
+        return path.to_path_buf();
+    }
+
+    let extensions = env::var_os("PATHEXT")
+        .map(|value| {
+            env::split_paths(&value)
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| {
+            [".COM", ".EXE", ".BAT", ".CMD"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        });
+
+    let Some(paths) = env::var_os("PATH") else {
+        return path.to_path_buf();
+    };
+    let names = if path.extension().is_some() {
+        vec![program.to_owned()]
+    } else {
+        extensions
+            .iter()
+            .map(|extension| format!("{program}{extension}"))
+            .collect::<Vec<_>>()
+    };
+    for directory in env::split_paths(&paths) {
+        for name in &names {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    path.to_path_buf()
 }
 
 #[derive(Clone)]
@@ -278,7 +343,7 @@ enum DirtyEntry {
 }
 
 struct VirtualFileHandle {
-    path: FilePath,
+    path: Mutex<FilePath>,
     is_dir: bool,
     version: AtomicU64,
     delete_on_close: AtomicBool,
@@ -287,11 +352,27 @@ struct VirtualFileHandle {
 impl VirtualFileHandle {
     fn new(path: FilePath, is_dir: bool, version: u64) -> Arc<Self> {
         Arc::new(Self {
-            path,
+            path: Mutex::new(path),
             is_dir,
             version: AtomicU64::new(version),
             delete_on_close: AtomicBool::new(false),
         })
+    }
+
+    fn path(&self) -> Result<FilePath, i32> {
+        self.path
+            .lock()
+            .map_err(|_| STATUS_ACCESS_DENIED)
+            .map(|path| path.clone())
+    }
+
+    fn set_path(&self, path: FilePath) -> Result<(), i32> {
+        self.path
+            .lock()
+            .map_err(|_| STATUS_ACCESS_DENIED)
+            .map(|mut current| {
+                *current = path;
+            })
     }
 }
 
@@ -312,6 +393,7 @@ impl FileSystemInterface for VirtualLaneFs {
     const SET_BASIC_INFO_DEFINED: bool = true;
     const SET_FILE_SIZE_DEFINED: bool = true;
     const CAN_DELETE_DEFINED: bool = true;
+    const RENAME_DEFINED: bool = true;
     const READ_DIRECTORY_DEFINED: bool = true;
     const GET_SECURITY_DEFINED: bool = true;
     const GET_DIR_INFO_BY_NAME_DEFINED: bool = true;
@@ -338,6 +420,7 @@ impl FileSystemInterface for VirtualLaneFs {
         _security_descriptor: SecurityDescriptor,
     ) -> Result<(Self::FileContext, FileInfo), i32> {
         let path = path_from_winfsp(file_name)?;
+        ensure_mutable_path(&path)?;
         let is_dir = create_file_info
             .create_options
             .is(CreateOptions::FILE_DIRECTORY_FILE);
@@ -392,10 +475,12 @@ impl FileSystemInterface for VirtualLaneFs {
         if file_context.is_dir {
             return Err(STATUS_FILE_IS_A_DIRECTORY);
         }
+        let path = file_context.path()?;
+        ensure_mutable_path(&path)?;
         let size = usize::try_from(allocation_size).map_err(|_| STATUS_INVALID_PARAMETER)?;
-        let version = self.state.write_file(&file_context.path, vec![0; size])?;
+        let version = self.state.write_file(&path, vec![0; size])?;
         file_context.version.store(version, Ordering::Relaxed);
-        Ok(file_info(&file_context.path, size as u64))
+        Ok(file_info(&path, size as u64))
     }
 
     fn cleanup(
@@ -405,13 +490,17 @@ impl FileSystemInterface for VirtualLaneFs {
         flags: CleanupFlags,
     ) {
         if flags.is(CleanupFlags::DELETE) || file_context.delete_on_close.load(Ordering::Relaxed) {
+            let Ok(path) = file_context.path() else {
+                return;
+            };
+            if ensure_mutable_path(&path).is_err() {
+                return;
+            }
             let version = file_context.version.load(Ordering::Relaxed);
             let result = if file_context.is_dir {
-                self.state
-                    .delete_dir_if_current(&file_context.path, version)
+                self.state.delete_dir_if_current(&path, version)
             } else {
-                self.state
-                    .delete_file_if_current(&file_context.path, version)
+                self.state.delete_file_if_current(&path, version)
             };
             let _ = result;
         }
@@ -428,7 +517,8 @@ impl FileSystemInterface for VirtualLaneFs {
         if file_context.is_dir {
             return Err(STATUS_FILE_IS_A_DIRECTORY);
         }
-        let bytes = self.state.read_file(&file_context.path)?;
+        let path = file_context.path()?;
+        let bytes = self.state.read_file(&path)?;
         let start = usize::try_from(offset).map_err(|_| STATUS_INVALID_PARAMETER)?;
         if start >= bytes.len() {
             return Ok(0);
@@ -448,23 +538,25 @@ impl FileSystemInterface for VirtualLaneFs {
         if file_context.is_dir {
             return Err(STATUS_FILE_IS_A_DIRECTORY);
         }
-        let (bytes, version) = self
-            .state
-            .write_file_range(&file_context.path, buffer, mode)?;
+        let path = file_context.path()?;
+        ensure_mutable_path(&path)?;
+        let (bytes, version) = self.state.write_file_range(&path, buffer, mode)?;
         file_context.version.store(version, Ordering::Relaxed);
-        Ok((buffer.len(), file_info(&file_context.path, bytes as u64)))
+        Ok((buffer.len(), file_info(&path, bytes as u64)))
     }
 
     fn flush(&self, file_context: Self::FileContext) -> Result<FileInfo, i32> {
+        let path = file_context.path()?;
         self.state
-            .node_for_path(&file_context.path)?
+            .node_for_path(&path)?
             .map(|node| node.file_info())
             .ok_or(STATUS_OBJECT_NAME_NOT_FOUND)
     }
 
     fn get_file_info(&self, file_context: Self::FileContext) -> Result<FileInfo, i32> {
+        let path = file_context.path()?;
         self.state
-            .node_for_path(&file_context.path)?
+            .node_for_path(&path)?
             .map(|node| node.file_info())
             .ok_or(STATUS_OBJECT_NAME_NOT_FOUND)
     }
@@ -490,17 +582,38 @@ impl FileSystemInterface for VirtualLaneFs {
         if file_context.is_dir {
             return Err(STATUS_FILE_IS_A_DIRECTORY);
         }
+        let path = file_context.path()?;
+        ensure_mutable_path(&path)?;
         let size = usize::try_from(new_size).map_err(|_| STATUS_INVALID_PARAMETER)?;
-        let (bytes, version) = self.state.resize_file(&file_context.path, size)?;
+        let (bytes, version) = self.state.resize_file(&path, size)?;
         file_context.version.store(version, Ordering::Relaxed);
-        Ok(file_info(&file_context.path, bytes as u64))
+        Ok(file_info(&path, bytes as u64))
     }
 
-    fn can_delete(
+    fn can_delete(&self, file_context: Self::FileContext, file_name: &U16CStr) -> Result<(), i32> {
+        ensure_mutable_path(&file_context.path()?)?;
+        ensure_mutable_path(&path_from_winfsp(file_name)?)?;
+        Ok(())
+    }
+
+    fn rename(
         &self,
-        _file_context: Self::FileContext,
+        file_context: Self::FileContext,
         _file_name: &U16CStr,
+        new_file_name: &U16CStr,
+        replace_if_exists: bool,
     ) -> Result<(), i32> {
+        let from = file_context.path()?;
+        let to = rename_target_path(&from, &path_from_winfsp(new_file_name)?);
+        ensure_mutable_path(&from)?;
+        ensure_mutable_path(&to)?;
+        let version = if file_context.is_dir {
+            self.state.rename_dir(&from, &to, replace_if_exists)?
+        } else {
+            self.state.rename_file(&from, &to, replace_if_exists)?
+        };
+        file_context.set_path(to)?;
+        file_context.version.store(version, Ordering::Relaxed);
         Ok(())
     }
 
@@ -517,8 +630,9 @@ impl FileSystemInterface for VirtualLaneFs {
         if !file_context.is_dir {
             return Err(STATUS_NOT_A_DIRECTORY);
         }
+        let path = file_context.path()?;
         let marker = marker.map(|marker| marker.to_string_lossy());
-        let entries = self.state.dir_entries(&file_context.path)?;
+        let entries = self.state.dir_entries(&path)?;
         for (name, info) in entries {
             if marker
                 .as_ref()
@@ -541,7 +655,8 @@ impl FileSystemInterface for VirtualLaneFs {
         if !file_context.is_dir {
             return Err(STATUS_NOT_A_DIRECTORY);
         }
-        let child = child_path(&file_context.path, &path_from_winfsp(file_name)?);
+        let path = file_context.path()?;
+        let child = child_path(&path, &path_from_winfsp(file_name)?);
         self.state
             .node_for_path(&child)?
             .map(|node| node.file_info())
@@ -554,6 +669,18 @@ impl FileSystemInterface for VirtualLaneFs {
         _file_name: &U16CStr,
         delete_file: bool,
     ) -> Result<(), i32> {
+        let path = file_context.path()?;
+        ensure_mutable_path(&path)?;
+        if delete_file {
+            if file_context.is_dir {
+                self.state.delete_dir(&path)?;
+            } else {
+                self.state.delete_file(&path)?;
+            }
+            file_context
+                .version
+                .store(self.state.path_version(&path)?, Ordering::Relaxed);
+        }
         file_context
             .delete_on_close
             .store(delete_file, Ordering::Relaxed);
@@ -690,6 +817,50 @@ impl VirtualLaneState {
         self.set_dirty_entry(path, DirtyEntry::Deleted).map(|_| ())
     }
 
+    fn rename_file(&self, from: &str, to: &str, replace_if_exists: bool) -> Result<u64, i32> {
+        if from == to {
+            return self.path_version(from);
+        }
+        if self.node_for_path(to)?.is_some() && !replace_if_exists {
+            return Err(STATUS_OBJECT_NAME_COLLISION);
+        }
+        if self.node_for_path(to)?.is_some_and(|node| node.is_dir()) {
+            return Err(STATUS_FILE_IS_A_DIRECTORY);
+        }
+
+        let bytes = self.read_file(from)?;
+        self.set_dirty_entry(to, DirtyEntry::File(bytes))?;
+        self.set_dirty_entry(from, DirtyEntry::Deleted)
+    }
+
+    fn rename_dir(&self, from: &str, to: &str, replace_if_exists: bool) -> Result<u64, i32> {
+        if from == to {
+            return self.path_version(from);
+        }
+        if to.starts_with(&child_prefix(from)) {
+            return Err(STATUS_ACCESS_DENIED);
+        }
+        if self.node_for_path(to)?.is_some() {
+            if !replace_if_exists {
+                return Err(STATUS_OBJECT_NAME_COLLISION);
+            }
+            if self.dir_has_children(to)? {
+                return Err(STATUS_DIRECTORY_NOT_EMPTY);
+            }
+        }
+
+        let mut files = Vec::new();
+        self.collect_state_visible_files(from, &mut files)?;
+        for path in files {
+            let target = child_path(to, path.strip_prefix(&child_prefix(from)).unwrap_or(&path));
+            let bytes = self.read_file(&path)?;
+            self.set_dirty_entry(&target, DirtyEntry::File(bytes))?;
+            self.set_dirty_entry(&path, DirtyEntry::Deleted)?;
+        }
+        self.set_dirty_entry(to, DirtyEntry::Directory)?;
+        self.set_dirty_entry(from, DirtyEntry::Deleted)
+    }
+
     fn create_dir(&self, path: &str) -> Result<u64, i32> {
         self.set_dirty_entry(path, DirtyEntry::Directory)
     }
@@ -736,6 +907,30 @@ impl VirtualLaneState {
             Err(STATUS_NO_SUCH_FILE | STATUS_OBJECT_NAME_NOT_FOUND) => Ok(Vec::new()),
             Err(status) => Err(status),
         }
+    }
+
+    fn dir_has_children(&self, path: &str) -> Result<bool, i32> {
+        self.dir_entries(path)
+            .map(|entries| entries.iter().any(|(name, _)| name != "." && name != ".."))
+    }
+
+    fn collect_state_visible_files(
+        &self,
+        path: &str,
+        files: &mut Vec<FilePath>,
+    ) -> Result<(), i32> {
+        for (name, _) in self.dir_entries(path)? {
+            if name == "." || name == ".." {
+                continue;
+            }
+            let child = child_path(path, &name);
+            match self.node_for_path(&child)? {
+                Some(node) if node.is_dir() => self.collect_state_visible_files(&child, files)?,
+                Some(_) => files.push(child),
+                None => {}
+            }
+        }
+        Ok(())
     }
 
     fn dir_entries(&self, path: &str) -> Result<Vec<(String, FileInfo)>, i32> {
@@ -821,7 +1016,6 @@ impl VirtualLaneState {
                 Ok(())
             },
         )
-        .map_err(VirtualExecError::from_status)
     }
 
     fn collect_changes(&self) -> Result<Vec<VirtualChangeOutput>, VirtualExecError> {
@@ -840,7 +1034,7 @@ impl VirtualLaneState {
             &self.lane,
             dirty.iter().map(|(path, entry)| (path.as_str(), entry)),
         )
-        .map_err(VirtualExecError::from_status)?;
+        .map_err(|status| VirtualExecError::from_status("collect dirty virtual changes", status))?;
         draft
             .changed_paths(&self.lane)
             .map_err(status_from_lane_fs_error)
@@ -851,7 +1045,7 @@ impl VirtualLaneState {
                     .collect::<Result<Vec<_>, _>>()
                     .map(|changes| changes.into_iter().flatten().collect())
             })
-            .map_err(VirtualExecError::from_status)
+            .map_err(|status| VirtualExecError::from_status("collect projected lane paths", status))
     }
 
     fn projected_paths(&self) -> Result<Vec<FilePath>, VirtualExecError> {
@@ -860,7 +1054,7 @@ impl VirtualLaneState {
             .map_err(|_| VirtualExecError::message("virtual lane session lock poisoned"))?
             .changed_paths(&self.lane)
             .map_err(status_from_lane_fs_error)
-            .map_err(VirtualExecError::from_status)
+            .map_err(|status| VirtualExecError::from_status("collect projected lane paths", status))
     }
 
     fn worker_changed_paths(&self) -> Result<Vec<FilePath>, VirtualExecError> {
@@ -1006,7 +1200,6 @@ fn prepare_session_fs(
         fs.create_lane(lane).map_err(status_from_lane_fs_error)?;
         Ok(LaneFs::new(fs.repo().clone(), FileWorktree::new(repo_root)))
     })
-    .map_err(VirtualExecError::from_status)
 }
 
 fn with_lane_fs_write<T>(
@@ -1014,23 +1207,38 @@ fn with_lane_fs_write<T>(
     storage_path: &Path,
     metrics: &VirtualFsMetrics,
     operation: impl FnOnce(&mut LaneFs<FileWorktree>) -> Result<T, i32>,
-) -> Result<T, i32> {
+) -> Result<T, VirtualExecError> {
     let wait_start = Instant::now();
-    let lock = acquire_repo_lock(storage_path).map_err(status_from_io_error)?;
+    let lock = acquire_repo_lock(storage_path).map_err(|error| {
+        VirtualExecError::message(format!(
+            "failed to acquire lane storage lock {}: {error}",
+            storage_path.display()
+        ))
+    })?;
     let wait_ms = elapsed_ms(wait_start);
     let held_start = Instant::now();
     let repo = load_repo(storage_path)
-        .map_err(status_from_io_error)?
+        .map_err(|error| {
+            VirtualExecError::message(format!(
+                "failed to load lane storage {}: {error}",
+                storage_path.display()
+            ))
+        })?
         .unwrap_or_default();
     let mut fs = LaneFs::new(repo, FileWorktree::new(repo_root));
     let result = operation(&mut fs);
     if result.is_ok() {
-        persist_repo(storage_path, fs.repo()).map_err(status_from_io_error)?;
+        persist_repo(storage_path, fs.repo()).map_err(|error| {
+            VirtualExecError::message(format!(
+                "failed to persist lane storage {}: {error}",
+                storage_path.display()
+            ))
+        })?;
     }
     let held_ms = elapsed_ms(held_start);
     drop(lock);
     metrics.record_write(wait_ms, held_ms);
-    result
+    result.map_err(|status| VirtualExecError::from_status("apply lane storage update", status))
 }
 
 enum VirtualNode {
@@ -1094,7 +1302,7 @@ fn path_from_winfsp(file_name: &U16CStr) -> Result<FilePath, i32> {
         .to_string_lossy()
         .trim_start_matches(['\\', '/'])
         .replace('\\', "/");
-    if label == ".lane" || label.starts_with(".lane/") || label.contains("/../") {
+    if is_lane_state_path(&label) || label.contains("/../") {
         return Err(STATUS_ACCESS_DENIED);
     }
     if label
@@ -1106,6 +1314,22 @@ fn path_from_winfsp(file_name: &U16CStr) -> Result<FilePath, i32> {
     Ok(label)
 }
 
+fn ensure_mutable_path(path: &str) -> Result<(), i32> {
+    if is_git_metadata_path(path) {
+        Err(STATUS_ACCESS_DENIED)
+    } else {
+        Ok(())
+    }
+}
+
+fn is_lane_state_path(path: &str) -> bool {
+    path == ".lane" || path.starts_with(".lane/")
+}
+
+fn is_git_metadata_path(path: &str) -> bool {
+    path == ".git" || path.starts_with(".git/")
+}
+
 fn child_path(parent: &str, child: &str) -> FilePath {
     let child = child.trim_start_matches(['\\', '/']).replace('\\', "/");
     if parent.is_empty() {
@@ -1113,6 +1337,21 @@ fn child_path(parent: &str, child: &str) -> FilePath {
     } else {
         format!("{parent}/{child}")
     }
+}
+
+fn rename_target_path(from: &str, target: &str) -> FilePath {
+    let Some((from_parent, _)) = from.rsplit_once('/') else {
+        return target.to_owned();
+    };
+    if let Some((target_parent, target_name)) = target.rsplit_once('/')
+        && target_parent.eq_ignore_ascii_case(from_parent)
+    {
+        return child_path(from_parent, target_name);
+    }
+    if target.contains('/') {
+        return target.to_owned();
+    }
+    child_path(from_parent, target)
 }
 
 fn change_for_path(
@@ -1275,9 +1514,9 @@ impl VirtualExecError {
         }
     }
 
-    fn from_status(status: i32) -> Self {
+    fn from_status(operation: &str, status: i32) -> Self {
         Self::message(format!(
-            "virtual lane filesystem failed with NTSTATUS {status:#x}"
+            "virtual lane filesystem failed while trying to {operation} with NTSTATUS {status:#x}"
         ))
     }
 }

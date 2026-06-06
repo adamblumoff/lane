@@ -597,6 +597,136 @@ fn cli_exec_replaces_directory_tree_with_file() {
     assert!(!repo.path().join("src/swap/original.txt").exists());
 }
 
+#[test]
+fn cli_exec_runs_agent_like_process_with_git_view_and_atomic_save() {
+    let repo = TempRepo::new();
+    repo.write("src/login.tsx", b"export const design = 'base';\n");
+    repo.init_git_repo();
+
+    let result = repo.run_json([
+        "exec",
+        "agent-realish",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; if ((git rev-parse --show-toplevel).TrimEnd('/') -ne (Get-Location).ProviderPath.TrimEnd('\\')) { throw \"git root must be the mounted lane view\" }; if ($env:GIT_OPTIONAL_LOCKS -ne \"0\") { throw \"git optional locks must be disabled in lane views\" }; pwsh -NoProfile -Command '$tmp = Join-Path (Get-Location) \"src/login.tsx.tmp\"; $target = Join-Path (Get-Location) \"src/login.tsx\"; Set-Content -LiteralPath $tmp -Value \"export const design = ''agent-realish'';\" -NoNewline; [IO.File]::Move($tmp, $target, $true)'; $diff = git diff -- src/login.tsx; if (-not ($diff -match \"agent-realish\")) { throw \"git diff did not see mounted lane changes\" }",
+    ]);
+
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["mode"], "virtual_mount");
+    assert_eq!(
+        string_array(&result["changed_paths"]),
+        vec!["src/login.tsx", "src/login.tsx.tmp"]
+    );
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/login.tsx".to_owned(), "modified".to_owned());
+        expected
+    });
+    assert_eq!(
+        fs::read(repo.path().join("src/login.tsx")).unwrap(),
+        b"export const design = 'base';\n"
+    );
+    assert!(!repo.path().join("src/login.tsx.tmp").exists());
+
+    repo.run_json(["promote-lane", "agent-realish", "--json"]);
+    assert_eq!(
+        fs::read(repo.path().join("src/login.tsx")).unwrap(),
+        b"export const design = 'agent-realish';"
+    );
+}
+
+#[test]
+fn cli_exec_keeps_git_metadata_read_only_for_agent_processes() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;\n");
+    repo.init_git_repo();
+
+    let result = repo.run_json([
+        "exec",
+        "agent-git",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; git status --short | Out-Null; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
+    ]);
+
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(string_array(&result["changed_paths"]), vec!["src/agent.ts"]);
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/agent.ts".to_owned(), "created".to_owned());
+        expected
+    });
+    assert!(!repo.path().join("src/agent.ts").exists());
+}
+
+#[test]
+fn cli_exec_resets_incompatible_pre_alpha_lane_storage() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;\n");
+    repo.write(".lane/repo.lane", b"old pre-alpha format");
+
+    let result = repo.run_json([
+        "exec",
+        "fresh-vfs",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/fresh.ts -Value \"export const fresh = true;\" -NoNewline",
+    ]);
+
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(result["mode"], "virtual_mount");
+    assert_eq!(string_array(&result["changed_paths"]), vec!["src/fresh.ts"]);
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/fresh.ts".to_owned(), "created".to_owned());
+        expected
+    });
+    assert!(
+        fs::read(repo.path().join(".lane/repo.lane"))
+            .unwrap()
+            .starts_with(b"LANEREPO")
+    );
+}
+
+#[test]
+fn cli_exec_resolves_agent_command_shims_from_path() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;\n");
+    repo.write(
+        "bin/fake-agent.cmd",
+        b"@echo off\r\necho export const shim = true;> src\\shim.ts\r\n",
+    );
+    let path = format!(
+        "{};{}",
+        repo.path().join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let result = repo.run_json_with_env(
+        ["exec", "shim-agent", "--", "fake-agent"],
+        [("PATH", path.as_str())],
+    );
+
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(string_array(&result["changed_paths"]), vec!["src/shim.ts"]);
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/shim.ts".to_owned(), "created".to_owned());
+        expected
+    });
+    assert!(!repo.path().join("src/shim.ts").exists());
+}
+
 struct TempRepo {
     root: PathBuf,
 }
@@ -626,6 +756,19 @@ impl TempRepo {
         serde_json::from_slice(&self.run(args).stdout).unwrap()
     }
 
+    fn run_json_with_env<const N: usize, const M: usize>(
+        &self,
+        args: [&str; N],
+        envs: [(&str, &str); M],
+    ) -> Value {
+        serde_json::from_slice(
+            &self
+                .run_vec_with_env(args.into_iter().map(str::to_owned).collect(), envs)
+                .stdout,
+        )
+        .unwrap()
+    }
+
     fn run_text<const N: usize>(&self, args: [&str; N]) -> String {
         String::from_utf8(self.run(args).stdout).unwrap()
     }
@@ -635,10 +778,19 @@ impl TempRepo {
     }
 
     fn run_vec(&self, args: Vec<String>) -> Output {
+        self.run_vec_with_env(args, [])
+    }
+
+    fn run_vec_with_env<const N: usize>(
+        &self,
+        args: Vec<String>,
+        envs: [(&str, &str); N],
+    ) -> Output {
         let output = Command::new(env!("CARGO_BIN_EXE_lane"))
             .arg("--repo-root")
             .arg(&self.root)
             .args(args)
+            .envs(envs)
             .output()
             .unwrap();
         if !output.status.success() {
@@ -650,6 +802,37 @@ impl TempRepo {
             );
         }
         output
+    }
+
+    fn init_git_repo(&self) {
+        run_checked(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.root)
+                .args(["init", "-q"]),
+        );
+        run_checked(Command::new("git").arg("-C").arg(&self.root).args([
+            "config",
+            "user.email",
+            "lane@example.invalid",
+        ]));
+        run_checked(Command::new("git").arg("-C").arg(&self.root).args([
+            "config",
+            "user.name",
+            "Lane Test",
+        ]));
+        run_checked(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.root)
+                .args(["add", "."]),
+        );
+        run_checked(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.root)
+                .args(["commit", "-q", "-m", "base"]),
+        );
     }
 }
 
@@ -698,6 +881,19 @@ fn assert_success(output: Output) -> Output {
 
 fn output_json(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn run_checked(command: &mut Command) -> Vec<u8> {
+    let output = command.output().unwrap();
+    if !output.status.success() {
+        panic!(
+            "command failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    output.stdout
 }
 
 fn string_array(value: &Value) -> Vec<String> {
