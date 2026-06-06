@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::storage::persist_bytes;
-use crate::{FilePath, LaneError, LaneOpSummary, LaneRepo};
+use crate::{FilePath, LaneError, LaneOpDetail, LaneOpSummary, LaneRepo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirEntry {
@@ -236,6 +236,19 @@ impl<W: Worktree> LaneFs<W> {
             .map_err(LaneFsError::Lane)
     }
 
+    pub fn op_detail(
+        &self,
+        lane: &str,
+        path: &str,
+        op_id: &str,
+    ) -> Result<LaneOpDetail, LaneFsError> {
+        let path = normalize_repo_path(path)?;
+        let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
+        self.repo
+            .op_detail(&path, lane, base.as_deref(), op_id)
+            .map_err(LaneFsError::Lane)
+    }
+
     pub fn discard_lane(&mut self, lane: &str) -> bool {
         self.repo.discard_lane(lane)
     }
@@ -393,6 +406,30 @@ impl<W: Worktree> LaneFs<W> {
         let mut draft = self.repo.clone();
         let promoted = draft
             .promote_ops_path(&path, lane, base.as_deref(), op_ids)
+            .map_err(LaneFsError::Lane)?;
+        match promoted.as_deref() {
+            Some(bytes) => self
+                .worktree
+                .write_file(&path, bytes)
+                .map_err(LaneFsError::Io)?,
+            None => self.worktree.remove_file(&path).map_err(LaneFsError::Io)?,
+        }
+        self.repo = draft;
+        Ok(promoted)
+    }
+
+    pub fn resolve_op_file(
+        &mut self,
+        lane: &str,
+        path: &str,
+        op_id: &str,
+        replacement: impl Into<Vec<u8>>,
+    ) -> Result<Option<Vec<u8>>, LaneFsError> {
+        let path = normalize_repo_path(path)?;
+        let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
+        let mut draft = self.repo.clone();
+        let promoted = draft
+            .resolve_op_path(&path, lane, base.as_deref(), op_id, replacement)
             .map_err(LaneFsError::Lane)?;
         match promoted.as_deref() {
             Some(bytes) => self

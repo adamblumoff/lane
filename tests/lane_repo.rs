@@ -474,6 +474,56 @@ fn missing_selected_op_does_not_mutate_repo() {
 }
 
 #[test]
+fn resolve_op_promotes_replacement_bytes_and_preserves_other_lane_alternative() {
+    let mut repo = seeded_repo();
+    let base = b"a=1\nb=2\nc=3\n";
+    repo.replace("src/vars.txt", "agent-a", base, b"a=A\nb=B\nc=C\n".to_vec())
+        .unwrap();
+    repo.replace("src/vars.txt", "agent-b", base, b"a=1\nb=X\nc=3\n".to_vec())
+        .unwrap();
+
+    let agent_a_ops = repo
+        .change_ops("src/vars.txt", "agent-a", Some(base))
+        .unwrap();
+    assert_eq!(agent_a_ops.len(), 3);
+    let clean_op_ids = vec![agent_a_ops[0].op_id.clone(), agent_a_ops[2].op_id.clone()];
+    let promoted_clean = repo
+        .promote_ops("src/vars.txt", "agent-a", base, &clean_op_ids)
+        .unwrap();
+    assert_eq!(promoted_clean, b"a=A\nb=2\nc=C\n");
+
+    let detail = repo
+        .op_detail(
+            "src/vars.txt",
+            "agent-a",
+            Some(&promoted_clean),
+            "agent-a:2",
+        )
+        .unwrap();
+    assert_eq!(detail.base, b"2");
+    assert_eq!(detail.inserted, b"B");
+    assert_eq!(detail.summary.conflicts_with, vec!["agent-b".to_owned()]);
+
+    let resolved = repo
+        .resolve_op_path(
+            "src/vars.txt",
+            "agent-a",
+            Some(&promoted_clean),
+            "agent-a:2",
+            b"Y".to_vec(),
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(resolved, b"a=A\nb=Y\nc=C\n");
+    assert_eq!(repo.overlay_paths("agent-a").unwrap(), Vec::<&str>::new());
+    assert_eq!(
+        repo.read("src/vars.txt", "agent-b", &resolved).unwrap(),
+        b"a=A\nb=X\nc=C\n"
+    );
+}
+
+#[test]
 fn overlapping_same_file_ops_remain_alternatives_after_promotion() {
     let mut repo = seeded_repo();
     let base = b"mode=base\n";

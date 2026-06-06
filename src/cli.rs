@@ -17,6 +17,8 @@ const STORAGE_PATH: &str = ".lane/repo.lane";
 
 type CliResult<T> = Result<T, CliError>;
 
+const BYTE_PREVIEW_LIMIT: usize = 4096;
+
 #[derive(Parser, Debug)]
 #[command(name = "lane")]
 #[command(about = "Run agents in isolated lanes without copying the repo")]
@@ -51,6 +53,24 @@ enum Command {
     #[command(about = "List lane operations that conflict with other lanes")]
     Conflicts {
         lane: String,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(about = "Show one lane operation with base and inserted byte previews")]
+    ShowOp {
+        lane: String,
+        path: String,
+        op_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(about = "Resolve and promote one lane operation from replacement bytes")]
+    ResolveOp {
+        lane: String,
+        path: String,
+        op_id: String,
+        #[arg(long = "with-file", value_name = "PATH")]
+        with_file: PathBuf,
         #[arg(long)]
         json: bool,
     },
@@ -109,6 +129,20 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
         Command::Conflicts { lane, json } => {
             conflicts(&repo_root, &lane, json).map(|()| ExitCode::SUCCESS)
         }
+        Command::ShowOp {
+            lane,
+            path,
+            op_id,
+            json,
+        } => show_op(&repo_root, &lane, &path, &op_id, json).map(|()| ExitCode::SUCCESS),
+        Command::ResolveOp {
+            lane,
+            path,
+            op_id,
+            with_file,
+            json,
+        } => resolve_op(&repo_root, &lane, &path, &op_id, &with_file, json)
+            .map(|()| ExitCode::SUCCESS),
         Command::Diff { lane, paths } => diff(&repo_root, &lane, paths).map(|()| ExitCode::SUCCESS),
         Command::Promote { lane, path, json } => {
             promote(&repo_root, &lane, &path, json).map(|()| ExitCode::SUCCESS)
@@ -223,6 +257,81 @@ fn conflicts(repo_root: &Path, lane: &str, json: bool) -> CliResult<()> {
                 );
             }
         }
+    }
+    Ok(())
+}
+
+fn show_op(repo_root: &Path, lane: &str, path: &str, op_id: &str, json: bool) -> CliResult<()> {
+    let storage_path = storage_path(repo_root);
+    let _lock = acquire_repo_lock(&storage_path)?;
+    let (_, fs) = open_lane_fs(repo_root)?;
+    let detail = fs.op_detail(lane, path, op_id)?;
+    let output = ShowOpOutput {
+        lane,
+        path,
+        repo_root: path_label(repo_root),
+        storage_path: path_label(storage_path),
+        op: detail.summary,
+        base: byte_preview(&detail.base),
+        inserted: byte_preview(&detail.inserted),
+    };
+
+    if json {
+        print_json(&output)?;
+    } else {
+        println!(
+            "{}\t{}\t{}..{}\t{} byte(s)",
+            output.path,
+            output.op.op_id,
+            output.op.base_start,
+            output.op.base_end,
+            output.inserted.len
+        );
+        if let Some(text) = &output.inserted.utf8 {
+            print!("{text}");
+            if !text.ends_with('\n') {
+                println!();
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_op(
+    repo_root: &Path,
+    lane: &str,
+    path: &str,
+    op_id: &str,
+    with_file: &Path,
+    json: bool,
+) -> CliResult<()> {
+    let replacement = fs::read(with_file)?;
+    let replacement_file = fs::canonicalize(with_file).unwrap_or_else(|_| with_file.to_path_buf());
+    let storage_path = storage_path(repo_root);
+    let _lock = acquire_repo_lock(&storage_path)?;
+    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
+    let detail = fs.op_detail(lane, path, op_id)?;
+    fs.resolve_op_file(lane, path, op_id, replacement.clone())?;
+    persist_repo(&storage_path, fs.repo())?;
+
+    let output = ResolveOpOutput {
+        lane,
+        path,
+        op_id,
+        repo_root: path_label(repo_root),
+        storage_path: path_label(&storage_path),
+        replacement_file: path_label(replacement_file),
+        resolved_op: detail.summary,
+        replacement: byte_preview(&replacement),
+        remaining: collect_changes(&fs, lane)?,
+    };
+    if json {
+        print_json(&output)?;
+    } else {
+        println!(
+            "resolved and promoted {op_id} in lane {lane}: {path} ({} byte(s))",
+            output.replacement.len
+        );
     }
     Ok(())
 }
@@ -571,6 +680,31 @@ fn print_json(output: &impl Serialize) -> CliResult<()> {
     Ok(())
 }
 
+fn byte_preview(bytes: &[u8]) -> BytePreview {
+    BytePreview {
+        len: bytes.len(),
+        utf8: utf8_preview(bytes),
+        truncated: bytes.len() > BYTE_PREVIEW_LIMIT,
+    }
+}
+
+fn utf8_preview(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    if bytes.len() <= BYTE_PREVIEW_LIMIT {
+        return Some(text.to_owned());
+    }
+
+    let mut end = 0;
+    for (index, character) in text.char_indices() {
+        let next = index + character.len_utf8();
+        if next > BYTE_PREVIEW_LIMIT {
+            break;
+        }
+        end = next;
+    }
+    Some(text[..end].to_owned())
+}
+
 #[derive(Serialize)]
 struct CreateOutput<'a> {
     lane: &'a str,
@@ -593,6 +727,37 @@ struct ConflictsOutput<'a> {
     repo_root: String,
     storage_path: String,
     conflicts: Vec<ChangeOutput>,
+}
+
+#[derive(Serialize)]
+struct ShowOpOutput<'a> {
+    lane: &'a str,
+    path: &'a str,
+    repo_root: String,
+    storage_path: String,
+    op: LaneOpSummary,
+    base: BytePreview,
+    inserted: BytePreview,
+}
+
+#[derive(Serialize)]
+struct ResolveOpOutput<'a> {
+    lane: &'a str,
+    path: &'a str,
+    op_id: &'a str,
+    repo_root: String,
+    storage_path: String,
+    replacement_file: String,
+    resolved_op: LaneOpSummary,
+    replacement: BytePreview,
+    remaining: Vec<ChangeOutput>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct BytePreview {
+    len: usize,
+    utf8: Option<String>,
+    truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

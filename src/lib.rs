@@ -46,6 +46,13 @@ pub struct LaneOpSummary {
     pub conflicts_with: Vec<LaneId>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaneOpDetail {
+    pub summary: LaneOpSummary,
+    pub base: Vec<u8>,
+    pub inserted: Vec<u8>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaneOpKind {
@@ -174,6 +181,20 @@ impl LaneRepo {
             return Ok(Vec::new());
         };
         file.change_ops(path, lane, base)
+    }
+
+    pub fn op_detail(
+        &self,
+        path: &str,
+        lane: &str,
+        base: Option<&[u8]>,
+        op_id: &str,
+    ) -> Result<LaneOpDetail, LaneError> {
+        self.ensure_lane(lane)?;
+        let Some(file) = self.files.get(path) else {
+            return Err(operation_missing(path, op_id));
+        };
+        file.op_detail(path, lane, base, op_id)
     }
 
     pub fn write_path(
@@ -309,6 +330,26 @@ impl LaneRepo {
         };
 
         let promoted = file.promote_ops(path, lane, base, op_ids)?;
+        if file.is_empty() {
+            self.files.remove(path);
+        }
+        Ok(promoted)
+    }
+
+    pub fn resolve_op_path(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: Option<&[u8]>,
+        op_id: &str,
+        replacement: impl Into<Vec<u8>>,
+    ) -> Result<Option<Vec<u8>>, LaneError> {
+        self.ensure_lane(lane)?;
+        let Some(file) = self.files.get_mut(path) else {
+            return Err(operation_missing(path, op_id));
+        };
+
+        let promoted = file.resolve_op(path, lane, base, op_id, replacement.into())?;
         if file.is_empty() {
             self.files.remove(path);
         }
@@ -553,6 +594,50 @@ impl LaneFile {
         Ok(self.summarize_entry(path, lane, entry, base))
     }
 
+    fn op_detail(
+        &self,
+        path: &str,
+        lane: &str,
+        base: Option<&[u8]>,
+        op_id: &str,
+    ) -> Result<LaneOpDetail, LaneError> {
+        self.ensure_base(path, base)?;
+        let Some(entry) = self.lanes.get(lane) else {
+            return Err(operation_missing(path, op_id));
+        };
+
+        match entry {
+            LaneEntry::Present(view) => {
+                let Some(ParsedOpId::Present(id)) = parse_lane_op_id(lane, op_id) else {
+                    return Err(operation_missing(path, op_id));
+                };
+                let Some(op) = view.ops.iter().find(|op| op.id == id) else {
+                    return Err(operation_missing(path, op_id));
+                };
+                Ok(LaneOpDetail {
+                    summary: self.summarize_op(path, lane, op, base),
+                    base: base_slice_for_op(path, base, op)?,
+                    inserted: op.inserted.clone(),
+                })
+            }
+            LaneEntry::Deleted => {
+                if parse_lane_op_id(lane, op_id) != Some(ParsedOpId::Delete) {
+                    return Err(operation_missing(path, op_id));
+                }
+                let summary = self
+                    .summarize_entry(path, lane, entry, base)
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| operation_missing(path, op_id))?;
+                Ok(LaneOpDetail {
+                    summary,
+                    base: base.unwrap_or_default().to_vec(),
+                    inserted: Vec::new(),
+                })
+            }
+        }
+    }
+
     fn replace(
         &mut self,
         path: &str,
@@ -646,6 +731,47 @@ impl LaneFile {
             }
         };
         let selected_ids = selected_ops.iter().map(|op| op.id).collect::<BTreeSet<_>>();
+        self.promote_selected_present_ops(path, lane, base, selected_ops, &selected_ids)
+    }
+
+    fn resolve_op(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: Option<&[u8]>,
+        op_id: &str,
+        replacement: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, LaneError> {
+        self.ensure_base(path, base)?;
+        let Some(entry) = self.lanes.get(lane).cloned() else {
+            return Err(operation_missing(path, op_id));
+        };
+        let LaneEntry::Present(view) = entry else {
+            return Err(operation_missing(path, op_id));
+        };
+        let Some(ParsedOpId::Present(id)) = parse_lane_op_id(lane, op_id) else {
+            return Err(operation_missing(path, op_id));
+        };
+        let Some(target) = view.ops.iter().find(|op| op.id == id).cloned() else {
+            return Err(operation_missing(path, op_id));
+        };
+
+        let mut resolved = target;
+        resolved.id = next_file_op_id(&view.ops);
+        resolved.inserted = replacement;
+
+        let selected_ids = [id].into_iter().collect::<BTreeSet<_>>();
+        self.promote_selected_present_ops(path, lane, base, vec![resolved], &selected_ids)
+    }
+
+    fn promote_selected_present_ops(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: Option<&[u8]>,
+        selected_ops: Vec<FileOp>,
+        selected_ids: &BTreeSet<u64>,
+    ) -> Result<Option<Vec<u8>>, LaneError> {
         let promoted = Some(render_ops(path, base.unwrap_or_default(), &selected_ops)?);
         let old_entries = self.lanes.clone();
         let old_views = old_entries
@@ -661,23 +787,35 @@ impl LaneFile {
 
         for (lane_id, entry, old_bytes) in old_views {
             let next_entry = if let LaneEntry::Present(view) = &entry {
-                let retained_ops = if lane_id == lane {
-                    view.ops
+                if lane_id == lane {
+                    let retained_ops = view
+                        .ops
                         .iter()
                         .filter(|op| !selected_ids.contains(&op.id))
                         .cloned()
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    if retained_ops.is_empty() {
+                        entry_for_content(promoted.as_deref(), promoted.clone())
+                    } else {
+                        rebased_entry_for_present_ops(
+                            path,
+                            base,
+                            promoted.as_deref(),
+                            old_bytes,
+                            &selected_ops,
+                            &retained_ops,
+                        )?
+                    }
                 } else {
-                    view.ops.clone()
-                };
-                rebased_entry_for_present_ops(
-                    path,
-                    base,
-                    promoted.as_deref(),
-                    old_bytes,
-                    &selected_ops,
-                    &retained_ops,
-                )?
+                    rebased_entry_for_present_ops(
+                        path,
+                        base,
+                        promoted.as_deref(),
+                        old_bytes,
+                        &selected_ops,
+                        &view.ops,
+                    )?
+                }
             } else {
                 entry_for_content(promoted.as_deref(), old_bytes)
             };
@@ -987,6 +1125,31 @@ fn selected_present_ops(
         .filter(|op| selected.contains(&op.id))
         .cloned()
         .collect())
+}
+
+fn base_slice_for_op(path: &str, base: Option<&[u8]>, op: &FileOp) -> Result<Vec<u8>, LaneError> {
+    let base = base.unwrap_or_default();
+    let start = usize::try_from(op.base_start).map_err(|_| LaneError::OperationOutOfBounds {
+        path: path.to_owned(),
+    })?;
+    let len = usize::try_from(op.base_len).map_err(|_| LaneError::OperationOutOfBounds {
+        path: path.to_owned(),
+    })?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| LaneError::OperationOutOfBounds {
+            path: path.to_owned(),
+        })?;
+    if end > base.len() {
+        return Err(LaneError::OperationOutOfBounds {
+            path: path.to_owned(),
+        });
+    }
+    Ok(base[start..end].to_vec())
+}
+
+fn next_file_op_id(ops: &[FileOp]) -> u64 {
+    ops.iter().map(|op| op.id).max().unwrap_or(0) + 1
 }
 
 fn ensure_delete_selection(path: &str, lane: &str, op_ids: &[String]) -> Result<(), LaneError> {

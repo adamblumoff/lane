@@ -425,6 +425,74 @@ fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
 }
 
 #[test]
+fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
+    let repo = TempRepo::new();
+    repo.write("src/vars.txt", b"a=1\nb=2\nc=3\n");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=A`nb=B`nc=C`n\")",
+    ]);
+    repo.run_json([
+        "exec",
+        "agent-b",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=1`nb=X`nc=3`n\")",
+    ]);
+
+    repo.run_json(["promote-clean", "agent-a", "--json"]);
+
+    let shown = repo.run_json(["show-op", "agent-a", "src/vars.txt", "agent-a:2", "--json"]);
+    assert_eq!(shown["op"]["op_id"], "agent-a:2");
+    assert_eq!(shown["base"]["utf8"], "2");
+    assert_eq!(shown["inserted"]["utf8"], "B");
+    assert_eq!(
+        string_array(&shown["op"]["conflicts_with"]),
+        vec!["agent-b"]
+    );
+
+    let replacement = repo.path().join("resolution.txt");
+    fs::write(&replacement, b"Y").unwrap();
+    let resolved = output_json(&repo.run_vec(vec![
+        "resolve-op".to_owned(),
+        "agent-a".to_owned(),
+        "src/vars.txt".to_owned(),
+        "agent-a:2".to_owned(),
+        "--with-file".to_owned(),
+        replacement.display().to_string(),
+        "--json".to_owned(),
+    ]));
+
+    assert_eq!(resolved["resolved_op"]["op_id"], "agent-a:2");
+    assert_eq!(resolved["replacement"]["utf8"], "Y");
+    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    assert_eq!(
+        fs::read(repo.path().join("src/vars.txt")).unwrap(),
+        b"a=A\nb=Y\nc=C\n"
+    );
+
+    let agent_b = repo.run_json(["changes", "agent-b", "--json"]);
+    let agent_b_ops = agent_b["changes"][0]["ops"].as_array().unwrap();
+    assert_eq!(agent_b_ops.len(), 1);
+    assert_eq!(agent_b_ops[0]["inserted_len"], 1);
+    assert_eq!(
+        repo.run_json(["conflicts", "agent-b", "--json"])["conflicts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
 fn cli_exec_releases_storage_lock_while_worker_runs() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");
