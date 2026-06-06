@@ -1,4 +1,5 @@
 use lane::{LaneError, LaneRepo};
+use sha2::{Digest, Sha256};
 
 const PATH: &str = "src/example.ts";
 const BASE: &[u8] = b"export const mode = 'base';\n";
@@ -336,6 +337,24 @@ fn repo_state_round_trips() {
     assert_eq!(
         decoded.read(PATH, "agent-a", BASE).unwrap(),
         b"export const mode = 'fast';\n"
+    );
+}
+
+#[test]
+fn repo_state_serializes_v4_sha256_base_fingerprint() {
+    let mut repo = seeded_repo();
+    repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
+        .unwrap();
+
+    let encoded = repo.to_bytes();
+    let mut expected = [0; 32];
+    expected.copy_from_slice(&Sha256::digest(BASE));
+
+    assert!(encoded.starts_with(b"LANEREPO\0\0\0\x04"));
+    assert!(
+        encoded
+            .windows(expected.len())
+            .any(|window| window == expected.as_slice())
     );
 }
 

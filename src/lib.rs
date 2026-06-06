@@ -3,6 +3,7 @@ use std::fmt;
 use std::ops::Range;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use similar::{Algorithm, DiffTag, capture_diff_slices};
 
 pub mod cli;
@@ -14,7 +15,10 @@ pub(crate) mod virtual_exec;
 pub type FilePath = String;
 pub type LaneId = String;
 
-const STORAGE_MAGIC: &[u8] = b"LANEREPO\0\0\0\x03";
+const STORAGE_MAGIC: &[u8] = b"LANEREPO\0\0\0\x04";
+const BASE_FINGERPRINT_LEN: usize = 32;
+
+type BaseFingerprint = [u8; BASE_FINGERPRINT_LEN];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaneRepo {
@@ -58,7 +62,7 @@ struct LaneFile {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum BaseState {
-    Present(u64),
+    Present(BaseFingerprint),
     Missing,
 }
 
@@ -383,13 +387,12 @@ impl LaneRepo {
         for (path, file) in &self.files {
             write_bytes(&mut bytes, path.as_bytes());
             match file.base {
-                BaseState::Present(hash) => {
+                BaseState::Present(fingerprint) => {
                     bytes.push(1);
-                    write_u64(&mut bytes, hash);
+                    bytes.extend_from_slice(&fingerprint);
                 }
                 BaseState::Missing => {
                     bytes.push(0);
-                    write_u64(&mut bytes, 0);
                 }
             }
 
@@ -429,11 +432,8 @@ impl LaneRepo {
         for _ in 0..cursor.read_u64()? {
             let path = read_string(&mut cursor)?;
             let base = match cursor.read_byte()? {
-                0 => {
-                    cursor.read_u64()?;
-                    BaseState::Missing
-                }
-                1 => BaseState::Present(cursor.read_u64()?),
+                0 => BaseState::Missing,
+                1 => BaseState::Present(cursor.read_fingerprint()?),
                 tag => return Err(DecodeError::InvalidBase(tag)),
             };
 
@@ -503,7 +503,7 @@ impl LaneRepo {
 impl BaseState {
     fn for_content(content: Option<&[u8]>) -> Self {
         match content {
-            Some(bytes) => Self::Present(hash_bytes(bytes)),
+            Some(bytes) => Self::Present(base_fingerprint(bytes)),
             None => Self::Missing,
         }
     }
@@ -1084,13 +1084,11 @@ fn ensure_valid_range(range: Range<u64>, len: u64) -> Result<(), LaneError> {
     }
 }
 
-fn hash_bytes(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
+fn base_fingerprint(bytes: &[u8]) -> BaseFingerprint {
+    let digest = Sha256::digest(bytes);
+    let mut fingerprint = [0; BASE_FINGERPRINT_LEN];
+    fingerprint.copy_from_slice(&digest);
+    fingerprint
 }
 
 fn read_string(cursor: &mut Cursor<'_>) -> Result<String, DecodeError> {
@@ -1137,6 +1135,12 @@ impl<'a> Cursor<'a> {
     fn read_bytes(&mut self) -> Result<&'a [u8], DecodeError> {
         let len = self.read_u64()? as usize;
         self.take(len)
+    }
+
+    fn read_fingerprint(&mut self) -> Result<BaseFingerprint, DecodeError> {
+        let mut fingerprint = [0; BASE_FINGERPRINT_LEN];
+        fingerprint.copy_from_slice(self.take(BASE_FINGERPRINT_LEN)?);
+        Ok(fingerprint)
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
