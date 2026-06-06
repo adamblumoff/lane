@@ -11,7 +11,12 @@ const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 
 pub fn load_repo(path: &Path) -> io::Result<Option<LaneRepo>> {
     match fs::read(path) {
-        Ok(bytes) => Ok(LaneRepo::from_bytes(&bytes).ok()),
+        Ok(bytes) => LaneRepo::from_bytes(&bytes).map(Some).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid lane storage {}: {error}", path.display()),
+            )
+        }),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }

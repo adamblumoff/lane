@@ -386,6 +386,61 @@ fn non_overlapping_same_file_ops_compose_after_promotion() {
 }
 
 #[test]
+fn selected_ops_promote_without_promoting_the_whole_lane_file() {
+    let mut repo = seeded_repo();
+    let base = b"alpha=1\nbeta=2\ngamma=3\n";
+    let edited = b"alpha=10\nbeta=2\ngamma=30\n";
+    repo.replace("src/math.txt", "agent-a", base, edited.to_vec())
+        .unwrap();
+    repo.write("src/math.txt", "agent-b", base, 13..14, b"20".to_vec())
+        .unwrap();
+
+    let ops = repo
+        .change_ops("src/math.txt", "agent-a", Some(base))
+        .unwrap();
+    assert_eq!(ops.len(), 2);
+    let promoted = repo
+        .promote_ops("src/math.txt", "agent-a", base, &[ops[0].op_id.clone()])
+        .unwrap();
+
+    assert_eq!(promoted, b"alpha=10\nbeta=2\ngamma=3\n");
+    assert_eq!(
+        repo.read("src/math.txt", "agent-a", &promoted).unwrap(),
+        edited
+    );
+    assert_eq!(
+        repo.read("src/math.txt", "agent-b", &promoted).unwrap(),
+        b"alpha=10\nbeta=20\ngamma=3\n"
+    );
+    assert_eq!(
+        repo.change_ops("src/math.txt", "agent-a", Some(&promoted))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn missing_selected_op_does_not_mutate_repo() {
+    let mut repo = seeded_repo();
+    let base = b"alpha=1\nbeta=2\n";
+    repo.write("src/math.txt", "agent-a", base, 6..7, b"10".to_vec())
+        .unwrap();
+
+    assert_eq!(
+        repo.promote_ops("src/math.txt", "agent-a", base, &["agent-a:999".to_owned()],),
+        Err(LaneError::OperationMissing {
+            path: "src/math.txt".to_owned(),
+            op_id: "agent-a:999".to_owned()
+        })
+    );
+    assert_eq!(
+        repo.read("src/math.txt", "agent-a", base).unwrap(),
+        b"alpha=10\nbeta=2\n"
+    );
+}
+
+#[test]
 fn overlapping_same_file_ops_remain_alternatives_after_promotion() {
     let mut repo = seeded_repo();
     let base = b"mode=base\n";

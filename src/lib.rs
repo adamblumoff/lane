@@ -91,6 +91,8 @@ pub enum LaneError {
     RangeOutOfBounds { start: u64, end: u64, len: u64 },
     OperationOutOfBounds { path: FilePath },
     OperationConflict { path: FilePath },
+    EmptyOperationSelection,
+    OperationMissing { path: FilePath, op_id: String },
 }
 
 impl LaneRepo {
@@ -283,8 +285,46 @@ impl LaneRepo {
         Ok(promoted)
     }
 
+    pub fn promote_ops_path(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: Option<&[u8]>,
+        op_ids: &[String],
+    ) -> Result<Option<Vec<u8>>, LaneError> {
+        self.ensure_lane(lane)?;
+        if op_ids.is_empty() {
+            return Err(LaneError::EmptyOperationSelection);
+        }
+        let Some(file) = self.files.get_mut(path) else {
+            return Err(LaneError::OperationMissing {
+                path: path.to_owned(),
+                op_id: op_ids[0].clone(),
+            });
+        };
+
+        let promoted = file.promote_ops(path, lane, base, op_ids)?;
+        if file.is_empty() {
+            self.files.remove(path);
+        }
+        Ok(promoted)
+    }
+
     pub fn promote(&mut self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError> {
         self.promote_path(path, lane, Some(base))?
+            .ok_or_else(|| LaneError::BaseMissing {
+                path: path.to_owned(),
+            })
+    }
+
+    pub fn promote_ops(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+        op_ids: &[String],
+    ) -> Result<Vec<u8>, LaneError> {
+        self.promote_ops_path(path, lane, Some(base), op_ids)?
             .ok_or_else(|| LaneError::BaseMissing {
                 path: path.to_owned(),
             })
@@ -583,6 +623,69 @@ impl LaneFile {
         Ok(promoted)
     }
 
+    fn promote_ops(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: Option<&[u8]>,
+        op_ids: &[String],
+    ) -> Result<Option<Vec<u8>>, LaneError> {
+        self.ensure_base(path, base)?;
+        if op_ids.is_empty() {
+            return Err(LaneError::EmptyOperationSelection);
+        }
+        let Some(entry) = self.lanes.get(lane).cloned() else {
+            return Err(LaneError::OperationMissing {
+                path: path.to_owned(),
+                op_id: op_ids[0].clone(),
+            });
+        };
+
+        let selected_ops = match entry {
+            LaneEntry::Present(view) => selected_present_ops(path, lane, &view.ops, op_ids)?,
+            LaneEntry::Deleted => {
+                ensure_delete_selection(path, lane, op_ids)?;
+                return self.promote(path, lane, base);
+            }
+        };
+        let promoted = Some(render_ops(path, base.unwrap_or_default(), &selected_ops)?);
+        let old_entries = self.lanes.clone();
+        let old_views = old_entries
+            .iter()
+            .map(|(lane_id, entry)| {
+                self.read(path, lane_id, base)
+                    .map(|bytes| (lane_id.clone(), entry.clone(), bytes))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        self.base = BaseState::for_content(promoted.as_deref());
+        self.lanes.clear();
+
+        for (lane_id, entry, old_bytes) in old_views {
+            let content = if lane_id == lane {
+                old_bytes
+            } else if let (LaneEntry::Present(view), Some(old_base)) = (&entry, base) {
+                if entries_conflict(&selected_ops, &view.ops, false) {
+                    old_bytes
+                } else {
+                    Some(render_ops(
+                        path,
+                        old_base,
+                        &combined_ops(&selected_ops, &view.ops),
+                    )?)
+                }
+            } else {
+                old_bytes
+            };
+
+            if let Some(next_entry) = entry_for_content(promoted.as_deref(), content) {
+                self.lanes.insert(lane_id, next_entry);
+            }
+        }
+
+        Ok(promoted)
+    }
+
     fn discard_lane(&mut self, lane: &str) {
         self.lanes.remove(lane);
     }
@@ -629,7 +732,7 @@ impl LaneFile {
                 .map(|op| self.summarize_op(path, lane, op, base))
                 .collect(),
             LaneEntry::Deleted => vec![LaneOpSummary {
-                op_id: format!("{lane}:delete"),
+                op_id: delete_op_id_for(lane),
                 lane: lane.to_owned(),
                 path: path.to_owned(),
                 kind: LaneOpKind::Delete,
@@ -658,7 +761,7 @@ impl LaneFile {
     ) -> LaneOpSummary {
         let base_missing = base.is_none();
         LaneOpSummary {
-            op_id: format!("{lane}:{}", op.id),
+            op_id: op_id_for(lane, op),
             lane: lane.to_owned(),
             path: path.to_owned(),
             kind: op_kind(op, base_missing),
@@ -801,6 +904,66 @@ fn combined_ops(left: &[FileOp], right: &[FileOp]) -> Vec<FileOp> {
     ops
 }
 
+fn selected_present_ops(
+    path: &str,
+    lane: &str,
+    ops: &[FileOp],
+    op_ids: &[String],
+) -> Result<Vec<FileOp>, LaneError> {
+    let mut selected = BTreeSet::new();
+    for op_id in op_ids {
+        match parse_lane_op_id(lane, op_id) {
+            Some(ParsedOpId::Present(id)) if ops.iter().any(|op| op.id == id) => {
+                selected.insert(id);
+            }
+            _ => {
+                return Err(operation_missing(path, op_id));
+            }
+        }
+    }
+
+    Ok(ops
+        .iter()
+        .filter(|op| selected.contains(&op.id))
+        .cloned()
+        .collect())
+}
+
+fn ensure_delete_selection(path: &str, lane: &str, op_ids: &[String]) -> Result<(), LaneError> {
+    for op_id in op_ids {
+        if parse_lane_op_id(lane, op_id) != Some(ParsedOpId::Delete) {
+            return Err(operation_missing(path, op_id));
+        }
+    }
+    Ok(())
+}
+
+fn operation_missing(path: &str, op_id: &str) -> LaneError {
+    LaneError::OperationMissing {
+        path: path.to_owned(),
+        op_id: op_id.to_owned(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParsedOpId {
+    Present(u64),
+    Delete,
+}
+
+fn parse_lane_op_id(lane: &str, op_id: &str) -> Option<ParsedOpId> {
+    let suffix = match op_id.rsplit_once(':') {
+        Some((op_lane, suffix)) if op_lane == lane => suffix,
+        Some(_) => return None,
+        None => op_id,
+    };
+    if suffix == "delete" {
+        Some(ParsedOpId::Delete)
+    } else {
+        suffix.parse().ok().map(ParsedOpId::Present)
+    }
+}
+
 fn entries_conflict(left: &[FileOp], right: &[FileOp], base_missing: bool) -> bool {
     left.iter().any(|left_op| {
         right
@@ -860,6 +1023,14 @@ fn op_kind(op: &FileOp, base_missing: bool) -> LaneOpKind {
     } else {
         LaneOpKind::Replace
     }
+}
+
+fn op_id_for(lane: &str, op: &FileOp) -> String {
+    format!("{lane}:{}", op.id)
+}
+
+fn delete_op_id_for(lane: &str) -> String {
+    format!("{lane}:delete")
 }
 
 fn order_key(lane: &str, op: &FileOp) -> String {

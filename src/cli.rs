@@ -57,6 +57,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    #[command(about = "Promote selected lane operations into the normal repo")]
+    PromoteOps {
+        lane: String,
+        path: String,
+        #[arg(required = true)]
+        ops: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
     #[command(about = "Promote every changed file in a lane")]
     PromoteLane {
         lane: String,
@@ -89,6 +98,12 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
         Command::Promote { lane, path, json } => {
             promote(&repo_root, &lane, &path, json).map(|()| ExitCode::SUCCESS)
         }
+        Command::PromoteOps {
+            lane,
+            path,
+            ops,
+            json,
+        } => promote_ops(&repo_root, &lane, &path, &ops, json).map(|()| ExitCode::SUCCESS),
         Command::PromoteLane { lane, json } => {
             promote_lane(&repo_root, &lane, json).map(|()| ExitCode::SUCCESS)
         }
@@ -214,6 +229,40 @@ fn promote(repo_root: &Path, lane: &str, path: &str, json: bool) -> CliResult<()
         for change in &output.promoted {
             println!("promoted {}\t{}", change.status.short(), change.path);
         }
+    }
+    Ok(())
+}
+
+fn promote_ops(
+    repo_root: &Path,
+    lane: &str,
+    path: &str,
+    ops: &[String],
+    json: bool,
+) -> CliResult<()> {
+    let storage_path = storage_path(repo_root);
+    let _lock = acquire_repo_lock(&storage_path)?;
+    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
+    let before = change_for_path(&fs, lane, path)?;
+    fs.promote_ops_file(lane, path, ops)?;
+    persist_repo(&storage_path, fs.repo())?;
+
+    let promoted = before.into_iter().collect::<Vec<_>>();
+    let output = PromoteOpsOutput {
+        lane,
+        path,
+        repo_root: path_label(repo_root),
+        storage_path: path_label(&storage_path),
+        promoted_ops: ops.to_vec(),
+        promoted,
+    };
+    if json {
+        print_json(&output)?;
+    } else {
+        println!(
+            "promoted {} op(s) from lane {lane}: {path}",
+            output.promoted_ops.len()
+        );
     }
     Ok(())
 }
@@ -447,6 +496,16 @@ struct PromoteOutput<'a> {
     lane: &'a str,
     repo_root: String,
     storage_path: String,
+    promoted: Vec<ChangeOutput>,
+}
+
+#[derive(Serialize)]
+struct PromoteOpsOutput<'a> {
+    lane: &'a str,
+    path: &'a str,
+    repo_root: String,
+    storage_path: String,
+    promoted_ops: Vec<String>,
     promoted: Vec<ChangeOutput>,
 }
 

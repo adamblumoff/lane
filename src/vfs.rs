@@ -382,6 +382,29 @@ impl<W: Worktree> LaneFs<W> {
         Ok(promoted)
     }
 
+    pub fn promote_ops_file(
+        &mut self,
+        lane: &str,
+        path: &str,
+        op_ids: &[String],
+    ) -> Result<Option<Vec<u8>>, LaneFsError> {
+        let path = normalize_repo_path(path)?;
+        let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
+        let mut draft = self.repo.clone();
+        let promoted = draft
+            .promote_ops_path(&path, lane, base.as_deref(), op_ids)
+            .map_err(LaneFsError::Lane)?;
+        match promoted.as_deref() {
+            Some(bytes) => self
+                .worktree
+                .write_file(&path, bytes)
+                .map_err(LaneFsError::Io)?,
+            None => self.worktree.remove_file(&path).map_err(LaneFsError::Io)?,
+        }
+        self.repo = draft;
+        Ok(promoted)
+    }
+
     pub fn promote_lane(&mut self, lane: &str) -> Result<Vec<FilePath>, LaneFsError> {
         let paths = self
             .repo

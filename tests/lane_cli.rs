@@ -302,6 +302,67 @@ fn cli_exec_preserves_parallel_lane_outputs() {
 }
 
 #[test]
+fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops() {
+    let repo = TempRepo::new();
+    repo.write("src/math.txt", b"alpha=1\nbeta=2\ngamma=3\n");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/math.txt', \"alpha=10`nbeta=2`ngamma=30`n\")",
+    ]);
+    repo.run_json([
+        "exec",
+        "agent-b",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/math.txt', \"alpha=1`nbeta=20`ngamma=3`n\")",
+    ]);
+
+    let changes = repo.run_json(["changes", "agent-a", "--json"]);
+    let ops = changes["changes"][0]["ops"].as_array().unwrap();
+    assert_eq!(ops.len(), 2);
+    let op_id = ops[0]["op_id"].as_str().unwrap().to_owned();
+
+    let promoted = repo.run_json([
+        "promote-ops",
+        "agent-a",
+        "src/math.txt",
+        "--json",
+        op_id.as_str(),
+    ]);
+    assert_eq!(string_array(&promoted["promoted_ops"]), vec![op_id]);
+    assert_eq!(
+        fs::read(repo.path().join("src/math.txt")).unwrap(),
+        b"alpha=10\nbeta=2\ngamma=3\n"
+    );
+
+    let remaining_a = repo.run_json(["changes", "agent-a", "--json"]);
+    assert_eq!(
+        remaining_a["changes"][0]["ops"].as_array().unwrap().len(),
+        1
+    );
+    let remaining_b = repo.run_json(["changes", "agent-b", "--json"]);
+    assert_eq!(change_statuses(&remaining_b), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/math.txt".to_owned(), "modified".to_owned());
+        expected
+    });
+
+    repo.run_json(["promote-lane", "agent-b", "--json"]);
+    assert_eq!(
+        fs::read(repo.path().join("src/math.txt")).unwrap(),
+        b"alpha=10\nbeta=20\ngamma=3\n"
+    );
+}
+
+#[test]
 fn cli_exec_releases_storage_lock_while_worker_runs() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");
@@ -666,35 +727,28 @@ fn cli_exec_keeps_git_metadata_read_only_for_agent_processes() {
 }
 
 #[test]
-fn cli_exec_resets_incompatible_pre_alpha_lane_storage() {
+fn cli_exec_rejects_incompatible_pre_alpha_lane_storage_without_reset() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;\n");
     repo.write(".lane/repo.lane", b"old pre-alpha format");
 
-    let result = repo.run_json([
-        "exec",
+    let output = run_lane_exec(
+        repo.path(),
         "fresh-vfs",
-        "--",
-        "pwsh",
-        "-NoProfile",
-        "-Command",
         "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/fresh.ts -Value \"export const fresh = true;\" -NoNewline",
-    ]);
-
-    assert_eq!(result["exit_code"], 0);
-    assert_eq!(result["worker_error"], Value::Null);
-    assert_eq!(result["mode"], "virtual_mount");
-    assert_eq!(string_array(&result["changed_paths"]), vec!["src/fresh.ts"]);
-    assert_eq!(change_statuses(&result), {
-        let mut expected = BTreeMap::new();
-        expected.insert("src/fresh.ts".to_owned(), "created".to_owned());
-        expected
-    });
-    assert!(
-        fs::read(repo.path().join(".lane/repo.lane"))
-            .unwrap()
-            .starts_with(b"LANEREPO")
     );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("invalid lane storage"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(repo.path().join(".lane/repo.lane")).unwrap(),
+        b"old pre-alpha format"
+    );
+    assert!(!repo.path().join("src/fresh.ts").exists());
 }
 
 #[test]
