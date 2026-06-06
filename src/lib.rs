@@ -15,8 +15,9 @@ pub(crate) mod virtual_exec;
 pub type FilePath = String;
 pub type LaneId = String;
 
-const STORAGE_MAGIC: &[u8] = b"LANEREPO\0\0\0\x04";
+const STORAGE_MAGIC: &[u8] = b"LANEREPO\0\0\0\x05";
 const BASE_FINGERPRINT_LEN: usize = 32;
+const ORDER_ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 type BaseFingerprint = [u8; BASE_FINGERPRINT_LEN];
 
@@ -82,7 +83,7 @@ struct FileOp {
     id: u64,
     base_start: u64,
     base_len: u64,
-    order: u64,
+    order_key: String,
     inserted: Vec<u8>,
 }
 
@@ -408,7 +409,7 @@ impl LaneRepo {
                             write_u64(&mut bytes, op.id);
                             write_u64(&mut bytes, op.base_start);
                             write_u64(&mut bytes, op.base_len);
-                            write_u64(&mut bytes, op.order);
+                            write_bytes(&mut bytes, op.order_key.as_bytes());
                             write_bytes(&mut bytes, &op.inserted);
                         }
                     }
@@ -449,7 +450,7 @@ impl LaneRepo {
                                 id: cursor.read_u64()?,
                                 base_start: cursor.read_u64()?,
                                 base_len: cursor.read_u64()?,
-                                order: cursor.read_u64()?,
+                                order_key: read_order_key(&mut cursor)?,
                                 inserted: cursor.read_bytes()?.to_vec(),
                             });
                         }
@@ -796,6 +797,7 @@ pub enum DecodeError {
     InvalidUtf8,
     InvalidBase(u8),
     InvalidEntry(u8),
+    InvalidOrderKey,
     OperationConflict,
     OperationOutOfBounds,
     OverlayLaneMissing(LaneId),
@@ -829,19 +831,22 @@ fn diff_to_ops(base: &[u8], content: &[u8], base_missing: bool) -> Vec<FileOp> {
     }
 
     let mut ops = Vec::new();
+    let mut order_key = None;
     for diff_op in capture_diff_slices(Algorithm::Myers, base, content) {
         let (tag, old_range, new_range) = diff_op.as_tag_tuple();
         if tag == DiffTag::Equal {
             continue;
         }
         let id = ops.len() as u64 + 1;
+        let next_order_key = next_fractional_key(order_key.as_deref());
         ops.push(FileOp {
             id,
             base_start: old_range.start as u64,
             base_len: (old_range.end - old_range.start) as u64,
-            order: id,
+            order_key: next_order_key.clone(),
             inserted: content[new_range].to_vec(),
         });
+        order_key = Some(next_order_key);
     }
     ops
 }
@@ -854,7 +859,7 @@ fn coarse_replace_ops(base: &[u8], content: &[u8]) -> Vec<FileOp> {
             id: 1,
             base_start: 0,
             base_len: base.len() as u64,
-            order: 1,
+            order_key: first_fractional_key(),
             inserted: content.to_vec(),
         }]
     }
@@ -895,7 +900,7 @@ fn sorted_ops(ops: &[FileOp]) -> Vec<&FileOp> {
         left.base_start
             .cmp(&right.base_start)
             .then(left.base_len.cmp(&right.base_len))
-            .then(left.order.cmp(&right.order))
+            .then(left.order_key.cmp(&right.order_key))
             .then(left.id.cmp(&right.id))
     });
     sorted
@@ -1089,7 +1094,63 @@ fn delete_op_id_for(lane: &str) -> String {
 }
 
 fn order_key(lane: &str, op: &FileOp) -> String {
-    format!("{:020}:{lane}:{:020}", op.base_start, op.order)
+    format!(
+        "{:020}:{}:{lane}:{:020}",
+        op.base_start, op.order_key, op.id
+    )
+}
+
+fn first_fractional_key() -> String {
+    fractional_key_between(None, None)
+}
+
+fn next_fractional_key(left: Option<&str>) -> String {
+    fractional_key_between(left, None)
+}
+
+fn fractional_key_between(left: Option<&str>, right: Option<&str>) -> String {
+    let left = left.map(order_key_digits).unwrap_or_default();
+    let right = right.map(order_key_digits).unwrap_or_default();
+    let mut prefix = Vec::new();
+    let mut index = 0;
+    let max_digit = ORDER_ALPHABET.len() - 1;
+
+    loop {
+        let left_digit = left.get(index).copied().unwrap_or(0);
+        let right_digit = right.get(index).copied().unwrap_or(max_digit);
+        if right_digit > left_digit + 1 {
+            prefix.push((left_digit + right_digit) / 2);
+            return digits_to_order_key(&prefix);
+        }
+
+        prefix.push(left_digit);
+        index += 1;
+    }
+}
+
+fn order_key_digits(key: &str) -> Vec<usize> {
+    key.bytes()
+        .map(|byte| {
+            ORDER_ALPHABET
+                .iter()
+                .position(|candidate| *candidate == byte)
+                .expect("order key must be validated before use")
+        })
+        .collect()
+}
+
+fn digits_to_order_key(digits: &[usize]) -> String {
+    digits
+        .iter()
+        .map(|digit| char::from(ORDER_ALPHABET[*digit]))
+        .collect()
+}
+
+fn is_valid_order_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|byte| ORDER_ALPHABET.iter().any(|candidate| *candidate == byte))
 }
 
 fn is_probably_binary(bytes: &[u8]) -> bool {
@@ -1103,6 +1164,9 @@ fn validate_ops(ops: &[FileOp]) -> Result<(), DecodeError> {
             .base_start
             .checked_add(op.base_len)
             .ok_or(DecodeError::OperationOutOfBounds)?;
+        if !is_valid_order_key(&op.order_key) {
+            return Err(DecodeError::InvalidOrderKey);
+        }
         if op.base_start < cursor {
             return Err(DecodeError::OperationConflict);
         }
@@ -1150,6 +1214,15 @@ fn read_string(cursor: &mut Cursor<'_>) -> Result<String, DecodeError> {
     String::from_utf8(cursor.read_bytes()?.to_vec()).map_err(|_| DecodeError::InvalidUtf8)
 }
 
+fn read_order_key(cursor: &mut Cursor<'_>) -> Result<String, DecodeError> {
+    let key = read_string(cursor)?;
+    if is_valid_order_key(&key) {
+        Ok(key)
+    } else {
+        Err(DecodeError::InvalidOrderKey)
+    }
+}
+
 fn write_bytes(target: &mut Vec<u8>, bytes: &[u8]) {
     write_u64(target, bytes.len() as u64);
     target.extend_from_slice(bytes);
@@ -1157,6 +1230,31 @@ fn write_bytes(target: &mut Vec<u8>, bytes: &[u8]) {
 
 fn write_u64(target: &mut Vec<u8>, value: u64) {
     target.extend_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fractional_keys_are_dense_between_neighbors() {
+        let left = first_fractional_key();
+        let right = next_fractional_key(Some(&left));
+        let middle = fractional_key_between(Some(&left), Some(&right));
+
+        assert!(left < middle);
+        assert!(middle < right);
+    }
+
+    #[test]
+    fn fractional_keys_can_grow_without_renumbering() {
+        let mut keys = vec![first_fractional_key()];
+        for _ in 0..128 {
+            let next = next_fractional_key(keys.last().map(String::as_str));
+            assert!(keys.last().unwrap() < &next);
+            keys.push(next);
+        }
+    }
 }
 
 struct Cursor<'a> {

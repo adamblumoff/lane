@@ -341,7 +341,7 @@ fn repo_state_round_trips() {
 }
 
 #[test]
-fn repo_state_serializes_v4_sha256_base_fingerprint() {
+fn repo_state_serializes_v5_sha256_base_fingerprint() {
     let mut repo = seeded_repo();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
         .unwrap();
@@ -350,7 +350,7 @@ fn repo_state_serializes_v4_sha256_base_fingerprint() {
     let mut expected = [0; 32];
     expected.copy_from_slice(&Sha256::digest(BASE));
 
-    assert!(encoded.starts_with(b"LANEREPO\0\0\0\x04"));
+    assert!(encoded.starts_with(b"LANEREPO\0\0\0\x05"));
     assert!(
         encoded
             .windows(expected.len())
@@ -444,7 +444,7 @@ fn selected_ops_promote_without_promoting_the_whole_lane_file() {
     assert_eq!(remaining_a_ops[0].base_start, 23);
     assert_eq!(
         remaining_a_ops[0].order_key,
-        "00000000000000000023:agent-a:00000000000000000002"
+        "00000000000000000023:j:agent-a:00000000000000000002"
     );
     let remaining_b_ops = repo
         .change_ops("src/math.txt", "agent-b", Some(&promoted))
