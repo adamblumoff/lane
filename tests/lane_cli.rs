@@ -344,10 +344,9 @@ fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops()
     );
 
     let remaining_a = repo.run_json(["changes", "agent-a", "--json"]);
-    assert_eq!(
-        remaining_a["changes"][0]["ops"].as_array().unwrap().len(),
-        1
-    );
+    let remaining_a_ops = remaining_a["changes"][0]["ops"].as_array().unwrap();
+    assert_eq!(remaining_a_ops.len(), 1);
+    assert_eq!(remaining_a_ops[0]["op_id"], "agent-a:2");
     let remaining_b = repo.run_json(["changes", "agent-b", "--json"]);
     assert_eq!(change_statuses(&remaining_b), {
         let mut expected = BTreeMap::new();

@@ -437,6 +437,20 @@ fn selected_ops_promote_without_promoting_the_whole_lane_file() {
             .len(),
         1
     );
+    let remaining_a_ops = repo
+        .change_ops("src/math.txt", "agent-a", Some(&promoted))
+        .unwrap();
+    assert_eq!(remaining_a_ops[0].op_id, "agent-a:2");
+    assert_eq!(remaining_a_ops[0].base_start, 23);
+    assert_eq!(
+        remaining_a_ops[0].order_key,
+        "00000000000000000023:agent-a:00000000000000000002"
+    );
+    let remaining_b_ops = repo
+        .change_ops("src/math.txt", "agent-b", Some(&promoted))
+        .unwrap();
+    assert_eq!(remaining_b_ops[0].op_id, "agent-b:1");
+    assert_eq!(remaining_b_ops[0].base_start, 15);
 }
 
 #[test]

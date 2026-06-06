@@ -594,28 +594,24 @@ impl LaneFile {
         self.lanes.clear();
 
         for (lane_id, entry, old_bytes) in old_views {
-            let content = if lane_id == lane {
-                promoted.clone()
-            } else if let (
-                Some(LaneEntry::Present(promoted_view)),
-                LaneEntry::Present(view),
-                Some(old_base),
-            ) = (&promoted_entry, &entry, base)
+            let next_entry = if lane_id == lane {
+                entry_for_content(promoted.as_deref(), promoted.clone())
+            } else if let (Some(LaneEntry::Present(promoted_view)), LaneEntry::Present(view)) =
+                (&promoted_entry, &entry)
             {
-                if entries_conflict(&promoted_view.ops, &view.ops, false) {
-                    old_bytes
-                } else {
-                    Some(render_ops(
-                        path,
-                        old_base,
-                        &combined_ops(&promoted_view.ops, &view.ops),
-                    )?)
-                }
+                rebased_entry_for_present_ops(
+                    path,
+                    base,
+                    promoted.as_deref(),
+                    old_bytes,
+                    &promoted_view.ops,
+                    &view.ops,
+                )?
             } else {
-                old_bytes
+                entry_for_content(promoted.as_deref(), old_bytes)
             };
 
-            if let Some(next_entry) = entry_for_content(promoted.as_deref(), content) {
+            if let Some(next_entry) = next_entry {
                 self.lanes.insert(lane_id, next_entry);
             }
         }
@@ -648,6 +644,7 @@ impl LaneFile {
                 return self.promote(path, lane, base);
             }
         };
+        let selected_ids = selected_ops.iter().map(|op| op.id).collect::<BTreeSet<_>>();
         let promoted = Some(render_ops(path, base.unwrap_or_default(), &selected_ops)?);
         let old_entries = self.lanes.clone();
         let old_views = old_entries
@@ -662,23 +659,29 @@ impl LaneFile {
         self.lanes.clear();
 
         for (lane_id, entry, old_bytes) in old_views {
-            let content = if lane_id == lane {
-                old_bytes
-            } else if let (LaneEntry::Present(view), Some(old_base)) = (&entry, base) {
-                if entries_conflict(&selected_ops, &view.ops, false) {
-                    old_bytes
+            let next_entry = if let LaneEntry::Present(view) = &entry {
+                let retained_ops = if lane_id == lane {
+                    view.ops
+                        .iter()
+                        .filter(|op| !selected_ids.contains(&op.id))
+                        .cloned()
+                        .collect::<Vec<_>>()
                 } else {
-                    Some(render_ops(
-                        path,
-                        old_base,
-                        &combined_ops(&selected_ops, &view.ops),
-                    )?)
-                }
+                    view.ops.clone()
+                };
+                rebased_entry_for_present_ops(
+                    path,
+                    base,
+                    promoted.as_deref(),
+                    old_bytes,
+                    &selected_ops,
+                    &retained_ops,
+                )?
             } else {
-                old_bytes
+                entry_for_content(promoted.as_deref(), old_bytes)
             };
 
-            if let Some(next_entry) = entry_for_content(promoted.as_deref(), content) {
+            if let Some(next_entry) = next_entry {
                 self.lanes.insert(lane_id, next_entry);
             }
         }
@@ -898,10 +901,62 @@ fn sorted_ops(ops: &[FileOp]) -> Vec<&FileOp> {
     sorted
 }
 
-fn combined_ops(left: &[FileOp], right: &[FileOp]) -> Vec<FileOp> {
-    let mut ops = left.to_vec();
-    ops.extend_from_slice(right);
-    ops
+fn rebased_entry_for_present_ops(
+    path: &str,
+    old_base: Option<&[u8]>,
+    promoted_base: Option<&[u8]>,
+    fallback_bytes: Option<Vec<u8>>,
+    promoted_ops: &[FileOp],
+    retained_ops: &[FileOp],
+) -> Result<Option<LaneEntry>, LaneError> {
+    let Some(promoted_base) = promoted_base else {
+        return Ok(entry_for_content(promoted_base, fallback_bytes));
+    };
+    if old_base.is_none()
+        || retained_ops.is_empty()
+        || entries_conflict(promoted_ops, retained_ops, false)
+    {
+        return Ok(entry_for_content(Some(promoted_base), fallback_bytes));
+    }
+
+    let rebased_ops = rebase_ops_after_promotion(path, retained_ops, promoted_ops)?;
+    render_ops(path, promoted_base, &rebased_ops)?;
+
+    Ok(Some(LaneEntry::Present(LaneView { ops: rebased_ops })))
+}
+
+fn rebase_ops_after_promotion(
+    path: &str,
+    ops: &[FileOp],
+    promoted_ops: &[FileOp],
+) -> Result<Vec<FileOp>, LaneError> {
+    let promoted_ops = sorted_ops(promoted_ops);
+    ops.iter()
+        .map(|op| {
+            let mut base_start = i128::from(op.base_start);
+            for promoted_op in &promoted_ops {
+                if promoted_op_shifts_start(op, promoted_op) {
+                    base_start +=
+                        promoted_op.inserted.len() as i128 - i128::from(promoted_op.base_len);
+                }
+            }
+
+            let mut rebased = op.clone();
+            rebased.base_start =
+                u64::try_from(base_start).map_err(|_| LaneError::OperationOutOfBounds {
+                    path: path.to_owned(),
+                })?;
+            Ok(rebased)
+        })
+        .collect()
+}
+
+fn promoted_op_shifts_start(op: &FileOp, promoted_op: &FileOp) -> bool {
+    if promoted_op.base_len == 0 {
+        promoted_op.base_start <= op.base_start
+    } else {
+        promoted_op.base_start + promoted_op.base_len <= op.base_start
+    }
 }
 
 fn selected_present_ops(
