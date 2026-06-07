@@ -1,5 +1,6 @@
-use lane::{LaneError, LaneRepo};
+use super::{LaneError, LaneRepo, PromotedFile};
 use sha2::{Digest, Sha256};
+use std::ops::Range;
 
 const PATH: &str = "src/example.ts";
 const BASE: &[u8] = b"export const mode = 'base';\n";
@@ -117,7 +118,7 @@ fn promote_lane_promotes_every_changed_path_for_lane() {
             ],
         )
         .unwrap(),
-        Vec::<lane::PromotedFile>::new()
+        Vec::<PromotedFile>::new()
     );
 }
 
@@ -257,24 +258,6 @@ fn projection_rejects_overlays_when_the_normal_file_changed_outside_lane() {
             path: PATH.to_owned()
         })
     );
-}
-
-#[test]
-fn failed_first_write_does_not_pin_path_to_old_base() {
-    let mut repo = seeded_repo();
-    let len = BASE.len() as u64;
-
-    assert_eq!(
-        repo.write(PATH, "agent-a", BASE, len + 1..len + 2, b"fast".to_vec()),
-        Err(LaneError::RangeOutOfBounds {
-            start: len + 1,
-            end: len + 2,
-            len,
-        })
-    );
-
-    let changed = b"export const mode = 'changed';\n";
-    assert_eq!(repo.read(PATH, "agent-a", changed).unwrap(), changed);
 }
 
 #[test]
@@ -621,9 +604,90 @@ fn seeded_repo() -> LaneRepo {
     repo
 }
 
-fn promoted_file(path: &str, bytes: &[u8]) -> lane::PromotedFile {
-    lane::PromotedFile {
+fn promoted_file(path: &str, bytes: &[u8]) -> PromotedFile {
+    PromotedFile {
         path: path.to_owned(),
         bytes: Some(bytes.to_vec()),
+    }
+}
+
+trait RepoTestExt {
+    fn read(&self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError>;
+    fn write(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+        range: Range<u64>,
+        replacement: Vec<u8>,
+    ) -> Result<(), LaneError>;
+    fn replace(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+        content: Vec<u8>,
+    ) -> Result<(), LaneError>;
+    fn promote(&mut self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError>;
+    fn promote_ops(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+        op_ids: &[String],
+    ) -> Result<Vec<u8>, LaneError>;
+}
+
+impl RepoTestExt for LaneRepo {
+    fn read(&self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError> {
+        self.read_path(path, lane, Some(base))?
+            .ok_or_else(|| LaneError::BaseMissing {
+                path: path.to_owned(),
+            })
+    }
+
+    fn write(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+        range: Range<u64>,
+        replacement: Vec<u8>,
+    ) -> Result<(), LaneError> {
+        let mut current = self.read(path, lane, base)?;
+        let start = usize::try_from(range.start).expect("test range start fits usize");
+        let end = usize::try_from(range.end).expect("test range end fits usize");
+        current.splice(start..end, replacement);
+        self.replace_path(path, lane, Some(base), Some(current))
+    }
+
+    fn replace(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+        content: Vec<u8>,
+    ) -> Result<(), LaneError> {
+        self.replace_path(path, lane, Some(base), Some(content))
+    }
+
+    fn promote(&mut self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError> {
+        self.promote_path(path, lane, Some(base))?
+            .ok_or_else(|| LaneError::BaseMissing {
+                path: path.to_owned(),
+            })
+    }
+
+    fn promote_ops(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+        op_ids: &[String],
+    ) -> Result<Vec<u8>, LaneError> {
+        self.promote_ops_path(path, lane, Some(base), op_ids)?
+            .ok_or_else(|| LaneError::BaseMissing {
+                path: path.to_owned(),
+            })
     }
 }

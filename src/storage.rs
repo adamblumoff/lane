@@ -9,7 +9,7 @@ use crate::LaneRepo;
 const LOCK_RETRY_ATTEMPTS: usize = 1200;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 
-pub fn load_repo(path: &Path) -> io::Result<Option<LaneRepo>> {
+pub(crate) fn load_repo(path: &Path) -> io::Result<Option<LaneRepo>> {
     match fs::read(path) {
         Ok(bytes) => LaneRepo::from_bytes(&bytes).map(Some).map_err(|error| {
             io::Error::new(
@@ -22,16 +22,16 @@ pub fn load_repo(path: &Path) -> io::Result<Option<LaneRepo>> {
     }
 }
 
-pub fn persist_repo(path: &Path, repo: &LaneRepo) -> io::Result<()> {
+pub(crate) fn persist_repo(path: &Path, repo: &LaneRepo) -> io::Result<()> {
     persist_bytes(path, &repo.to_bytes())
 }
 
-pub struct RepoLock {
+pub(crate) struct RepoLock {
     path: PathBuf,
     _file: File,
 }
 
-pub fn acquire_repo_lock(storage_path: &Path) -> io::Result<RepoLock> {
+pub(crate) fn acquire_repo_lock(storage_path: &Path) -> io::Result<RepoLock> {
     let lock_path = storage_path.with_extension("lane.lock");
     acquire_path_lock(&lock_path)
 }
@@ -81,7 +81,7 @@ impl Drop for RepoLock {
     }
 }
 
-pub fn persist_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn persist_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

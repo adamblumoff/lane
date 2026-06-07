@@ -327,7 +327,7 @@ struct VirtualLaneState {
     repo_root: PathBuf,
     storage_path: PathBuf,
     lane: String,
-    fs: Mutex<LaneFs<FileWorktree>>,
+    fs: Mutex<LaneFs>,
     dirty: Mutex<BTreeMap<FilePath, DirtyEntry>>,
     versions: Mutex<BTreeMap<FilePath, u64>>,
     next_version: AtomicU64,
@@ -744,11 +744,7 @@ impl VirtualLaneState {
         })
     }
 
-    fn path_has_visible_children(
-        &self,
-        fs: &LaneFs<FileWorktree>,
-        path: &str,
-    ) -> Result<bool, i32> {
+    fn path_has_visible_children(&self, fs: &LaneFs, path: &str) -> Result<bool, i32> {
         fs.list_dir(&self.lane, path)
             .map(|entries| !entries.is_empty())
             .map_err(status_from_lane_fs_error)
@@ -982,10 +978,7 @@ impl VirtualLaneState {
         })
     }
 
-    fn with_fs_read<T>(
-        &self,
-        operation: impl FnOnce(&LaneFs<FileWorktree>) -> Result<T, i32>,
-    ) -> Result<T, i32> {
+    fn with_fs_read<T>(&self, operation: impl FnOnce(&LaneFs) -> Result<T, i32>) -> Result<T, i32> {
         let fs = self.fs.lock().map_err(|_| STATUS_ACCESS_DENIED)?;
         operation(&fs)
     }
@@ -1123,7 +1116,7 @@ impl VirtualLaneState {
 }
 
 fn apply_dirty_entries<'a>(
-    fs: &mut LaneFs<FileWorktree>,
+    fs: &mut LaneFs,
     lane: &str,
     dirty: impl IntoIterator<Item = (&'a str, &'a DirtyEntry)>,
 ) -> Result<(), i32> {
@@ -1152,7 +1145,7 @@ fn apply_dirty_entries<'a>(
 }
 
 fn collect_visible_files(
-    fs: &LaneFs<FileWorktree>,
+    fs: &LaneFs,
     lane: &str,
     path: &str,
     files: &mut Vec<FilePath>,
@@ -1195,7 +1188,7 @@ fn prepare_session_fs(
     storage_path: &Path,
     lane: &str,
     metrics: &VirtualFsMetrics,
-) -> Result<LaneFs<FileWorktree>, VirtualExecError> {
+) -> Result<LaneFs, VirtualExecError> {
     with_lane_fs_write(repo_root, storage_path, metrics, |fs| {
         fs.create_lane(lane).map_err(status_from_lane_fs_error)?;
         Ok(LaneFs::new(fs.repo().clone(), FileWorktree::new(repo_root)))
@@ -1206,7 +1199,7 @@ fn with_lane_fs_write<T>(
     repo_root: &Path,
     storage_path: &Path,
     metrics: &VirtualFsMetrics,
-    operation: impl FnOnce(&mut LaneFs<FileWorktree>) -> Result<T, i32>,
+    operation: impl FnOnce(&mut LaneFs) -> Result<T, i32>,
 ) -> Result<T, VirtualExecError> {
     let wait_start = Instant::now();
     let lock = acquire_repo_lock(storage_path).map_err(|error| {
@@ -1355,7 +1348,7 @@ fn rename_target_path(from: &str, target: &str) -> FilePath {
 }
 
 fn change_for_path(
-    fs: &LaneFs<FileWorktree>,
+    fs: &LaneFs,
     lane: &str,
     path: impl Into<String>,
 ) -> Result<Option<VirtualChangeOutput>, i32> {
@@ -1388,7 +1381,6 @@ fn change_for_path(
 fn status_from_lane_fs_error(error: LaneFsError) -> i32 {
     match error {
         LaneFsError::BadPath(_) => STATUS_ACCESS_DENIED,
-        LaneFsError::FileMissing { .. } => STATUS_NO_SUCH_FILE,
         LaneFsError::Io(error) => status_from_io_error(error),
         LaneFsError::Lane(error) => status_from_lane_error(error),
     }
@@ -1399,8 +1391,7 @@ fn status_from_lane_error(error: LaneError) -> i32 {
         LaneError::LaneMissing(_) | LaneError::BaseMissing { .. } => STATUS_OBJECT_NAME_NOT_FOUND,
         LaneError::BaseChanged { .. } => STATUS_ACCESS_DENIED,
         LaneError::ReservedLane(_) => STATUS_INVALID_PARAMETER,
-        LaneError::RangeOutOfBounds { .. }
-        | LaneError::OperationOutOfBounds { .. }
+        LaneError::OperationOutOfBounds { .. }
         | LaneError::OperationConflict { .. }
         | LaneError::EmptyOperationSelection
         | LaneError::OperationMissing { .. } => STATUS_INVALID_PARAMETER,

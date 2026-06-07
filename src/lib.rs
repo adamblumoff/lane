@@ -6,14 +6,19 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use similar::{Algorithm, DiffTag, capture_diff_slices};
 
-pub mod cli;
-pub mod storage;
-pub mod vfs;
+mod cli;
+mod storage;
+mod vfs;
 #[cfg(windows)]
 pub(crate) mod virtual_exec;
 
-pub type FilePath = String;
-pub type LaneId = String;
+pub use cli::{CliError, run};
+
+#[cfg(test)]
+mod repo_tests;
+
+pub(crate) type FilePath = String;
+pub(crate) type LaneId = String;
 
 const STORAGE_MAGIC: &[u8] = b"LANEREPO\0\0\0\x05";
 const BASE_FINGERPRINT_LEN: usize = 32;
@@ -22,40 +27,40 @@ const ORDER_ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl
 type BaseFingerprint = [u8; BASE_FINGERPRINT_LEN];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LaneRepo {
+pub(crate) struct LaneRepo {
     lanes: BTreeSet<LaneId>,
     files: BTreeMap<FilePath, LaneFile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PromotedFile {
-    pub path: FilePath,
-    pub bytes: Option<Vec<u8>>,
+pub(crate) struct PromotedFile {
+    pub(crate) path: FilePath,
+    pub(crate) bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct LaneOpSummary {
-    pub op_id: String,
-    pub lane: LaneId,
-    pub path: FilePath,
-    pub kind: LaneOpKind,
-    pub base_start: u64,
-    pub base_end: u64,
-    pub inserted_len: u64,
-    pub order_key: String,
-    pub conflicts_with: Vec<LaneId>,
+pub(crate) struct LaneOpSummary {
+    pub(crate) op_id: String,
+    pub(crate) lane: LaneId,
+    pub(crate) path: FilePath,
+    pub(crate) kind: LaneOpKind,
+    pub(crate) base_start: u64,
+    pub(crate) base_end: u64,
+    pub(crate) inserted_len: u64,
+    pub(crate) order_key: String,
+    pub(crate) conflicts_with: Vec<LaneId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LaneOpDetail {
-    pub summary: LaneOpSummary,
-    pub base: Vec<u8>,
-    pub inserted: Vec<u8>,
+pub(crate) struct LaneOpDetail {
+    pub(crate) summary: LaneOpSummary,
+    pub(crate) base: Vec<u8>,
+    pub(crate) inserted: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LaneOpKind {
+pub(crate) enum LaneOpKind {
     Create,
     Insert,
     Delete,
@@ -95,12 +100,11 @@ struct FileOp {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LaneError {
+pub(crate) enum LaneError {
     ReservedLane(LaneId),
     LaneMissing(LaneId),
     BaseMissing { path: FilePath },
     BaseChanged { path: FilePath },
-    RangeOutOfBounds { start: u64, end: u64, len: u64 },
     OperationOutOfBounds { path: FilePath },
     OperationConflict { path: FilePath },
     EmptyOperationSelection,
@@ -108,22 +112,18 @@ pub enum LaneError {
 }
 
 impl LaneRepo {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             lanes: BTreeSet::new(),
             files: BTreeMap::new(),
         }
     }
 
-    pub fn lane_ids(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn lane_ids(&self) -> impl Iterator<Item = &str> {
         self.lanes.iter().map(String::as_str)
     }
 
-    pub fn paths(&self) -> impl Iterator<Item = &str> {
-        self.files.keys().map(String::as_str)
-    }
-
-    pub fn overlay_paths(&self, lane: &str) -> Result<Vec<&str>, LaneError> {
+    pub(crate) fn overlay_paths(&self, lane: &str) -> Result<Vec<&str>, LaneError> {
         self.ensure_lane(lane)?;
         Ok(self
             .files
@@ -132,13 +132,13 @@ impl LaneRepo {
             .collect())
     }
 
-    pub fn create_lane(&mut self, lane: impl Into<LaneId>) -> Result<bool, LaneError> {
+    pub(crate) fn create_lane(&mut self, lane: impl Into<LaneId>) -> Result<bool, LaneError> {
         let lane = lane.into();
         ensure_user_lane(&lane)?;
         Ok(self.lanes.insert(lane))
     }
 
-    pub fn discard_lane(&mut self, lane: &str) -> bool {
+    pub(crate) fn discard_lane(&mut self, lane: &str) -> bool {
         let removed = self.lanes.remove(lane);
         for file in self.files.values_mut() {
             file.discard_lane(lane);
@@ -147,7 +147,7 @@ impl LaneRepo {
         removed
     }
 
-    pub fn read_path(
+    pub(crate) fn read_path(
         &self,
         path: &str,
         lane: &str,
@@ -163,14 +163,7 @@ impl LaneRepo {
         }
     }
 
-    pub fn read(&self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError> {
-        self.read_path(path, lane, Some(base))?
-            .ok_or_else(|| LaneError::BaseMissing {
-                path: path.to_owned(),
-            })
-    }
-
-    pub fn change_ops(
+    pub(crate) fn change_ops(
         &self,
         path: &str,
         lane: &str,
@@ -183,7 +176,7 @@ impl LaneRepo {
         file.change_ops(path, lane, base)
     }
 
-    pub fn op_detail(
+    pub(crate) fn op_detail(
         &self,
         path: &str,
         lane: &str,
@@ -197,50 +190,7 @@ impl LaneRepo {
         file.op_detail(path, lane, base, op_id)
     }
 
-    pub fn write_path(
-        &mut self,
-        path: &str,
-        lane: &str,
-        base: Option<&[u8]>,
-        range: Range<u64>,
-        replacement: impl Into<Vec<u8>>,
-    ) -> Result<(), LaneError> {
-        let replacement = replacement.into();
-        let mut current = self.read_path(path, lane, base)?.unwrap_or_else(Vec::new);
-        ensure_valid_range(range.clone(), current.len() as u64)?;
-
-        let start: usize = range
-            .start
-            .try_into()
-            .map_err(|_| LaneError::RangeOutOfBounds {
-                start: range.start,
-                end: range.end,
-                len: current.len() as u64,
-            })?;
-        let end: usize = range
-            .end
-            .try_into()
-            .map_err(|_| LaneError::RangeOutOfBounds {
-                start: range.start,
-                end: range.end,
-                len: current.len() as u64,
-            })?;
-        current.splice(start..end, replacement);
-        self.replace_path(path, lane, base, Some(current))
-    }
-
-    pub fn write(
-        &mut self,
-        path: &str,
-        lane: &str,
-        base: &[u8],
-        range: Range<u64>,
-        replacement: impl Into<Vec<u8>>,
-    ) -> Result<(), LaneError> {
-        self.write_path(path, lane, Some(base), range, replacement)
-    }
-
-    pub fn replace_path(
+    pub(crate) fn replace_path(
         &mut self,
         path: &str,
         lane: &str,
@@ -264,17 +214,7 @@ impl LaneRepo {
         Ok(())
     }
 
-    pub fn replace(
-        &mut self,
-        path: &str,
-        lane: &str,
-        base: &[u8],
-        content: impl Into<Vec<u8>>,
-    ) -> Result<(), LaneError> {
-        self.replace_path(path, lane, Some(base), Some(content.into()))
-    }
-
-    pub fn delete_path(
+    pub(crate) fn delete_path(
         &mut self,
         path: &str,
         lane: &str,
@@ -283,17 +223,7 @@ impl LaneRepo {
         self.replace_path(path, lane, base, None)
     }
 
-    pub fn delete(
-        &mut self,
-        path: &str,
-        lane: &str,
-        base: &[u8],
-        range: Range<u64>,
-    ) -> Result<(), LaneError> {
-        self.write_path(path, lane, Some(base), range, Vec::new())
-    }
-
-    pub fn promote_path(
+    pub(crate) fn promote_path(
         &mut self,
         path: &str,
         lane: &str,
@@ -311,7 +241,7 @@ impl LaneRepo {
         Ok(promoted)
     }
 
-    pub fn promote_ops_path(
+    pub(crate) fn promote_ops_path(
         &mut self,
         path: &str,
         lane: &str,
@@ -336,7 +266,7 @@ impl LaneRepo {
         Ok(promoted)
     }
 
-    pub fn resolve_op_path(
+    pub(crate) fn resolve_op_path(
         &mut self,
         path: &str,
         lane: &str,
@@ -356,27 +286,7 @@ impl LaneRepo {
         Ok(promoted)
     }
 
-    pub fn promote(&mut self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError> {
-        self.promote_path(path, lane, Some(base))?
-            .ok_or_else(|| LaneError::BaseMissing {
-                path: path.to_owned(),
-            })
-    }
-
-    pub fn promote_ops(
-        &mut self,
-        path: &str,
-        lane: &str,
-        base: &[u8],
-        op_ids: &[String],
-    ) -> Result<Vec<u8>, LaneError> {
-        self.promote_ops_path(path, lane, Some(base), op_ids)?
-            .ok_or_else(|| LaneError::BaseMissing {
-                path: path.to_owned(),
-            })
-    }
-
-    pub fn promote_lane(
+    pub(crate) fn promote_lane(
         &mut self,
         lane: &str,
         bases: impl IntoIterator<Item = (FilePath, Option<Vec<u8>>)>,
@@ -396,7 +306,7 @@ impl LaneRepo {
         self.promote_paths(lane, changed_bases)
     }
 
-    pub fn promote_paths(
+    fn promote_paths(
         &mut self,
         lane: &str,
         bases: impl IntoIterator<Item = (FilePath, Option<Vec<u8>>)>,
@@ -416,7 +326,7 @@ impl LaneRepo {
         Ok(promoted)
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(STORAGE_MAGIC);
 
@@ -461,7 +371,7 @@ impl LaneRepo {
         bytes
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut cursor = Cursor::new(bytes);
         cursor.expect(STORAGE_MAGIC)?;
 
@@ -966,7 +876,7 @@ impl LaneFile {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DecodeError {
+pub(crate) enum DecodeError {
     BadMagic,
     UnexpectedEof,
     InvalidUtf8,
@@ -1383,18 +1293,6 @@ fn normalize_ops_checked(ops: Vec<FileOp>) -> Result<Vec<FileOp>, DecodeError> {
 fn ensure_user_lane(lane: &str) -> Result<(), LaneError> {
     if lane.trim().is_empty() || lane == "base" {
         Err(LaneError::ReservedLane(lane.to_owned()))
-    } else {
-        Ok(())
-    }
-}
-
-fn ensure_valid_range(range: Range<u64>, len: u64) -> Result<(), LaneError> {
-    if range.start > range.end || range.end > len {
-        Err(LaneError::RangeOutOfBounds {
-            start: range.start,
-            end: range.end,
-            len,
-        })
     } else {
         Ok(())
     }

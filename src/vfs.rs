@@ -8,126 +8,34 @@ use crate::storage::persist_bytes;
 use crate::{FilePath, LaneError, LaneOpDetail, LaneOpSummary, LaneRepo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DirEntry {
-    pub name: String,
-    pub kind: DirEntryKind,
+pub(crate) struct DirEntry {
+    pub(crate) name: String,
+    pub(crate) kind: DirEntryKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DirEntryKind {
+pub(crate) enum DirEntryKind {
     Directory,
     File,
 }
 
-pub trait Worktree {
-    fn read_file(&self, path: &str) -> io::Result<Option<Vec<u8>>>;
-    fn write_file(&mut self, path: &str, bytes: &[u8]) -> io::Result<()>;
-    fn remove_file(&mut self, path: &str) -> io::Result<()>;
-    fn list_dir(&self, path: &str) -> io::Result<Vec<DirEntry>>;
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemoryWorktree {
-    files: BTreeMap<FilePath, Vec<u8>>,
-}
-
-impl MemoryWorktree {
-    pub fn new(files: impl IntoIterator<Item = (impl Into<FilePath>, impl Into<Vec<u8>>)>) -> Self {
-        Self {
-            files: files
-                .into_iter()
-                .map(|(path, bytes)| (path.into(), bytes.into()))
-                .collect(),
-        }
-    }
-
-    pub fn file(&self, path: &str) -> Option<&[u8]> {
-        self.files.get(path).map(Vec::as_slice)
-    }
-}
-
-fn normalize_memory_dir(path: &str) -> String {
-    let path = path.trim_matches(['/', '\\']);
-    if path == "." {
-        String::new()
-    } else {
-        path.replace('\\', "/")
-    }
-}
-
-impl Worktree for MemoryWorktree {
-    fn read_file(&self, path: &str) -> io::Result<Option<Vec<u8>>> {
-        Ok(self.files.get(path).cloned())
-    }
-
-    fn write_file(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
-        self.files.insert(path.to_owned(), bytes.to_vec());
-        Ok(())
-    }
-
-    fn remove_file(&mut self, path: &str) -> io::Result<()> {
-        self.files.remove(path);
-        Ok(())
-    }
-
-    fn list_dir(&self, path: &str) -> io::Result<Vec<DirEntry>> {
-        let directory = normalize_memory_dir(path);
-        let prefix = if directory.is_empty() {
-            String::new()
-        } else {
-            format!("{directory}/")
-        };
-        let mut entries = BTreeMap::new();
-        for file in self.files.keys() {
-            let Some(tail) = file.strip_prefix(&prefix) else {
-                continue;
-            };
-            if tail.is_empty() || tail == file && !directory.is_empty() {
-                continue;
-            }
-            let (name, kind) = match tail.split_once('/') {
-                Some((name, _)) => (name, DirEntryKind::Directory),
-                None => (tail, DirEntryKind::File),
-            };
-            entries
-                .entry(name.to_owned())
-                .and_modify(|entry| {
-                    if kind == DirEntryKind::Directory {
-                        *entry = DirEntryKind::Directory;
-                    }
-                })
-                .or_insert(kind);
-        }
-        Ok(entries
-            .into_iter()
-            .map(|(name, kind)| DirEntry { name, kind })
-            .collect())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FileWorktree {
+pub(crate) struct FileWorktree {
     root_path: PathBuf,
 }
 
 impl FileWorktree {
-    pub fn new(root_path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(root_path: impl Into<PathBuf>) -> Self {
         Self {
             root_path: root_path.into(),
         }
     }
 
-    pub fn root_path(&self) -> &Path {
-        &self.root_path
-    }
-
     fn file_path(&self, path: &str) -> PathBuf {
         self.root_path.join(path)
     }
-}
 
-impl Worktree for FileWorktree {
-    fn read_file(&self, path: &str) -> io::Result<Option<Vec<u8>>> {
+    pub(crate) fn read_file(&self, path: &str) -> io::Result<Option<Vec<u8>>> {
         let file_path = self.file_path(path);
         if file_path.is_dir() {
             return Ok(None);
@@ -144,7 +52,7 @@ impl Worktree for FileWorktree {
         }
     }
 
-    fn write_file(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
+    pub(crate) fn write_file(&mut self, path: &str, bytes: &[u8]) -> io::Result<()> {
         let file_path = self.file_path(path);
         if file_path.is_dir() {
             fs::remove_dir_all(&file_path)?;
@@ -152,7 +60,7 @@ impl Worktree for FileWorktree {
         persist_bytes(&file_path, bytes)
     }
 
-    fn remove_file(&mut self, path: &str) -> io::Result<()> {
+    pub(crate) fn remove_file(&mut self, path: &str) -> io::Result<()> {
         match fs::remove_file(self.file_path(path)) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -161,7 +69,7 @@ impl Worktree for FileWorktree {
         }
     }
 
-    fn list_dir(&self, path: &str) -> io::Result<Vec<DirEntry>> {
+    pub(crate) fn list_dir(&self, path: &str) -> io::Result<Vec<DirEntry>> {
         let directory = self.file_path(path);
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
@@ -198,37 +106,37 @@ impl Worktree for FileWorktree {
 }
 
 #[derive(Clone, Debug)]
-pub struct LaneFs<W> {
+pub(crate) struct LaneFs {
     repo: LaneRepo,
-    worktree: W,
+    worktree: FileWorktree,
 }
 
-impl<W: Worktree> LaneFs<W> {
-    pub fn new(repo: LaneRepo, worktree: W) -> Self {
+impl LaneFs {
+    pub(crate) fn new(repo: LaneRepo, worktree: FileWorktree) -> Self {
         Self { repo, worktree }
     }
 
-    pub fn repo(&self) -> &LaneRepo {
+    pub(crate) fn repo(&self) -> &LaneRepo {
         &self.repo
     }
 
-    pub fn worktree(&self) -> &W {
-        &self.worktree
-    }
-
-    pub fn base_file(&self, path: &str) -> Result<Option<Vec<u8>>, LaneFsError> {
+    pub(crate) fn base_file(&self, path: &str) -> Result<Option<Vec<u8>>, LaneFsError> {
         let path = normalize_repo_path(path)?;
         self.worktree.read_file(&path).map_err(LaneFsError::Io)
     }
 
-    pub fn changed_paths(&self, lane: &str) -> Result<Vec<FilePath>, LaneFsError> {
+    pub(crate) fn changed_paths(&self, lane: &str) -> Result<Vec<FilePath>, LaneFsError> {
         self.repo
             .overlay_paths(lane)
             .map_err(LaneFsError::Lane)
             .map(|paths| paths.into_iter().map(str::to_owned).collect())
     }
 
-    pub fn change_ops(&self, lane: &str, path: &str) -> Result<Vec<LaneOpSummary>, LaneFsError> {
+    pub(crate) fn change_ops(
+        &self,
+        lane: &str,
+        path: &str,
+    ) -> Result<Vec<LaneOpSummary>, LaneFsError> {
         let path = normalize_repo_path(path)?;
         let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
         self.repo
@@ -236,7 +144,7 @@ impl<W: Worktree> LaneFs<W> {
             .map_err(LaneFsError::Lane)
     }
 
-    pub fn op_detail(
+    pub(crate) fn op_detail(
         &self,
         lane: &str,
         path: &str,
@@ -249,19 +157,15 @@ impl<W: Worktree> LaneFs<W> {
             .map_err(LaneFsError::Lane)
     }
 
-    pub fn discard_lane(&mut self, lane: &str) -> bool {
+    pub(crate) fn discard_lane(&mut self, lane: &str) -> bool {
         self.repo.discard_lane(lane)
     }
 
-    pub fn into_parts(self) -> (LaneRepo, W) {
-        (self.repo, self.worktree)
-    }
-
-    pub fn create_lane(&mut self, lane: impl Into<String>) -> Result<bool, LaneFsError> {
+    pub(crate) fn create_lane(&mut self, lane: impl Into<String>) -> Result<bool, LaneFsError> {
         self.repo.create_lane(lane).map_err(LaneFsError::Lane)
     }
 
-    pub fn read_file(&self, lane: &str, path: &str) -> Result<Option<Vec<u8>>, LaneFsError> {
+    pub(crate) fn read_file(&self, lane: &str, path: &str) -> Result<Option<Vec<u8>>, LaneFsError> {
         let path = normalize_repo_path(path)?;
         let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
         self.repo
@@ -269,7 +173,7 @@ impl<W: Worktree> LaneFs<W> {
             .map_err(LaneFsError::Lane)
     }
 
-    pub fn write_file(
+    pub(crate) fn write_file(
         &mut self,
         lane: &str,
         path: &str,
@@ -282,7 +186,7 @@ impl<W: Worktree> LaneFs<W> {
             .map_err(LaneFsError::Lane)
     }
 
-    pub fn delete_file(&mut self, lane: &str, path: &str) -> Result<(), LaneFsError> {
+    pub(crate) fn delete_file(&mut self, lane: &str, path: &str) -> Result<(), LaneFsError> {
         let path = normalize_repo_path(path)?;
         let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
         self.repo
@@ -290,27 +194,7 @@ impl<W: Worktree> LaneFs<W> {
             .map_err(LaneFsError::Lane)
     }
 
-    pub fn rename_file(&mut self, lane: &str, from: &str, to: &str) -> Result<(), LaneFsError> {
-        let from = normalize_repo_path(from)?;
-        let to = normalize_repo_path(to)?;
-        let bytes = self
-            .read_file(lane, &from)?
-            .ok_or_else(|| LaneFsError::FileMissing { path: from.clone() })?;
-        let from_base = self.worktree.read_file(&from).map_err(LaneFsError::Io)?;
-        let to_base = self.worktree.read_file(&to).map_err(LaneFsError::Io)?;
-
-        let mut draft = self.repo.clone();
-        draft
-            .replace_path(&to, lane, to_base.as_deref(), Some(bytes))
-            .map_err(LaneFsError::Lane)?;
-        draft
-            .delete_path(&from, lane, from_base.as_deref())
-            .map_err(LaneFsError::Lane)?;
-        self.repo = draft;
-        Ok(())
-    }
-
-    pub fn list_dir(&self, lane: &str, path: &str) -> Result<Vec<DirEntry>, LaneFsError> {
+    pub(crate) fn list_dir(&self, lane: &str, path: &str) -> Result<Vec<DirEntry>, LaneFsError> {
         let directory = normalize_repo_dir(path)?;
         let prefix = if directory.is_empty() {
             String::new()
@@ -377,7 +261,11 @@ impl<W: Worktree> LaneFs<W> {
             .collect())
     }
 
-    pub fn promote_file(&mut self, lane: &str, path: &str) -> Result<Option<Vec<u8>>, LaneFsError> {
+    pub(crate) fn promote_file(
+        &mut self,
+        lane: &str,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, LaneFsError> {
         let path = normalize_repo_path(path)?;
         let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
         let mut draft = self.repo.clone();
@@ -395,7 +283,7 @@ impl<W: Worktree> LaneFs<W> {
         Ok(promoted)
     }
 
-    pub fn promote_ops_file(
+    pub(crate) fn promote_ops_file(
         &mut self,
         lane: &str,
         path: &str,
@@ -418,7 +306,7 @@ impl<W: Worktree> LaneFs<W> {
         Ok(promoted)
     }
 
-    pub fn resolve_op_file(
+    pub(crate) fn resolve_op_file(
         &mut self,
         lane: &str,
         path: &str,
@@ -442,7 +330,7 @@ impl<W: Worktree> LaneFs<W> {
         Ok(promoted)
     }
 
-    pub fn promote_lane(&mut self, lane: &str) -> Result<Vec<FilePath>, LaneFsError> {
+    pub(crate) fn promote_lane(&mut self, lane: &str) -> Result<Vec<FilePath>, LaneFsError> {
         let paths = self
             .repo
             .overlay_paths(lane)
@@ -488,9 +376,8 @@ fn child_path(parent: &str, child: &str) -> FilePath {
 }
 
 #[derive(Debug)]
-pub enum LaneFsError {
+pub(crate) enum LaneFsError {
     BadPath(String),
-    FileMissing { path: FilePath },
     Io(io::Error),
     Lane(LaneError),
 }
@@ -499,7 +386,6 @@ impl fmt::Display for LaneFsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BadPath(message) => write!(f, "{message}"),
-            Self::FileMissing { path } => write!(f, "file missing in lane view: {path}"),
             Self::Io(error) => write!(f, "{error}"),
             Self::Lane(error) => write!(f, "{error:?}"),
         }

@@ -11,7 +11,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use similar::TextDiff;
 
-use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
+use crate::storage::{RepoLock, acquire_repo_lock, load_repo, persist_repo};
 use crate::vfs::{FileWorktree, LaneFs, LaneFsError};
 use crate::{FilePath, LaneOpSummary, LaneRepo};
 
@@ -24,7 +24,7 @@ const BYTE_PREVIEW_LIMIT: usize = 4096;
 #[derive(Parser, Debug)]
 #[command(name = "lane")]
 #[command(about = "Run agents in isolated lanes without copying the repo")]
-pub struct Cli {
+struct Cli {
     #[arg(long, global = true, value_name = "PATH", default_value = ".")]
     repo_root: PathBuf,
 
@@ -139,7 +139,7 @@ fn create(repo_root: &Path, lane: &str) -> CliResult<()> {
 #[cfg(windows)]
 fn exec(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExitCode> {
     let run = crate::virtual_exec::run_virtual_lane(repo_root, lane, command)
-        .map_err(|error| CliError::Message(error.to_string()))?;
+        .map_err(CliError::message)?;
     let failed = run.failed;
     print_json(&run.output)?;
     if failed {
@@ -151,20 +151,18 @@ fn exec(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExitCode>
 
 #[cfg(not(windows))]
 fn exec(_repo_root: &Path, _lane: &str, _command: &[String]) -> CliResult<ExitCode> {
-    Err(CliError::Message(
+    Err(CliError::message(
         "lane exec requires the WinFsp virtual filesystem on Windows".to_owned(),
     ))
 }
 
 fn changes(repo_root: &Path, lane: &str) -> CliResult<()> {
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let (_, fs) = open_lane_fs(repo_root)?;
+    let locked = open_locked_lane_fs(repo_root)?;
     let output = ChangesOutput {
         lane,
         repo_root: path_label(repo_root),
-        storage_path: path_label(storage_path),
-        changes: collect_changes(&fs, lane)?,
+        storage_path: path_label(&locked.storage_path),
+        changes: collect_changes(&locked.fs, lane)?,
     };
 
     print_json(&output)?;
@@ -172,14 +170,12 @@ fn changes(repo_root: &Path, lane: &str) -> CliResult<()> {
 }
 
 fn conflicts(repo_root: &Path, lane: &str) -> CliResult<()> {
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let (_, fs) = open_lane_fs(repo_root)?;
+    let locked = open_locked_lane_fs(repo_root)?;
     let output = ConflictsOutput {
         lane,
         repo_root: path_label(repo_root),
-        storage_path: path_label(storage_path),
-        conflicts: collect_conflicts(&fs, lane)?,
+        storage_path: path_label(&locked.storage_path),
+        conflicts: collect_conflicts(&locked.fs, lane)?,
     };
 
     print_json(&output)?;
@@ -187,15 +183,13 @@ fn conflicts(repo_root: &Path, lane: &str) -> CliResult<()> {
 }
 
 fn review(repo_root: &Path, lane: Option<&str>) -> CliResult<()> {
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let (_, fs) = open_lane_fs(repo_root)?;
-    let lanes = review_lanes(&fs, lane)?;
-    let (summary, paths) = collect_review(&fs, &lanes)?;
+    let locked = open_locked_lane_fs(repo_root)?;
+    let lanes = review_lanes(&locked.fs, lane)?;
+    let (summary, paths) = collect_review(&locked.fs, &lanes)?;
     let output = ReviewOutput {
         lane: lane.map(str::to_owned),
         repo_root: path_label(repo_root),
-        storage_path: path_label(storage_path),
+        storage_path: path_label(&locked.storage_path),
         summary,
         paths,
     };
@@ -204,15 +198,13 @@ fn review(repo_root: &Path, lane: Option<&str>) -> CliResult<()> {
 }
 
 fn show_op(repo_root: &Path, lane: &str, path: &str, op_id: &str) -> CliResult<()> {
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let (_, fs) = open_lane_fs(repo_root)?;
-    let detail = fs.op_detail(lane, path, op_id)?;
+    let locked = open_locked_lane_fs(repo_root)?;
+    let detail = locked.fs.op_detail(lane, path, op_id)?;
     let output = ShowOpOutput {
         lane,
         path,
         repo_root: path_label(repo_root),
-        storage_path: path_label(storage_path),
+        storage_path: path_label(&locked.storage_path),
         op: detail.summary,
         base: byte_preview(&detail.base),
         inserted: byte_preview(&detail.inserted),
@@ -231,38 +223,36 @@ fn resolve_op(
 ) -> CliResult<()> {
     let replacement = fs::read(with_file)?;
     let replacement_file = fs::canonicalize(with_file).unwrap_or_else(|_| with_file.to_path_buf());
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
-    let detail = fs.op_detail(lane, path, op_id)?;
-    fs.resolve_op_file(lane, path, op_id, replacement.clone())?;
-    persist_repo(&storage_path, fs.repo())?;
+    let mut locked = open_locked_lane_fs(repo_root)?;
+    let detail = locked.fs.op_detail(lane, path, op_id)?;
+    locked
+        .fs
+        .resolve_op_file(lane, path, op_id, replacement.clone())?;
+    locked.persist()?;
 
     let output = ResolveOpOutput {
         lane,
         path,
         op_id,
         repo_root: path_label(repo_root),
-        storage_path: path_label(&storage_path),
+        storage_path: path_label(&locked.storage_path),
         replacement_file: path_label(replacement_file),
         resolved_op: detail.summary,
         replacement: byte_preview(&replacement),
-        remaining: collect_changes(&fs, lane)?,
+        remaining: collect_changes(&locked.fs, lane)?,
     };
     print_json(&output)?;
     Ok(())
 }
 
 fn diff(repo_root: &Path, lane: &str, paths: Vec<String>) -> CliResult<()> {
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let (_, fs) = open_lane_fs(repo_root)?;
+    let locked = open_locked_lane_fs(repo_root)?;
     let changes = if paths.is_empty() {
-        collect_changes(&fs, lane)?
+        collect_changes(&locked.fs, lane)?
     } else {
         paths
             .into_iter()
-            .map(|path| change_for_path(&fs, lane, path))
+            .map(|path| change_for_path(&locked.fs, lane, path))
             .collect::<CliResult<Vec<_>>>()?
             .into_iter()
             .flatten()
@@ -281,18 +271,16 @@ fn diff(repo_root: &Path, lane: &str, paths: Vec<String>) -> CliResult<()> {
 }
 
 fn promote(repo_root: &Path, lane: &str, path: &str) -> CliResult<()> {
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
-    let before = change_for_path(&fs, lane, path)?;
-    fs.promote_file(lane, path)?;
-    persist_repo(&storage_path, fs.repo())?;
+    let mut locked = open_locked_lane_fs(repo_root)?;
+    let before = change_for_path(&locked.fs, lane, path)?;
+    locked.fs.promote_file(lane, path)?;
+    locked.persist()?;
 
     let promoted = before.into_iter().collect::<Vec<_>>();
     let output = PromoteOutput {
         lane,
         repo_root: path_label(repo_root),
-        storage_path: path_label(&storage_path),
+        storage_path: path_label(&locked.storage_path),
         promoted,
     };
     print_json(&output)?;
@@ -300,19 +288,17 @@ fn promote(repo_root: &Path, lane: &str, path: &str) -> CliResult<()> {
 }
 
 fn promote_ops(repo_root: &Path, lane: &str, path: &str, ops: &[String]) -> CliResult<()> {
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
-    let before = change_for_path(&fs, lane, path)?;
-    fs.promote_ops_file(lane, path, ops)?;
-    persist_repo(&storage_path, fs.repo())?;
+    let mut locked = open_locked_lane_fs(repo_root)?;
+    let before = change_for_path(&locked.fs, lane, path)?;
+    locked.fs.promote_ops_file(lane, path, ops)?;
+    locked.persist()?;
 
     let promoted = before.into_iter().collect::<Vec<_>>();
     let output = PromoteOpsOutput {
         lane,
         path,
         repo_root: path_label(repo_root),
-        storage_path: path_label(&storage_path),
+        storage_path: path_label(&locked.storage_path),
         promoted_ops: ops.to_vec(),
         promoted,
     };
@@ -321,17 +307,15 @@ fn promote_ops(repo_root: &Path, lane: &str, path: &str, ops: &[String]) -> CliR
 }
 
 fn promote_lane(repo_root: &Path, lane: &str) -> CliResult<()> {
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
-    let before = collect_changes(&fs, lane)?;
-    fs.promote_lane(lane)?;
-    persist_repo(&storage_path, fs.repo())?;
+    let mut locked = open_locked_lane_fs(repo_root)?;
+    let before = collect_changes(&locked.fs, lane)?;
+    locked.fs.promote_lane(lane)?;
+    locked.persist()?;
 
     let output = PromoteOutput {
         lane,
         repo_root: path_label(repo_root),
-        storage_path: path_label(&storage_path),
+        storage_path: path_label(&locked.storage_path),
         promoted: before,
     };
     print_json(&output)?;
@@ -339,25 +323,25 @@ fn promote_lane(repo_root: &Path, lane: &str) -> CliResult<()> {
 }
 
 fn promote_clean(repo_root: &Path, lane: &str) -> CliResult<()> {
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
-    let before = collect_changes(&fs, lane)?;
+    let mut locked = open_locked_lane_fs(repo_root)?;
+    let before = collect_changes(&locked.fs, lane)?;
     let promoted = filter_change_ops(&before, |op| op.conflicts_with.is_empty());
     let conflicts = filter_change_ops(&before, |op| !op.conflicts_with.is_empty());
     let promoted_ops = grouped_ops(&promoted);
 
     for path_ops in &promoted_ops {
-        fs.promote_ops_file(lane, &path_ops.path, &path_ops.ops)?;
+        locked
+            .fs
+            .promote_ops_file(lane, &path_ops.path, &path_ops.ops)?;
     }
     if !promoted_ops.is_empty() {
-        persist_repo(&storage_path, fs.repo())?;
+        locked.persist()?;
     }
 
     let output = PromoteCleanOutput {
         lane,
         repo_root: path_label(repo_root),
-        storage_path: path_label(&storage_path),
+        storage_path: path_label(&locked.storage_path),
         promoted_ops,
         promoted,
         conflicts,
@@ -367,25 +351,23 @@ fn promote_clean(repo_root: &Path, lane: &str) -> CliResult<()> {
 }
 
 fn discard(repo_root: &Path, lane: &str) -> CliResult<()> {
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let (storage_path, mut fs) = open_lane_fs(repo_root)?;
-    let discarded_changes = collect_changes(&fs, lane).map_or(0, |changes| changes.len());
-    let removed = fs.discard_lane(lane);
-    persist_repo(&storage_path, fs.repo())?;
+    let mut locked = open_locked_lane_fs(repo_root)?;
+    let discarded_changes = collect_changes(&locked.fs, lane).map_or(0, |changes| changes.len());
+    let removed = locked.fs.discard_lane(lane);
+    locked.persist()?;
 
     let output = DiscardOutput {
         lane,
         removed,
         discarded_changes,
         repo_root: path_label(repo_root),
-        storage_path: path_label(&storage_path),
+        storage_path: path_label(&locked.storage_path),
     };
     print_json(&output)?;
     Ok(())
 }
 
-fn collect_changes(fs: &LaneFs<FileWorktree>, lane: &str) -> CliResult<Vec<ChangeOutput>> {
+fn collect_changes(fs: &LaneFs, lane: &str) -> CliResult<Vec<ChangeOutput>> {
     fs.changed_paths(lane)?
         .into_iter()
         .map(|path| change_for_path(fs, lane, path))
@@ -393,12 +375,12 @@ fn collect_changes(fs: &LaneFs<FileWorktree>, lane: &str) -> CliResult<Vec<Chang
         .map(|changes| changes.into_iter().flatten().collect())
 }
 
-fn collect_conflicts(fs: &LaneFs<FileWorktree>, lane: &str) -> CliResult<Vec<ChangeOutput>> {
+fn collect_conflicts(fs: &LaneFs, lane: &str) -> CliResult<Vec<ChangeOutput>> {
     collect_changes(fs, lane)
         .map(|changes| filter_change_ops(&changes, |op| !op.conflicts_with.is_empty()))
 }
 
-fn review_lanes(fs: &LaneFs<FileWorktree>, lane: Option<&str>) -> CliResult<Vec<String>> {
+fn review_lanes(fs: &LaneFs, lane: Option<&str>) -> CliResult<Vec<String>> {
     if let Some(lane) = lane {
         fs.changed_paths(lane)?;
         Ok(vec![lane.to_owned()])
@@ -408,7 +390,7 @@ fn review_lanes(fs: &LaneFs<FileWorktree>, lane: Option<&str>) -> CliResult<Vec<
 }
 
 fn collect_review(
-    fs: &LaneFs<FileWorktree>,
+    fs: &LaneFs,
     lanes: &[String],
 ) -> CliResult<(ReviewSummary, Vec<ReviewPathOutput>)> {
     let mut by_path = BTreeMap::<FilePath, ReviewPathDraft>::new();
@@ -478,7 +460,7 @@ fn collect_review(
     ))
 }
 
-fn review_op(fs: &LaneFs<FileWorktree>, summary: &LaneOpSummary) -> CliResult<ReviewOpOutput> {
+fn review_op(fs: &LaneFs, summary: &LaneOpSummary) -> CliResult<ReviewOpOutput> {
     let detail = fs.op_detail(&summary.lane, &summary.path, &summary.op_id)?;
     Ok(ReviewOpOutput {
         op: detail.summary,
@@ -617,7 +599,7 @@ fn grouped_ops(changes: &[ChangeOutput]) -> Vec<PathOpsOutput> {
 }
 
 fn change_for_path(
-    fs: &LaneFs<FileWorktree>,
+    fs: &LaneFs,
     lane: &str,
     path: impl Into<String>,
 ) -> CliResult<Option<ChangeOutput>> {
@@ -670,13 +652,28 @@ fn print_diff(lane: &str, change: &ChangeOutput) {
     }
 }
 
-fn open_lane_fs(repo_root: &Path) -> CliResult<(PathBuf, LaneFs<FileWorktree>)> {
+struct LockedLaneFs {
+    storage_path: PathBuf,
+    fs: LaneFs,
+    _lock: RepoLock,
+}
+
+impl LockedLaneFs {
+    fn persist(&self) -> CliResult<()> {
+        persist_repo(&self.storage_path, self.fs.repo())?;
+        Ok(())
+    }
+}
+
+fn open_locked_lane_fs(repo_root: &Path) -> CliResult<LockedLaneFs> {
     let storage_path = storage_path(repo_root);
+    let lock = acquire_repo_lock(&storage_path)?;
     let repo = load_lane_repo(&storage_path)?;
-    Ok((
+    Ok(LockedLaneFs {
         storage_path,
-        LaneFs::new(repo, FileWorktree::new(repo_root)),
-    ))
+        fs: LaneFs::new(repo, FileWorktree::new(repo_root)),
+        _lock: lock,
+    })
 }
 
 fn load_lane_repo(storage_path: &Path) -> CliResult<LaneRepo> {
@@ -690,13 +687,13 @@ fn repo_root(repo_root: PathBuf) -> CliResult<PathBuf> {
         repo_root
     };
     let root = fs::canonicalize(&path).map_err(|error| {
-        CliError::Message(format!(
+        CliError::message(format!(
             "repo root {} is not readable: {error}",
             path.display()
         ))
     })?;
     if !root.is_dir() {
-        return Err(CliError::Message(format!(
+        return Err(CliError::message(format!(
             "repo root {} is not a directory",
             root.display()
         )));
@@ -945,23 +942,21 @@ struct DiscardOutput<'a> {
 }
 
 #[derive(Debug)]
-pub enum CliError {
-    Io(io::Error),
-    LaneFs(LaneFsError),
-    Lane(crate::LaneError),
-    Json(serde_json::Error),
-    Message(String),
+pub struct CliError {
+    message: String,
+}
+
+impl CliError {
+    fn message(message: impl ToString) -> Self {
+        Self {
+            message: message.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(error) => write!(f, "{error}"),
-            Self::LaneFs(error) => write!(f, "{error}"),
-            Self::Lane(error) => write!(f, "{error:?}"),
-            Self::Json(error) => write!(f, "{error}"),
-            Self::Message(message) => write!(f, "{message}"),
-        }
+        write!(f, "{}", self.message)
     }
 }
 
@@ -969,24 +964,24 @@ impl Error for CliError {}
 
 impl From<io::Error> for CliError {
     fn from(error: io::Error) -> Self {
-        Self::Io(error)
+        Self::message(error)
     }
 }
 
 impl From<LaneFsError> for CliError {
     fn from(error: LaneFsError) -> Self {
-        Self::LaneFs(error)
+        Self::message(error)
     }
 }
 
 impl From<crate::LaneError> for CliError {
     fn from(error: crate::LaneError) -> Self {
-        Self::Lane(error)
+        Self::message(format!("{error:?}"))
     }
 }
 
 impl From<serde_json::Error> for CliError {
     fn from(error: serde_json::Error) -> Self {
-        Self::Json(error)
+        Self::message(error)
     }
 }
