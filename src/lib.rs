@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Range;
@@ -600,8 +601,14 @@ impl LaneFile {
                     base,
                     promoted.as_deref(),
                     old_bytes,
-                    &promoted_view.ops,
-                    &view.ops,
+                    RebaseOpSet {
+                        lane,
+                        ops: &promoted_view.ops,
+                    },
+                    RebaseOpSet {
+                        lane: &lane_id,
+                        ops: &view.ops,
+                    },
                 )?
             } else {
                 entry_for_content(promoted.as_deref(), old_bytes)
@@ -749,8 +756,14 @@ impl LaneFile {
                             base,
                             promoted.as_deref(),
                             old_bytes,
-                            &selected_ops,
-                            &retained_ops,
+                            RebaseOpSet {
+                                lane,
+                                ops: &selected_ops,
+                            },
+                            RebaseOpSet {
+                                lane: &lane_id,
+                                ops: &retained_ops,
+                            },
                         )?
                     }
                 } else {
@@ -759,8 +772,14 @@ impl LaneFile {
                         base,
                         promoted.as_deref(),
                         old_bytes,
-                        &selected_ops,
-                        &view.ops,
+                        RebaseOpSet {
+                            lane,
+                            ops: &selected_ops,
+                        },
+                        RebaseOpSet {
+                            lane: &lane_id,
+                            ops: &view.ops,
+                        },
                     )?
                 }
             } else {
@@ -996,36 +1015,44 @@ fn rebased_entry_for_present_ops(
     old_base: Option<&[u8]>,
     promoted_base: Option<&[u8]>,
     fallback_bytes: Option<Vec<u8>>,
-    promoted_ops: &[FileOp],
-    retained_ops: &[FileOp],
+    promoted: RebaseOpSet<'_>,
+    retained: RebaseOpSet<'_>,
 ) -> Result<Option<LaneEntry>, LaneError> {
     let Some(promoted_base) = promoted_base else {
         return Ok(entry_for_content(promoted_base, fallback_bytes));
     };
     if old_base.is_none()
-        || retained_ops.is_empty()
-        || entries_conflict(promoted_ops, retained_ops, false)
+        || retained.ops.is_empty()
+        || entries_conflict(promoted.ops, retained.ops, false)
     {
         return Ok(entry_for_content(Some(promoted_base), fallback_bytes));
     }
 
-    let rebased_ops = rebase_ops_after_promotion(path, retained_ops, promoted_ops)?;
+    let rebased_ops = rebase_ops_after_promotion(path, retained, promoted)?;
     render_ops(path, promoted_base, &rebased_ops)?;
 
     Ok(Some(LaneEntry::Present(LaneView { ops: rebased_ops })))
 }
 
+#[derive(Clone, Copy)]
+struct RebaseOpSet<'a> {
+    lane: &'a str,
+    ops: &'a [FileOp],
+}
+
 fn rebase_ops_after_promotion(
     path: &str,
-    ops: &[FileOp],
-    promoted_ops: &[FileOp],
+    retained: RebaseOpSet<'_>,
+    promoted: RebaseOpSet<'_>,
 ) -> Result<Vec<FileOp>, LaneError> {
-    let promoted_ops = sorted_ops(promoted_ops);
-    ops.iter()
+    let promoted_ops = sorted_ops(promoted.ops);
+    retained
+        .ops
+        .iter()
         .map(|op| {
             let mut base_start = i128::from(op.base_start);
             for promoted_op in &promoted_ops {
-                if promoted_op_shifts_start(op, promoted_op) {
+                if promoted_op_shifts_start(retained.lane, op, promoted.lane, promoted_op) {
                     base_start +=
                         promoted_op.inserted.len() as i128 - i128::from(promoted_op.base_len);
                 }
@@ -1041,12 +1068,38 @@ fn rebase_ops_after_promotion(
         .collect()
 }
 
-fn promoted_op_shifts_start(op: &FileOp, promoted_op: &FileOp) -> bool {
+fn promoted_op_shifts_start(
+    retained_lane: &str,
+    op: &FileOp,
+    promoted_lane: &str,
+    promoted_op: &FileOp,
+) -> bool {
     if promoted_op.base_len == 0 {
-        promoted_op.base_start <= op.base_start
+        match promoted_op.base_start.cmp(&op.base_start) {
+            Ordering::Less => true,
+            Ordering::Equal => {
+                compare_ops_for_render(promoted_lane, promoted_op, retained_lane, op)
+                    == Ordering::Less
+            }
+            Ordering::Greater => false,
+        }
     } else {
         promoted_op.base_start + promoted_op.base_len <= op.base_start
     }
+}
+
+fn compare_ops_for_render(
+    left_lane: &str,
+    left: &FileOp,
+    right_lane: &str,
+    right: &FileOp,
+) -> Ordering {
+    left.base_start
+        .cmp(&right.base_start)
+        .then(left.base_len.cmp(&right.base_len))
+        .then(left.order_key.cmp(&right.order_key))
+        .then(left_lane.cmp(right_lane))
+        .then(left.id.cmp(&right.id))
 }
 
 fn selected_present_ops(

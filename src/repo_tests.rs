@@ -573,6 +573,29 @@ fn same_position_inserts_have_deterministic_order_without_conflict() {
 }
 
 #[test]
+fn same_position_inserts_compose_in_stable_order_regardless_of_promotion_order() {
+    let base = b"tail\n";
+    let mut a_then_b = repo_with_same_position_inserts(base);
+    let promoted_a = a_then_b
+        .promote("src/imports.txt", "agent-a", base)
+        .unwrap();
+    let final_a_then_b = a_then_b
+        .promote("src/imports.txt", "agent-b", &promoted_a)
+        .unwrap();
+
+    let mut b_then_a = repo_with_same_position_inserts(base);
+    let promoted_b = b_then_a
+        .promote("src/imports.txt", "agent-b", base)
+        .unwrap();
+    let final_b_then_a = b_then_a
+        .promote("src/imports.txt", "agent-a", &promoted_b)
+        .unwrap();
+
+    assert_eq!(final_a_then_b, b"use a;\nuse b;\ntail\n");
+    assert_eq!(final_b_then_a, final_a_then_b);
+}
+
+#[test]
 fn same_position_inserts_into_empty_file_are_not_create_conflicts() {
     let mut repo = seeded_repo();
     let base = b"";
@@ -601,6 +624,27 @@ fn seeded_repo() -> LaneRepo {
     let mut repo = LaneRepo::new();
     repo.create_lane("agent-a").unwrap();
     repo.create_lane("agent-b").unwrap();
+    repo
+}
+
+fn repo_with_same_position_inserts(base: &[u8]) -> LaneRepo {
+    let mut repo = seeded_repo();
+    repo.write(
+        "src/imports.txt",
+        "agent-a",
+        base,
+        0..0,
+        b"use a;\n".to_vec(),
+    )
+    .unwrap();
+    repo.write(
+        "src/imports.txt",
+        "agent-b",
+        base,
+        0..0,
+        b"use b;\n".to_vec(),
+    )
+    .unwrap();
     repo
 }
 
