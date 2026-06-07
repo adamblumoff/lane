@@ -1155,9 +1155,7 @@ fn entry_conflicts_with_op(entry: &LaneEntry, op: &FileOp, base_missing: bool) -
 fn entry_conflicts_with_delete(entry: &LaneEntry, base: Option<&[u8]>) -> bool {
     match entry {
         LaneEntry::Deleted => false,
-        LaneEntry::Present(view) => base
-            .map(|bytes| !bytes.is_empty() && !view.ops.is_empty())
-            .unwrap_or(!view.ops.is_empty()),
+        LaneEntry::Present(view) => base.is_some() && !view.ops.is_empty(),
     }
 }
 

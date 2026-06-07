@@ -663,6 +663,49 @@ fn cli_review_keeps_whole_file_delete_conflict_grouped_with_boundary_insert() {
 }
 
 #[test]
+fn cli_review_keeps_empty_file_delete_conflicted_with_insert() {
+    let repo = TempRepo::new();
+    repo.write("src/empty.txt", b"");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Remove-Item -LiteralPath 'src/empty.txt'",
+    ]);
+    repo.run_json([
+        "exec",
+        "agent-b",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/empty.txt', \"b\")",
+    ]);
+
+    let review = repo.run_json(["review"]);
+    assert_eq!(review["summary"]["clean_ops"], 0);
+    assert_eq!(review["summary"]["conflicted_ops"], 2);
+    assert_eq!(review["summary"]["conflict_groups"], 1);
+    assert_eq!(
+        review_op_ids(&review["paths"][0]["conflicts"][0]["ops"]),
+        vec!["agent-a:delete", "agent-b:1"]
+    );
+
+    let promoted = repo.run_json(["promote-clean", "agent-a"]);
+    assert!(promoted["promoted_ops"].as_array().unwrap().is_empty());
+    assert_eq!(
+        promoted["conflicts"][0]["ops"][0]["op_id"],
+        "agent-a:delete"
+    );
+    assert!(repo.path().join("src/empty.txt").exists());
+    assert_eq!(fs::read(repo.path().join("src/empty.txt")).unwrap(), b"");
+}
+
+#[test]
 fn cli_resolve_op_handles_create_conflict_with_custom_winner() {
     let repo = TempRepo::new();
 
