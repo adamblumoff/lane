@@ -747,7 +747,10 @@ impl LaneFile {
             return Err(operation_missing(path, op_id));
         };
         let LaneEntry::Present(view) = entry else {
-            return Err(operation_missing(path, op_id));
+            if parse_lane_op_id(lane, op_id) != Some(ParsedOpId::Delete) {
+                return Err(operation_missing(path, op_id));
+            }
+            return self.promote_resolved_content(path, lane, base, Some(replacement));
         };
         let Some(ParsedOpId::Present(id)) = parse_lane_op_id(lane, op_id) else {
             return Err(operation_missing(path, op_id));
@@ -762,6 +765,40 @@ impl LaneFile {
 
         let selected_ids = [id].into_iter().collect::<BTreeSet<_>>();
         self.promote_selected_present_ops(path, lane, base, vec![resolved], &selected_ids)
+    }
+
+    fn promote_resolved_content(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: Option<&[u8]>,
+        promoted: Option<Vec<u8>>,
+    ) -> Result<Option<Vec<u8>>, LaneError> {
+        let old_entries = self.lanes.clone();
+        let old_views = old_entries
+            .iter()
+            .map(|(lane_id, entry)| {
+                self.read(path, lane_id, base)
+                    .map(|bytes| (lane_id.clone(), entry.clone(), bytes))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        self.base = BaseState::for_content(promoted.as_deref());
+        self.lanes.clear();
+
+        for (lane_id, _entry, old_bytes) in old_views {
+            let next_entry = if lane_id == lane {
+                entry_for_content(promoted.as_deref(), promoted.clone())
+            } else {
+                entry_for_content(promoted.as_deref(), old_bytes)
+            };
+
+            if let Some(next_entry) = next_entry {
+                self.lanes.insert(lane_id, next_entry);
+            }
+        }
+
+        Ok(promoted)
     }
 
     fn promote_selected_present_ops(

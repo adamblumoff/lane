@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use similar::TextDiff;
 
 use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
@@ -724,9 +725,15 @@ fn print_json(output: &impl Serialize) -> CliResult<()> {
 fn byte_preview(bytes: &[u8]) -> BytePreview {
     BytePreview {
         len: bytes.len(),
+        sha256: sha256_hex(bytes),
         utf8: utf8_preview(bytes),
         truncated: bytes.len() > BYTE_PREVIEW_LIMIT,
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn utf8_preview(bytes: &[u8]) -> Option<String> {
@@ -856,6 +863,7 @@ struct ResolveOpOutput<'a> {
 #[derive(Clone, Debug, Serialize)]
 struct BytePreview {
     len: usize,
+    sha256: String,
     utf8: Option<String>,
     truncated: bool,
 }
