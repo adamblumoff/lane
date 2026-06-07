@@ -15,16 +15,18 @@ Use Lane as the file-versioning layer, not as a planning-file format. The user-f
 4. `lane exec` mounts a lane-specific virtual repo view, runs the worker with its current directory set to that mount, captures changed bytes back into the lane, leaves the base repo untouched, and prints JSON.
 5. Do not ask the user to write or approve a JSON plan file.
 6. Parse the JSON emitted by `lane exec`. It reports `mode: virtual_mount`, `workspace_root`/`mount_path`, `projected_paths`, worker-touched `changed_paths`, timings, and effective lane `changes`.
-7. For promising lanes, inspect `lane diff <lane>` and run verification commands through `lane exec`.
+7. For promising lanes, inspect `lane review [lane]` for the JSON decision graph, use `lane diff <lane>` for human-readable patch review, and run verification commands through `lane exec`.
 8. Pick the winner from evidence: tests, build output, screenshots, diffs, and fit to the user request.
-9. Promote only the selected result with `lane promote-lane <lane> --json`, or promote selected files with `lane promote <lane> <path> --json`.
-10. Discard losing lanes with `lane discard <lane> --json` once their useful evidence has been reported.
+9. Promote only the selected result with `lane promote-lane <lane>`, selected files with `lane promote <lane> <path>`, or selected operations with `lane promote-ops <lane> <path> <op-id>...`.
+10. Discard losing lanes with `lane discard <lane>` once their useful evidence has been reported.
 
 ## Guardrails
 
 - Do not create an intermediate plan artifact or ask the worker to output a write-set. Lane should interpret real file changes deterministically.
 - Treat `lane exec` as the normal capture path. It is Codex-compatible and gives each worker its own mounted file view.
 - If `lane exec` returns a non-zero `exit_code` or `worker_error`, inspect its JSON output before comparing or promoting that lane.
+- Structured commands are JSON by default; `lane diff` is the text review command.
+- Use `lane review` to compare clean ops and conflict groups before choosing `promote-clean`, `promote-ops`, or `resolve-op`.
 - Keep the parent agent responsible for comparison and promotion. Subagents should implement their assigned variant, run local checks when asked, and summarize what changed.
 - Preserve the normal repo until promotion. Before promotion, base files changing is a product failure unless the user explicitly made those edits outside Lane.
 - Expect `changed_paths` to include temporary files a worker touched. Use `changes` and `lane diff <lane>` for the effective lane diff.
@@ -52,9 +54,10 @@ lane exec login-enterprise -- pnpm build
 Finally:
 
 ```powershell
-lane promote-lane login-enterprise --json
-lane discard login-minimal --json
-lane discard login-playful --json
-lane discard login-split --json
-lane discard login-focused --json
+lane review
+lane promote-lane login-enterprise
+lane discard login-minimal
+lane discard login-playful
+lane discard login-split
+lane discard login-focused
 ```

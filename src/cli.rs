@@ -550,6 +550,10 @@ fn review_ops_conflict(left: &ReviewOpOutput, right: &ReviewOpOutput) -> bool {
     if left.op.path != right.op.path {
         return false;
     }
+    if is_whole_file_delete(&left.op) || is_whole_file_delete(&right.op) {
+        return left.op.conflicts_with.contains(&right.op.lane)
+            || right.op.conflicts_with.contains(&left.op.lane);
+    }
     if matches!(left.op.kind, crate::LaneOpKind::Create)
         || matches!(right.op.kind, crate::LaneOpKind::Create)
     {
@@ -568,6 +572,14 @@ fn review_ops_conflict(left: &ReviewOpOutput, right: &ReviewOpOutput) -> bool {
         return left.op.base_start < right.op.base_start && right.op.base_start < left.op.base_end;
     }
     left.op.base_start < right.op.base_end && right.op.base_start < left.op.base_end
+}
+
+fn is_whole_file_delete(op: &LaneOpSummary) -> bool {
+    matches!(op.kind, crate::LaneOpKind::Delete)
+        && op
+            .op_id
+            .rsplit_once(':')
+            .is_some_and(|(lane, suffix)| lane == op.lane && suffix == "delete")
 }
 
 fn filter_change_ops(

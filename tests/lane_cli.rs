@@ -630,6 +630,39 @@ fn cli_resolve_op_handles_delete_conflict_with_replacement_file() {
 }
 
 #[test]
+fn cli_review_keeps_whole_file_delete_conflict_grouped_with_boundary_insert() {
+    let repo = TempRepo::new();
+    repo.write("src/list.txt", b"one\n");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Remove-Item -LiteralPath 'src/list.txt'",
+    ]);
+    repo.run_json([
+        "exec",
+        "agent-b",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::AppendAllText('src/list.txt', \"two`n\")",
+    ]);
+
+    let review = repo.run_json(["review"]);
+    assert_eq!(review["summary"]["conflicted_ops"], 2);
+    assert_eq!(review["summary"]["conflict_groups"], 1);
+    assert_eq!(
+        review_op_ids(&review["paths"][0]["conflicts"][0]["ops"]),
+        vec!["agent-a:delete", "agent-b:1"]
+    );
+}
+
+#[test]
 fn cli_resolve_op_handles_create_conflict_with_custom_winner() {
     let repo = TempRepo::new();
 

@@ -1347,10 +1347,7 @@ fn digits_to_order_key(digits: &[usize]) -> String {
 }
 
 fn is_valid_order_key(key: &str) -> bool {
-    !key.is_empty()
-        && key
-            .bytes()
-            .all(|byte| ORDER_ALPHABET.iter().any(|candidate| *candidate == byte))
+    !key.is_empty() && key.bytes().all(|byte| ORDER_ALPHABET.contains(&byte))
 }
 
 fn is_probably_binary(bytes: &[u8]) -> bool {
@@ -1432,31 +1429,6 @@ fn write_u64(target: &mut Vec<u8>, value: u64) {
     target.extend_from_slice(&value.to_le_bytes());
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fractional_keys_are_dense_between_neighbors() {
-        let left = first_fractional_key();
-        let right = next_fractional_key(Some(&left));
-        let middle = fractional_key_between(Some(&left), Some(&right));
-
-        assert!(left < middle);
-        assert!(middle < right);
-    }
-
-    #[test]
-    fn fractional_keys_can_grow_without_renumbering() {
-        let mut keys = vec![first_fractional_key()];
-        for _ in 0..128 {
-            let next = next_fractional_key(keys.last().map(String::as_str));
-            assert!(keys.last().unwrap() < &next);
-            keys.push(next);
-        }
-    }
-}
-
 struct Cursor<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -1511,5 +1483,30 @@ impl<'a> Cursor<'a> {
 
     fn is_finished(&self) -> bool {
         self.offset == self.bytes.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fractional_keys_are_dense_between_neighbors() {
+        let left = first_fractional_key();
+        let right = next_fractional_key(Some(&left));
+        let middle = fractional_key_between(Some(&left), Some(&right));
+
+        assert!(left < middle);
+        assert!(middle < right);
+    }
+
+    #[test]
+    fn fractional_keys_can_grow_without_renumbering() {
+        let mut keys = vec![first_fractional_key()];
+        for _ in 0..128 {
+            let next = next_fractional_key(keys.last().map(String::as_str));
+            assert!(keys.last().unwrap() < &next);
+            keys.push(next);
+        }
     }
 }
