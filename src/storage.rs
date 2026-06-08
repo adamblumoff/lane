@@ -497,12 +497,6 @@ fn encode_path_component(value: &str) -> String {
     encoded
 }
 
-#[cfg(test)]
-fn count_present_blobs(storage_root: &Path) -> io::Result<usize> {
-    let dir = storage_root.join("blobs").join("sha256");
-    count_files(&dir)
-}
-
 fn report_blob_inventory(
     storage_root: &Path,
     referenced_blobs: &BTreeSet<String>,
@@ -563,21 +557,6 @@ fn count_json_files(dir: &Path) -> io::Result<usize> {
         let entry = entry?;
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-#[cfg(test)]
-fn count_files(dir: &Path) -> io::Result<usize> {
-    if !dir.exists() {
-        return Ok(0);
-    }
-    let mut count = 0;
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        if entry.path().is_file() {
             count += 1;
         }
     }
@@ -830,7 +809,7 @@ mod tests {
 
         assert!(temp.path().join("repo.json").exists());
         assert!(!temp.path().join("repo.lane").exists());
-        assert_eq!(count_present_blobs(temp.path()).unwrap(), 1);
+        assert_eq!(doctor_storage(temp.path()).unwrap().blobs_present, 1);
         assert!(last_exec_path(temp.path(), "agent-a").exists());
 
         let loaded = load_repo(temp.path()).unwrap().unwrap();

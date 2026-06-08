@@ -1604,17 +1604,7 @@ fn cli_exec_runs_agent_like_process_with_git_view_and_atomic_save() {
 
 #[test]
 fn cli_review_ignores_corrupt_last_exec_but_doctor_reports_it() {
-    let repo = TempRepo::new();
-    repo.write("src/base.ts", b"export const base = true;\n");
-    repo.run_json([
-        "exec",
-        "agent-a",
-        "--",
-        "pwsh",
-        "-NoProfile",
-        "-Command",
-        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
-    ]);
+    let repo = repo_with_agent_exec();
     fs::write(
         repo.path().join(".lane/last_exec/agent-a.json"),
         b"not json",
@@ -1640,17 +1630,7 @@ fn cli_review_ignores_corrupt_last_exec_but_doctor_reports_it() {
 
 #[test]
 fn cli_doctor_reports_corrupt_repo_manifest_shape() {
-    let repo = TempRepo::new();
-    repo.write("src/base.ts", b"export const base = true;\n");
-    repo.run_json([
-        "exec",
-        "agent-a",
-        "--",
-        "pwsh",
-        "-NoProfile",
-        "-Command",
-        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
-    ]);
+    let repo = repo_with_agent_exec();
     fs::write(repo.path().join(".lane/repo.json"), b"not json").unwrap();
 
     let output = repo.run_unchecked(&["doctor"]);
@@ -1670,17 +1650,7 @@ fn cli_doctor_reports_corrupt_repo_manifest_shape() {
 
 #[test]
 fn cli_doctor_reports_missing_blob_shape() {
-    let repo = TempRepo::new();
-    repo.write("src/base.ts", b"export const base = true;\n");
-    repo.run_json([
-        "exec",
-        "agent-a",
-        "--",
-        "pwsh",
-        "-NoProfile",
-        "-Command",
-        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
-    ]);
+    let repo = repo_with_agent_exec();
     let missing_blob = first_blob_path(&repo);
     fs::remove_file(&missing_blob).unwrap();
 
@@ -1702,17 +1672,7 @@ fn cli_doctor_reports_missing_blob_shape() {
 
 #[test]
 fn cli_doctor_reports_unreferenced_blob_without_failing() {
-    let repo = TempRepo::new();
-    repo.write("src/base.ts", b"export const base = true;\n");
-    repo.run_json([
-        "exec",
-        "agent-a",
-        "--",
-        "pwsh",
-        "-NoProfile",
-        "-Command",
-        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
-    ]);
+    let repo = repo_with_agent_exec();
     repo.write(
         ".lane/blobs/sha256/0000000000000000000000000000000000000000000000000000000000000000",
         b"stale",
@@ -1939,6 +1899,21 @@ impl Drop for TempRepo {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn repo_with_agent_exec() -> TempRepo {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;\n");
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
+    ]);
+    repo
 }
 
 fn first_blob_path(repo: &TempRepo) -> PathBuf {
