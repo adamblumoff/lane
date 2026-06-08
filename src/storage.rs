@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     BaseFingerprint, BaseStorageSnapshot, FileOpStorageSnapshot, FilePath,
     LaneEntryStorageSnapshot, LaneExecState, LaneFileStorageSnapshot, LaneId, LaneRepo,
-    LaneRepoStorageSnapshot,
+    LaneRepoStorageSnapshot, ensure_user_lane,
 };
 
 const MANIFEST_FILE: &str = "repo.json";
@@ -105,6 +105,13 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
 
     report.lanes = manifest.lanes.len();
     report.files = manifest.files.len();
+    for lane in &manifest.lanes {
+        if let Err(error) = ensure_user_lane(lane) {
+            report
+                .errors
+                .push(format!("manifest lane {lane:?} is invalid: {error:?}"));
+        }
+    }
     let expected_last_exec = manifest
         .lanes
         .iter()
@@ -202,14 +209,6 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
     }
 
     report_blob_inventory(storage_root, &referenced_blobs, &mut report)?;
-    for blob in referenced_blobs {
-        if !blob_path(storage_root, &blob)?.exists() {
-            report
-                .errors
-                .push(format!("referenced blob {blob} is missing"));
-        }
-    }
-
     Ok(report)
 }
 
@@ -400,6 +399,7 @@ fn prune_stale_last_exec_files(storage_root: &Path, lanes: &BTreeSet<LaneId>) {
         .map(|lane| last_exec_file_name(lane))
         .collect::<BTreeSet<_>>();
 
+    // last_exec is advisory; failed cleanup must not block repo persistence.
     if let Ok(entries) = fs::read_dir(&last_exec_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -850,11 +850,18 @@ mod tests {
         assert_eq!(load_error.kind(), io::ErrorKind::NotFound);
         let report = doctor_storage(temp.path()).unwrap();
         assert!(!report.is_healthy());
+        assert_eq!(report.errors.len(), 1);
         assert!(
             report
                 .errors
                 .iter()
                 .any(|error| error.contains("is unreadable"))
+        );
+        assert!(
+            !report
+                .errors
+                .iter()
+                .any(|error| error.contains("referenced blob"))
         );
     }
 
@@ -880,6 +887,29 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("is not referenced by repo.json"))
+        );
+    }
+
+    #[test]
+    fn reserved_manifest_lane_is_reported_by_doctor() {
+        let temp = TempStorage::new();
+        let repo = repo_with_agent_file();
+        persist_repo(temp.path(), &repo).unwrap();
+        let path = manifest_path(temp.path());
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest["lanes"] = serde_json::json!(["base", "agent-a"]);
+        fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+        let load_error = load_repo(temp.path()).unwrap_err();
+        assert_eq!(load_error.kind(), io::ErrorKind::InvalidData);
+        let report = doctor_storage(temp.path()).unwrap();
+        assert!(!report.is_healthy());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("manifest lane \"base\" is invalid"))
         );
     }
 

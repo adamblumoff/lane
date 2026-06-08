@@ -1366,7 +1366,7 @@ fn normalize_ops_checked(ops: Vec<FileOp>) -> Result<Vec<FileOp>, DecodeError> {
         .collect())
 }
 
-fn ensure_user_lane(lane: &str) -> Result<(), LaneError> {
+pub(crate) fn ensure_user_lane(lane: &str) -> Result<(), LaneError> {
     if lane.trim().is_empty() || lane == "base" {
         Err(LaneError::ReservedLane(lane.to_owned()))
     } else {

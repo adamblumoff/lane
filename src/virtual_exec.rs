@@ -1072,20 +1072,6 @@ impl VirtualLaneState {
         })?;
         let wait_ms = elapsed_ms(wait_start);
         let held_start = Instant::now();
-        let repo = load_repo(&self.storage_path)
-            .map_err(|error| {
-                VirtualExecError::message(format!(
-                    "failed to load lane storage {}: {error}",
-                    self.storage_path.display()
-                ))
-            })?
-            .unwrap_or_default();
-        if !repo.lane_ids().any(|lane| lane == self.lane.as_str()) {
-            return Err(VirtualExecError::message(format!(
-                "cannot record last_exec for missing lane {}",
-                self.lane
-            )));
-        }
         persist_last_exec(&self.storage_path, &self.lane, &exec_state).map_err(|error| {
             VirtualExecError::message(format!(
                 "failed to persist last_exec metadata {}: {error}",

@@ -1676,12 +1676,41 @@ fn cli_doctor_reports_missing_blob_shape() {
     assert_eq!(doctor["report"]["blobs_referenced"], 1);
     assert_eq!(doctor["report"]["blobs_present"], 0);
     assert_eq!(doctor["report"]["blobs_unreferenced"], 0);
+    let errors = doctor["report"]["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("is unreadable"))
+    );
+    assert!(
+        !errors
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("referenced blob"))
+    );
+}
+
+#[test]
+fn cli_doctor_rejects_reserved_manifest_lane() {
+    let repo = repo_with_agent_exec();
+    let manifest_path = repo.path().join(".lane/repo.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["lanes"] = serde_json::json!(["base", "agent-a"]);
+    fs::write(manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+    let output = repo.run_unchecked(&["doctor"]);
+    assert!(!output.status.success());
+    let doctor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor["healthy"], false);
     assert!(
         doctor["report"]["errors"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|error| error.as_str().unwrap().contains("is unreadable"))
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("manifest lane \"base\" is invalid"))
     );
 }
 
