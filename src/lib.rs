@@ -645,59 +645,6 @@ impl LaneFile {
         Ok(())
     }
 
-    fn promote(
-        &mut self,
-        path: &str,
-        lane: &str,
-        base: Option<&[u8]>,
-    ) -> Result<Option<Vec<u8>>, LaneError> {
-        self.ensure_base(path, base)?;
-        let promoted = self.read(path, lane, base)?;
-        let promoted_entry = self.lanes.get(lane).cloned();
-        let old_entries = self.lanes.clone();
-        let old_views = old_entries
-            .iter()
-            .map(|(lane_id, entry)| {
-                self.read(path, lane_id, base)
-                    .map(|bytes| (lane_id.clone(), entry.clone(), bytes))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        self.base = BaseState::for_content(promoted.as_deref());
-        self.lanes.clear();
-
-        for (lane_id, entry, old_bytes) in old_views {
-            let next_entry = if lane_id == lane {
-                entry_for_content(promoted.as_deref(), promoted.clone())
-            } else if let (Some(LaneEntry::Present(promoted_view)), LaneEntry::Present(view)) =
-                (&promoted_entry, &entry)
-            {
-                rebased_entry_for_present_ops(
-                    path,
-                    base,
-                    promoted.as_deref(),
-                    old_bytes,
-                    RebaseOpSet {
-                        lane,
-                        ops: &promoted_view.ops,
-                    },
-                    RebaseOpSet {
-                        lane: &lane_id,
-                        ops: &view.ops,
-                    },
-                )?
-            } else {
-                entry_for_content(promoted.as_deref(), old_bytes)
-            };
-
-            if let Some(next_entry) = next_entry {
-                self.lanes.insert(lane_id, next_entry);
-            }
-        }
-
-        Ok(promoted)
-    }
-
     fn promote_ops(
         &mut self,
         path: &str,
@@ -720,7 +667,7 @@ impl LaneFile {
             LaneEntry::Present(view) => selected_present_ops(path, lane, &view.ops, op_ids)?,
             LaneEntry::Deleted => {
                 ensure_delete_selection(path, lane, op_ids)?;
-                return self.promote(path, lane, base);
+                return self.promote_resolved_content(path, lane, base, None);
             }
         };
         let selected_ids = selected_ops.iter().map(|op| op.id).collect::<BTreeSet<_>>();

@@ -388,6 +388,36 @@ fn selected_ops_promote_without_promoting_the_whole_lane_file() {
 }
 
 #[test]
+fn selected_delete_promotion_preserves_other_lane_as_create() {
+    let mut repo = seeded_repo();
+    let base = b"mode=base\n";
+    repo.delete_path("src/mode.txt", "agent-a", Some(base))
+        .unwrap();
+    repo.write("src/mode.txt", "agent-b", base, 5..9, b"safe".to_vec())
+        .unwrap();
+
+    let promoted = repo
+        .promote_ops_path(
+            "src/mode.txt",
+            "agent-a",
+            Some(base),
+            &["agent-a:delete".to_owned()],
+        )
+        .unwrap();
+
+    assert_eq!(promoted, None);
+    assert_eq!(repo.read_path("src/mode.txt", "agent-a", None), Ok(None));
+    assert_eq!(
+        repo.read_path("src/mode.txt", "agent-b", None).unwrap(),
+        Some(b"mode=safe\n".to_vec())
+    );
+    let agent_b_ops = repo.change_ops("src/mode.txt", "agent-b", None).unwrap();
+    assert_eq!(agent_b_ops.len(), 1);
+    assert_eq!(agent_b_ops[0].kind, super::LaneOpKind::Create);
+    assert_eq!(agent_b_ops[0].conflicts_with, Vec::<String>::new());
+}
+
+#[test]
 fn missing_selected_op_does_not_mutate_repo() {
     let mut repo = seeded_repo();
     let base = b"alpha=1\nbeta=2\n";
