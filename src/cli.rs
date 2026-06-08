@@ -232,7 +232,9 @@ fn diff(repo_root: &Path, lane: &str, paths: Vec<String>) -> CliResult<()> {
 fn promote_ops(repo_root: &Path, lane: &str, path: &str, ops: &[String]) -> CliResult<()> {
     let mut locked = open_locked_lane_fs(repo_root)?;
     let before = change_for_path(&locked.fs, lane, path)?;
-    locked.fs.promote_ops_file(lane, path, ops)?;
+    locked
+        .fs
+        .promote_ops_files(lane, &[(path.to_owned(), ops.to_vec())])?;
     locked.persist()?;
 
     let promoted = before.into_iter().collect::<Vec<_>>();
