@@ -47,7 +47,7 @@ pub(crate) fn persist_repo(storage_root: &Path, repo: &LaneRepo) -> io::Result<(
     let manifest = manifest_from_snapshot(storage_root, &snapshot)?;
     let bytes = serde_json::to_vec_pretty(&manifest).map_err(json_error)?;
     persist_bytes(&manifest_path(storage_root), &bytes)?;
-    sync_last_exec_files(storage_root, &snapshot);
+    prune_stale_last_exec_files(storage_root, &snapshot.lanes);
     Ok(())
 }
 
@@ -393,11 +393,9 @@ fn load_last_exec(
         .collect()
 }
 
-fn sync_last_exec_files(storage_root: &Path, snapshot: &LaneRepoStorageSnapshot) {
+fn prune_stale_last_exec_files(storage_root: &Path, lanes: &BTreeSet<LaneId>) {
     let last_exec_dir = storage_root.join("last_exec");
-    let _ = fs::create_dir_all(&last_exec_dir);
-    let expected = snapshot
-        .lanes
+    let expected = lanes
         .iter()
         .map(|lane| last_exec_file_name(lane))
         .collect::<BTreeSet<_>>();
@@ -410,17 +408,6 @@ fn sync_last_exec_files(storage_root: &Path, snapshot: &LaneRepoStorageSnapshot)
             };
             if !expected.contains(file_name) {
                 let _ = fs::remove_file(path);
-            }
-        }
-    }
-
-    for lane in &snapshot.lanes {
-        match snapshot.last_exec.get(lane) {
-            Some(state) => {
-                let _ = persist_last_exec(storage_root, lane, state);
-            }
-            None => {
-                let _ = fs::remove_file(last_exec_path(storage_root, lane));
             }
         }
     }
@@ -795,9 +782,15 @@ mod tests {
     #[test]
     fn storage_v2_persists_manifest_blobs_and_last_exec() {
         let temp = TempStorage::new();
-        let repo = repo_with_last_exec();
+        let repo = repo_with_agent_file();
 
         persist_repo(temp.path(), &repo).unwrap();
+        persist_last_exec(
+            temp.path(),
+            "agent-a",
+            &LaneExecState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
+        )
+        .unwrap();
 
         assert!(temp.path().join("repo.json").exists());
         assert!(!temp.path().join("repo.lane").exists());
@@ -818,8 +811,14 @@ mod tests {
     #[test]
     fn corrupt_last_exec_is_advisory_but_doctor_reports_it() {
         let temp = TempStorage::new();
-        let repo = repo_with_last_exec();
+        let repo = repo_with_agent_file();
         persist_repo(temp.path(), &repo).unwrap();
+        persist_last_exec(
+            temp.path(),
+            "agent-a",
+            &LaneExecState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
+        )
+        .unwrap();
         fs::write(last_exec_path(temp.path(), "agent-a"), b"not json").unwrap();
 
         let loaded = load_repo(temp.path()).unwrap().unwrap();
@@ -882,16 +881,6 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("is not referenced by repo.json"))
         );
-    }
-
-    fn repo_with_last_exec() -> LaneRepo {
-        let mut repo = repo_with_agent_file();
-        repo.record_last_exec(
-            "agent-a",
-            LaneExecState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
-        )
-        .unwrap();
-        repo
     }
 
     fn repo_with_agent_file() -> LaneRepo {

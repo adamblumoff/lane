@@ -1629,6 +1629,21 @@ fn cli_review_ignores_corrupt_last_exec_but_doctor_reports_it() {
 }
 
 #[test]
+fn cli_discard_prunes_last_exec_metadata_for_removed_lane() {
+    let repo = repo_with_agent_exec();
+    assert!(repo.path().join(".lane/last_exec/agent-a.json").exists());
+
+    let discarded = repo.run_json(["discard", "agent-a"]);
+    assert_eq!(discarded["removed"], true);
+    assert!(!repo.path().join(".lane/last_exec/agent-a.json").exists());
+
+    let doctor = repo.run_json(["doctor"]);
+    assert_eq!(doctor["healthy"], true);
+    assert_eq!(doctor["report"]["last_exec_files"], 0);
+    assert!(doctor["report"]["errors"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn cli_doctor_reports_corrupt_repo_manifest_shape() {
     let repo = repo_with_agent_exec();
     fs::write(repo.path().join(".lane/repo.json"), b"not json").unwrap();
