@@ -547,13 +547,82 @@ fn review_conflict_output(ops: Vec<ReviewOpOutput>) -> ReviewConflictOutput {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    let actions = ops
+        .iter()
+        .flat_map(|op| [show_op_action(op), resolve_op_action(op)])
+        .collect();
 
     ReviewConflictOutput {
         range_start,
         range_end,
         lanes,
+        actions,
         ops,
     }
+}
+
+fn promote_clean_action(lane: &str) -> ReviewActionOutput {
+    ReviewActionOutput {
+        kind: ReviewActionKind::PromoteClean,
+        command: vec!["promote-clean".to_owned(), lane.to_owned()],
+        lane: Some(lane.to_owned()),
+        path: None,
+        op_id: None,
+        required_inputs: Vec::new(),
+    }
+}
+
+fn show_op_action(op: &ReviewOpOutput) -> ReviewActionOutput {
+    ReviewActionOutput {
+        kind: ReviewActionKind::ShowOp,
+        command: vec![
+            "show-op".to_owned(),
+            op.op.lane.clone(),
+            op.op.path.clone(),
+            op.op.op_id.clone(),
+        ],
+        lane: Some(op.op.lane.clone()),
+        path: Some(op.op.path.clone()),
+        op_id: Some(op.op.op_id.clone()),
+        required_inputs: Vec::new(),
+    }
+}
+
+fn resolve_op_action(op: &ReviewOpOutput) -> ReviewActionOutput {
+    ReviewActionOutput {
+        kind: ReviewActionKind::ResolveOp,
+        command: vec![
+            "resolve-op".to_owned(),
+            op.op.lane.clone(),
+            op.op.path.clone(),
+            op.op.op_id.clone(),
+            "--with-file".to_owned(),
+            "<replacement-file>".to_owned(),
+        ],
+        lane: Some(op.op.lane.clone()),
+        path: Some(op.op.path.clone()),
+        op_id: Some(op.op.op_id.clone()),
+        required_inputs: vec![ReviewActionInput {
+            name: "with_file",
+            placeholder: "<replacement-file>",
+        }],
+    }
+}
+
+fn discard_action(lane: &str) -> ReviewActionOutput {
+    ReviewActionOutput {
+        kind: ReviewActionKind::Discard,
+        command: vec!["discard".to_owned(), lane.to_owned()],
+        lane: Some(lane.to_owned()),
+        path: None,
+        op_id: None,
+        required_inputs: Vec::new(),
+    }
+}
+
+fn last_exec_failed(last_exec: Option<&crate::LaneExecState>) -> bool {
+    last_exec
+        .is_some_and(|last_exec| last_exec.exit_code != Some(0) || last_exec.worker_error.is_some())
 }
 
 fn review_ops_conflict(left: &ReviewOpOutput, right: &ReviewOpOutput) -> bool {
@@ -851,12 +920,21 @@ struct ReviewLaneSummaryDraft {
 
 impl ReviewLaneSummaryDraft {
     fn into_output(self) -> ReviewLaneSummary {
+        let mut actions = Vec::new();
+        if self.clean_ops > 0 {
+            actions.push(promote_clean_action(&self.lane));
+        }
+        if self.changed_paths > 0 || last_exec_failed(self.last_exec.as_ref()) {
+            actions.push(discard_action(&self.lane));
+        }
+
         ReviewLaneSummary {
             lane: self.lane,
             changed_paths: self.changed_paths,
             clean_ops: self.clean_ops,
             conflicted_ops: self.conflicted_ops,
             last_exec: self.last_exec,
+            actions,
         }
     }
 }
@@ -868,6 +946,7 @@ struct ReviewLaneSummary {
     clean_ops: usize,
     conflicted_ops: usize,
     last_exec: Option<crate::LaneExecState>,
+    actions: Vec<ReviewActionOutput>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -894,7 +973,37 @@ struct ReviewConflictOutput {
     range_start: u64,
     range_end: u64,
     lanes: Vec<String>,
+    actions: Vec<ReviewActionOutput>,
     ops: Vec<ReviewOpOutput>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ReviewActionOutput {
+    kind: ReviewActionKind,
+    command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lane: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<FilePath>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    op_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    required_inputs: Vec<ReviewActionInput>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReviewActionKind {
+    PromoteClean,
+    ShowOp,
+    ResolveOp,
+    Discard,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ReviewActionInput {
+    name: &'static str,
+    placeholder: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]

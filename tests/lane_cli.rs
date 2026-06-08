@@ -617,12 +617,30 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
             .contains("simulated dogfood failure")
     );
     assert_eq!(failed_lane["last_exec"]["stderr"]["truncated"], false);
+    assert_eq!(
+        review_action_kinds(&failed_lane["actions"]),
+        vec!["promote_clean", "discard"]
+    );
+    assert_eq!(
+        review_action_commands(&failed_lane["actions"]),
+        vec![
+            vec!["promote-clean", "failed-worker"],
+            vec!["discard", "failed-worker"]
+        ]
+    );
 
     let selected_lane = review_lane(&review, "title-loud");
     assert_eq!(selected_lane["changed_paths"], 2);
     assert_eq!(selected_lane["clean_ops"], 1);
     assert_eq!(selected_lane["conflicted_ops"], 1);
     assert_eq!(selected_lane["last_exec"]["exit_code"], 0);
+    assert_eq!(
+        review_action_commands(&selected_lane["actions"]),
+        vec![
+            vec!["promote-clean", "title-loud"],
+            vec!["discard", "title-loud"]
+        ]
+    );
 
     let app_review = review_path(&review, "src/app.ts");
     assert!(app_review["clean_ops"].as_array().unwrap().is_empty());
@@ -634,6 +652,41 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     assert_eq!(
         review_op_ids(&app_conflict["ops"]),
         vec!["title-grid:1", "title-loud:1"]
+    );
+    assert_eq!(
+        review_action_kinds(&app_conflict["actions"]),
+        vec!["show_op", "resolve_op", "show_op", "resolve_op"]
+    );
+    assert_eq!(
+        review_action_commands(&app_conflict["actions"]),
+        vec![
+            vec!["show-op", "title-grid", "src/app.ts", "title-grid:1"],
+            vec![
+                "resolve-op",
+                "title-grid",
+                "src/app.ts",
+                "title-grid:1",
+                "--with-file",
+                "<replacement-file>"
+            ],
+            vec!["show-op", "title-loud", "src/app.ts", "title-loud:1"],
+            vec![
+                "resolve-op",
+                "title-loud",
+                "src/app.ts",
+                "title-loud:1",
+                "--with-file",
+                "<replacement-file>"
+            ],
+        ]
+    );
+    assert_eq!(
+        app_conflict["actions"][1]["required_inputs"][0]["name"],
+        "with_file"
+    );
+    assert_eq!(
+        app_conflict["actions"][1]["required_inputs"][0]["placeholder"],
+        "<replacement-file>"
     );
 
     let failed_review = review_path(&review, "src/partial.ts");
@@ -665,6 +718,10 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     let after_clean = repo.run_json(["review", "title-loud"]);
     assert_eq!(after_clean["summary"]["clean_ops"], 0);
     assert_eq!(after_clean["summary"]["conflicted_ops"], 1);
+    assert_eq!(
+        review_action_commands(&review_lane(&after_clean, "title-loud")["actions"]),
+        vec![vec!["discard", "title-loud"]]
+    );
     let selected_op_id =
         review_conflict_op_id(review_path(&after_clean, "src/app.ts"), "title-loud");
 
@@ -1703,6 +1760,24 @@ fn review_lane<'a>(review: &'a Value, lane: &str) -> &'a Value {
         .iter()
         .find(|entry| entry["lane"] == lane)
         .unwrap_or_else(|| panic!("missing review lane {lane}"))
+}
+
+fn review_action_kinds(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|action| action["kind"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn review_action_commands(value: &Value) -> Vec<Vec<String>> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|action| string_array(&action["command"]))
+        .collect()
 }
 
 fn review_conflict_op_id(path_review: &Value, lane: &str) -> String {
