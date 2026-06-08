@@ -1485,35 +1485,17 @@ struct VirtualExecTimings {
 #[derive(Clone, Debug, Serialize)]
 struct VirtualChangeOutput {
     path: FilePath,
-    status: VirtualChangeStatus,
+    status: LaneFileChangeStatus,
     base_size: Option<usize>,
     lane_size: Option<usize>,
     ops: Vec<LaneOpSummary>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum VirtualChangeStatus {
-    Created,
-    Modified,
-    Deleted,
-}
-
-impl From<LaneFileChangeStatus> for VirtualChangeStatus {
-    fn from(status: LaneFileChangeStatus) -> Self {
-        match status {
-            LaneFileChangeStatus::Created => Self::Created,
-            LaneFileChangeStatus::Modified => Self::Modified,
-            LaneFileChangeStatus::Deleted => Self::Deleted,
-        }
-    }
 }
 
 impl From<LaneFileChange> for VirtualChangeOutput {
     fn from(change: LaneFileChange) -> Self {
         Self {
             path: change.path,
-            status: change.status.into(),
+            status: change.status,
             base_size: change.base_size,
             lane_size: change.lane_size,
             ops: change.ops,

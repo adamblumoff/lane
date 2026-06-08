@@ -843,7 +843,7 @@ struct ReviewPathOutput {
 #[derive(Clone, Debug, Serialize)]
 struct ReviewLaneOutput {
     lane: String,
-    status: ChangeStatus,
+    status: LaneFileChangeStatus,
     base_size: Option<usize>,
     lane_size: Option<usize>,
     total_ops: usize,
@@ -931,7 +931,7 @@ struct BytePreview {
 #[derive(Clone, Debug, Serialize)]
 struct ChangeOutput {
     path: FilePath,
-    status: ChangeStatus,
+    status: LaneFileChangeStatus,
     base_size: Option<usize>,
     lane_size: Option<usize>,
     ops: Vec<LaneOpSummary>,
@@ -941,29 +941,11 @@ struct ChangeOutput {
     lane: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ChangeStatus {
-    Created,
-    Modified,
-    Deleted,
-}
-
-impl From<LaneFileChangeStatus> for ChangeStatus {
-    fn from(status: LaneFileChangeStatus) -> Self {
-        match status {
-            LaneFileChangeStatus::Created => Self::Created,
-            LaneFileChangeStatus::Modified => Self::Modified,
-            LaneFileChangeStatus::Deleted => Self::Deleted,
-        }
-    }
-}
-
 impl From<LaneFileChange> for ChangeOutput {
     fn from(change: LaneFileChange) -> Self {
         Self {
             path: change.path,
-            status: change.status.into(),
+            status: change.status,
             base_size: change.base_size,
             lane_size: change.lane_size,
             ops: change.ops,

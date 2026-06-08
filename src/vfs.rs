@@ -4,6 +4,8 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::storage::persist_bytes;
 use crate::{FilePath, LaneError, LaneExecState, LaneOpDetail, LaneOpSummary, LaneRepo};
 
@@ -30,7 +32,8 @@ pub(crate) struct LaneFileChange {
     pub(crate) lane_bytes: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum LaneFileChangeStatus {
     Created,
     Modified,
