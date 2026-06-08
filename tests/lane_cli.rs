@@ -390,7 +390,9 @@ fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops()
     let op_id = ops[0]["op"]["op_id"].as_str().unwrap().to_owned();
 
     let promoted = repo.run_json(["promote-ops", "agent-a", "src/math.txt", op_id.as_str()]);
-    assert_eq!(string_array(&promoted["promoted_ops"]), vec![op_id]);
+    assert_eq!(string_array(&promoted["promoted_ops"]), vec![op_id.clone()]);
+    assert_eq!(promoted["promoted"][0]["ops"].as_array().unwrap().len(), 1);
+    assert_eq!(promoted["promoted"][0]["ops"][0]["op_id"], op_id);
     assert_eq!(
         fs::read(repo.path().join("src/math.txt")).unwrap(),
         b"alpha=10\nbeta=2\ngamma=3\n"
