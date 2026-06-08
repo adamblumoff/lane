@@ -795,15 +795,7 @@ mod tests {
     #[test]
     fn storage_v2_persists_manifest_blobs_and_last_exec() {
         let temp = TempStorage::new();
-        let mut repo = LaneRepo::new();
-        repo.create_lane("agent-a").unwrap();
-        repo.replace_path("src/new.ts", "agent-a", None, Some(b"new\n".to_vec()))
-            .unwrap();
-        repo.record_last_exec(
-            "agent-a",
-            LaneExecState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
-        )
-        .unwrap();
+        let repo = repo_with_last_exec();
 
         persist_repo(temp.path(), &repo).unwrap();
 
@@ -826,15 +818,7 @@ mod tests {
     #[test]
     fn corrupt_last_exec_is_advisory_but_doctor_reports_it() {
         let temp = TempStorage::new();
-        let mut repo = LaneRepo::new();
-        repo.create_lane("agent-a").unwrap();
-        repo.replace_path("src/new.ts", "agent-a", None, Some(b"new\n".to_vec()))
-            .unwrap();
-        repo.record_last_exec(
-            "agent-a",
-            LaneExecState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
-        )
-        .unwrap();
+        let repo = repo_with_last_exec();
         persist_repo(temp.path(), &repo).unwrap();
         fs::write(last_exec_path(temp.path(), "agent-a"), b"not json").unwrap();
 
@@ -858,19 +842,10 @@ mod tests {
     #[test]
     fn missing_blob_breaks_load_and_is_reported_by_doctor() {
         let temp = TempStorage::new();
-        let mut repo = LaneRepo::new();
-        repo.create_lane("agent-a").unwrap();
-        repo.replace_path("src/new.ts", "agent-a", None, Some(b"new\n".to_vec()))
-            .unwrap();
+        let repo = repo_with_agent_file();
         persist_repo(temp.path(), &repo).unwrap();
 
-        let blob = fs::read_dir(temp.path().join("blobs").join("sha256"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        fs::remove_file(blob).unwrap();
+        fs::remove_file(first_blob_path(temp.path())).unwrap();
 
         let load_error = load_repo(temp.path()).unwrap_err();
         assert_eq!(load_error.kind(), io::ErrorKind::NotFound);
@@ -887,10 +862,7 @@ mod tests {
     #[test]
     fn unreferenced_blob_is_reported_as_warning_not_error() {
         let temp = TempStorage::new();
-        let mut repo = LaneRepo::new();
-        repo.create_lane("agent-a").unwrap();
-        repo.replace_path("src/new.ts", "agent-a", None, Some(b"new\n".to_vec()))
-            .unwrap();
+        let repo = repo_with_agent_file();
         persist_repo(temp.path(), &repo).unwrap();
         persist_blob(
             temp.path(),
@@ -910,6 +882,33 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("is not referenced by repo.json"))
         );
+    }
+
+    fn repo_with_last_exec() -> LaneRepo {
+        let mut repo = repo_with_agent_file();
+        repo.record_last_exec(
+            "agent-a",
+            LaneExecState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
+        )
+        .unwrap();
+        repo
+    }
+
+    fn repo_with_agent_file() -> LaneRepo {
+        let mut repo = LaneRepo::new();
+        repo.create_lane("agent-a").unwrap();
+        repo.replace_path("src/new.ts", "agent-a", None, Some(b"new\n".to_vec()))
+            .unwrap();
+        repo
+    }
+
+    fn first_blob_path(storage_root: &Path) -> PathBuf {
+        fs::read_dir(storage_root.join("blobs").join("sha256"))
+            .unwrap()
+            .next()
+            .expect("test expected one blob file")
+            .unwrap()
+            .path()
     }
 
     struct TempStorage {
