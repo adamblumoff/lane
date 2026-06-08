@@ -102,6 +102,12 @@ struct LaneView {
     ops: Vec<FileOp>,
 }
 
+struct LanePromotionSnapshot {
+    lane: LaneId,
+    entry: LaneEntry,
+    bytes: Option<Vec<u8>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileOp {
     id: u64,
@@ -714,31 +720,18 @@ impl LaneFile {
         base: Option<&[u8]>,
         promoted: Option<Vec<u8>>,
     ) -> Result<Option<Vec<u8>>, LaneError> {
-        let old_entries = self.lanes.clone();
-        let old_views = old_entries
-            .iter()
-            .map(|(lane_id, entry)| {
-                self.read(path, lane_id, base)
-                    .map(|bytes| (lane_id.clone(), entry.clone(), bytes))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        self.base = BaseState::for_content(promoted.as_deref());
-        self.lanes.clear();
-
-        for (lane_id, _entry, old_bytes) in old_views {
-            let next_entry = if lane_id == lane {
-                entry_for_content(promoted.as_deref(), promoted.clone())
-            } else {
-                entry_for_content(promoted.as_deref(), old_bytes)
-            };
-
-            if let Some(next_entry) = next_entry {
-                self.lanes.insert(lane_id, next_entry);
-            }
-        }
-
-        Ok(promoted)
+        self.rebuild_after_base_promotion(
+            path,
+            base,
+            promoted,
+            |lane_id, _entry, old_bytes, promoted_base| {
+                if lane_id == lane {
+                    Ok(None)
+                } else {
+                    Ok(entry_for_content(promoted_base, old_bytes))
+                }
+            },
+        )
     }
 
     fn promote_selected_present_ops(
@@ -750,21 +743,12 @@ impl LaneFile {
         selected_ids: &BTreeSet<u64>,
     ) -> Result<Option<Vec<u8>>, LaneError> {
         let promoted = Some(render_ops(path, base.unwrap_or_default(), &selected_ops)?);
-        let old_entries = self.lanes.clone();
-        let old_views = old_entries
-            .iter()
-            .map(|(lane_id, entry)| {
-                self.read(path, lane_id, base)
-                    .map(|bytes| (lane_id.clone(), entry.clone(), bytes))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        self.base = BaseState::for_content(promoted.as_deref());
-        self.lanes.clear();
-
-        for (lane_id, entry, old_bytes) in old_views {
-            let next_entry = if let LaneEntry::Present(view) = &entry {
-                if lane_id == lane {
+        self.rebuild_after_base_promotion(
+            path,
+            base,
+            promoted,
+            |lane_id, entry, old_bytes, promoted_base| match entry {
+                LaneEntry::Present(view) if lane_id == lane => {
                     let retained_ops = view
                         .ops
                         .iter()
@@ -772,49 +756,91 @@ impl LaneFile {
                         .cloned()
                         .collect::<Vec<_>>();
                     if retained_ops.is_empty() {
-                        entry_for_content(promoted.as_deref(), promoted.clone())
+                        Ok(None)
                     } else {
                         rebased_entry_for_present_ops(
                             path,
                             base,
-                            promoted.as_deref(),
+                            promoted_base,
                             old_bytes,
                             RebaseOpSet {
                                 lane,
                                 ops: &selected_ops,
                             },
                             RebaseOpSet {
-                                lane: &lane_id,
+                                lane: lane_id,
                                 ops: &retained_ops,
                             },
-                        )?
+                        )
                     }
-                } else {
-                    rebased_entry_for_present_ops(
-                        path,
-                        base,
-                        promoted.as_deref(),
-                        old_bytes,
-                        RebaseOpSet {
-                            lane,
-                            ops: &selected_ops,
-                        },
-                        RebaseOpSet {
-                            lane: &lane_id,
-                            ops: &view.ops,
-                        },
-                    )?
                 }
-            } else {
-                entry_for_content(promoted.as_deref(), old_bytes)
-            };
+                LaneEntry::Present(view) => rebased_entry_for_present_ops(
+                    path,
+                    base,
+                    promoted_base,
+                    old_bytes,
+                    RebaseOpSet {
+                        lane,
+                        ops: &selected_ops,
+                    },
+                    RebaseOpSet {
+                        lane: lane_id,
+                        ops: &view.ops,
+                    },
+                ),
+                LaneEntry::Deleted => Ok(entry_for_content(promoted_base, old_bytes)),
+            },
+        )
+    }
 
-            if let Some(next_entry) = next_entry {
-                self.lanes.insert(lane_id, next_entry);
+    fn rebuild_after_base_promotion(
+        &mut self,
+        path: &str,
+        base: Option<&[u8]>,
+        promoted: Option<Vec<u8>>,
+        mut next_entry: impl FnMut(
+            &str,
+            LaneEntry,
+            Option<Vec<u8>>,
+            Option<&[u8]>,
+        ) -> Result<Option<LaneEntry>, LaneError>,
+    ) -> Result<Option<Vec<u8>>, LaneError> {
+        let snapshots = self.promotion_snapshots(path, base)?;
+        let promoted_base = promoted.as_deref();
+
+        self.base = BaseState::for_content(promoted_base);
+        self.lanes.clear();
+
+        for snapshot in snapshots {
+            if let Some(entry) = next_entry(
+                &snapshot.lane,
+                snapshot.entry,
+                snapshot.bytes,
+                promoted_base,
+            )? {
+                self.lanes.insert(snapshot.lane, entry);
             }
         }
 
         Ok(promoted)
+    }
+
+    fn promotion_snapshots(
+        &self,
+        path: &str,
+        base: Option<&[u8]>,
+    ) -> Result<Vec<LanePromotionSnapshot>, LaneError> {
+        self.lanes
+            .iter()
+            .map(|(lane, entry)| {
+                self.read(path, lane, base)
+                    .map(|bytes| LanePromotionSnapshot {
+                        lane: lane.clone(),
+                        entry: entry.clone(),
+                        bytes,
+                    })
+            })
+            .collect()
     }
 
     fn discard_lane(&mut self, lane: &str) {
