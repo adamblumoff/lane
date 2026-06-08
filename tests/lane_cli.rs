@@ -27,6 +27,7 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
     assert_eq!(exec_result["mode"], "virtual_mount");
     assert_eq!(exec_result["exit_code"], 0);
     assert_eq!(exec_result["worker_error"], Value::Null);
+    assert!(exec_result["warnings"].as_array().unwrap().is_empty());
     assert!(exec_result["timings"]["storage_lock_held_ms"].is_u64());
     assert!(
         exec_result["projected_paths"]

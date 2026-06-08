@@ -70,7 +70,7 @@ pub(crate) fn run_virtual_lane(
         &worker.stderr,
         changed_paths.clone(),
     );
-    state.record_last_exec(exec_state)?;
+    let warnings = last_exec_warnings(state.record_last_exec(exec_state));
     let post_worker_lock_ms = elapsed_ms(collect_start);
     let snapshot = metrics.snapshot();
     let failed = worker.exit_code != Some(0) || worker.worker_error.is_some();
@@ -102,9 +102,20 @@ pub(crate) fn run_virtual_lane(
             storage_write_ops: snapshot.storage_write_ops,
         },
         changes,
+        warnings,
     };
 
     Ok(VirtualLaneRun { output, failed })
+}
+
+fn last_exec_warnings(result: Result<(), VirtualExecError>) -> Vec<VirtualExecWarning> {
+    match result {
+        Ok(()) => Vec::new(),
+        Err(error) => vec![VirtualExecWarning {
+            kind: "last_exec_not_recorded",
+            message: format!("failed to record advisory last_exec metadata: {error}"),
+        }],
+    }
 }
 
 fn start_mount(
@@ -1458,6 +1469,13 @@ pub(crate) struct VirtualExecOutput {
     changed_paths: Vec<FilePath>,
     timings: VirtualExecTimings,
     changes: Vec<VirtualChangeOutput>,
+    warnings: Vec<VirtualExecWarning>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct VirtualExecWarning {
+    kind: &'static str,
+    message: String,
 }
 
 struct WorkerOutput {
@@ -1550,4 +1568,27 @@ fn path_label(path: impl AsRef<Path>) -> String {
 
 fn elapsed_ms(start: Instant) -> u64 {
     start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_exec_record_failure_becomes_warning() {
+        let warnings = last_exec_warnings(Err(VirtualExecError::message("storage busy")));
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].kind, "last_exec_not_recorded");
+        assert!(
+            warnings[0]
+                .message
+                .contains("failed to record advisory last_exec metadata: storage busy")
+        );
+    }
+
+    #[test]
+    fn last_exec_record_success_has_no_warnings() {
+        assert!(last_exec_warnings(Ok(())).is_empty());
+    }
 }
