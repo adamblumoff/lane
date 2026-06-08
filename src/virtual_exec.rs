@@ -25,7 +25,7 @@ use winfsp_wrs::{
 
 use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
 use crate::vfs::{DirEntryKind, FileWorktree, LaneFs, LaneFsError};
-use crate::{FilePath, LaneError, LaneOpSummary};
+use crate::{FilePath, LaneError, LaneExecState, LaneOpSummary};
 
 const STORAGE_PATH: &str = ".lane/repo.lane";
 
@@ -61,6 +61,14 @@ pub(crate) fn run_virtual_lane(
     let changed_paths = state.worker_changed_paths()?;
     state.flush()?;
     let changes = state.collect_changes()?;
+    let exec_state = LaneExecState::new(
+        worker.exit_code,
+        worker.worker_error.clone(),
+        &worker.stdout,
+        &worker.stderr,
+        changed_paths.clone(),
+    );
+    state.record_last_exec(exec_state)?;
     let post_worker_lock_ms = elapsed_ms(collect_start);
     let snapshot = metrics.snapshot();
     let failed = worker.exit_code != Some(0) || worker.worker_error.is_some();
@@ -1039,6 +1047,16 @@ impl VirtualLaneState {
                     .map(|changes| changes.into_iter().flatten().collect())
             })
             .map_err(|status| VirtualExecError::from_status("collect projected lane paths", status))
+    }
+
+    fn record_last_exec(&self, exec_state: LaneExecState) -> Result<(), VirtualExecError> {
+        let metrics = VirtualFsMetrics::default();
+        with_lane_fs_write(&self.repo_root, &self.storage_path, &metrics, |latest| {
+            latest
+                .record_last_exec(&self.lane, exec_state)
+                .map_err(status_from_lane_fs_error)?;
+            Ok(())
+        })
     }
 
     fn projected_paths(&self) -> Result<Vec<FilePath>, VirtualExecError> {

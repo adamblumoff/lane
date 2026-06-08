@@ -21,8 +21,9 @@ mod repo_tests;
 pub(crate) type FilePath = String;
 pub(crate) type LaneId = String;
 
-const STORAGE_MAGIC: &[u8] = b"LANEREPO\0\0\0\x05";
+const STORAGE_MAGIC: &[u8] = b"LANEREPO\0\0\0\x06";
 const BASE_FINGERPRINT_LEN: usize = 32;
+const EXEC_OUTPUT_PREVIEW_LIMIT: usize = 4096;
 const ORDER_ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 type BaseFingerprint = [u8; BASE_FINGERPRINT_LEN];
@@ -30,7 +31,23 @@ type BaseFingerprint = [u8; BASE_FINGERPRINT_LEN];
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LaneRepo {
     lanes: BTreeSet<LaneId>,
+    last_exec: BTreeMap<LaneId, LaneExecState>,
     files: BTreeMap<FilePath, LaneFile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct LaneExecState {
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) worker_error: Option<String>,
+    pub(crate) stdout: LaneTextPreview,
+    pub(crate) stderr: LaneTextPreview,
+    pub(crate) changed_paths: Vec<FilePath>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct LaneTextPreview {
+    pub(crate) text: String,
+    pub(crate) truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +133,7 @@ impl LaneRepo {
     pub(crate) fn new() -> Self {
         Self {
             lanes: BTreeSet::new(),
+            last_exec: BTreeMap::new(),
             files: BTreeMap::new(),
         }
     }
@@ -139,8 +157,24 @@ impl LaneRepo {
         Ok(self.lanes.insert(lane))
     }
 
+    pub(crate) fn record_last_exec(
+        &mut self,
+        lane: &str,
+        state: LaneExecState,
+    ) -> Result<(), LaneError> {
+        self.ensure_lane(lane)?;
+        self.last_exec.insert(lane.to_owned(), state);
+        Ok(())
+    }
+
+    pub(crate) fn last_exec(&self, lane: &str) -> Result<Option<&LaneExecState>, LaneError> {
+        self.ensure_lane(lane)?;
+        Ok(self.last_exec.get(lane))
+    }
+
     pub(crate) fn discard_lane(&mut self, lane: &str) -> bool {
         let removed = self.lanes.remove(lane);
+        self.last_exec.remove(lane);
         for file in self.files.values_mut() {
             file.discard_lane(lane);
         }
@@ -334,6 +368,13 @@ impl LaneRepo {
         write_u64(&mut bytes, self.lanes.len() as u64);
         for lane in &self.lanes {
             write_bytes(&mut bytes, lane.as_bytes());
+            match self.last_exec.get(lane) {
+                Some(state) => {
+                    bytes.push(1);
+                    state.write_to(&mut bytes);
+                }
+                None => bytes.push(0),
+            }
         }
 
         write_u64(&mut bytes, self.files.len() as u64);
@@ -377,8 +418,18 @@ impl LaneRepo {
         cursor.expect(STORAGE_MAGIC)?;
 
         let mut lanes = BTreeSet::new();
+        let mut last_exec = BTreeMap::new();
         for _ in 0..cursor.read_u64()? {
-            lanes.insert(read_string(&mut cursor)?);
+            let lane = read_string(&mut cursor)?;
+            let exec_state = match cursor.read_byte()? {
+                0 => None,
+                1 => Some(LaneExecState::read_from(&mut cursor)?),
+                tag => return Err(DecodeError::InvalidExecState(tag)),
+            };
+            lanes.insert(lane.clone());
+            if let Some(exec_state) = exec_state {
+                last_exec.insert(lane, exec_state);
+            }
         }
 
         let mut files = BTreeMap::new();
@@ -424,7 +475,11 @@ impl LaneRepo {
             );
         }
 
-        let repo = Self { lanes, files };
+        let repo = Self {
+            lanes,
+            last_exec,
+            files,
+        };
         repo.validate()?;
         if !cursor.is_finished() {
             return Err(DecodeError::TrailingBytes);
@@ -441,6 +496,11 @@ impl LaneRepo {
     }
 
     fn validate(&self) -> Result<(), DecodeError> {
+        for lane in self.last_exec.keys() {
+            if !self.lanes.contains(lane) {
+                return Err(DecodeError::ExecStateLaneMissing(lane.clone()));
+            }
+        }
         for file in self.files.values() {
             for lane in file.lanes.keys() {
                 if !self.lanes.contains(lane) {
@@ -450,6 +510,87 @@ impl LaneRepo {
             file.validate()?;
         }
         Ok(())
+    }
+}
+
+impl LaneExecState {
+    pub(crate) fn new(
+        exit_code: Option<i32>,
+        worker_error: Option<String>,
+        stdout: &str,
+        stderr: &str,
+        changed_paths: Vec<FilePath>,
+    ) -> Self {
+        Self {
+            exit_code,
+            worker_error,
+            stdout: LaneTextPreview::from_text(stdout),
+            stderr: LaneTextPreview::from_text(stderr),
+            changed_paths,
+        }
+    }
+
+    fn write_to(&self, bytes: &mut Vec<u8>) {
+        write_option_i32(bytes, self.exit_code);
+        write_option_string(bytes, self.worker_error.as_deref());
+        self.stdout.write_to(bytes);
+        self.stderr.write_to(bytes);
+        write_u64(bytes, self.changed_paths.len() as u64);
+        for path in &self.changed_paths {
+            write_bytes(bytes, path.as_bytes());
+        }
+    }
+
+    fn read_from(cursor: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let exit_code = read_option_i32(cursor)?;
+        let worker_error = read_option_string(cursor)?;
+        let stdout = LaneTextPreview::read_from(cursor)?;
+        let stderr = LaneTextPreview::read_from(cursor)?;
+        let mut changed_paths = Vec::new();
+        for _ in 0..cursor.read_u64()? {
+            changed_paths.push(read_string(cursor)?);
+        }
+        Ok(Self {
+            exit_code,
+            worker_error,
+            stdout,
+            stderr,
+            changed_paths,
+        })
+    }
+}
+
+impl LaneTextPreview {
+    fn from_text(text: &str) -> Self {
+        let mut end = text.len();
+        let mut truncated = false;
+        if text.len() > EXEC_OUTPUT_PREVIEW_LIMIT {
+            truncated = true;
+            end = 0;
+            for (index, character) in text.char_indices() {
+                let next = index + character.len_utf8();
+                if next > EXEC_OUTPUT_PREVIEW_LIMIT {
+                    break;
+                }
+                end = next;
+            }
+        }
+
+        Self {
+            text: text[..end].to_owned(),
+            truncated,
+        }
+    }
+
+    fn write_to(&self, bytes: &mut Vec<u8>) {
+        write_bytes(bytes, self.text.as_bytes());
+        bytes.push(u8::from(self.truncated));
+    }
+
+    fn read_from(cursor: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let text = read_string(cursor)?;
+        let truncated = read_bool(cursor)?;
+        Ok(Self { text, truncated })
     }
 }
 
@@ -901,10 +1042,13 @@ pub(crate) enum DecodeError {
     InvalidUtf8,
     InvalidBase(u8),
     InvalidEntry(u8),
+    InvalidExecState(u8),
+    InvalidBool(u8),
     InvalidOrderKey,
     OperationConflict,
     OperationOutOfBounds,
     OverlayLaneMissing(LaneId),
+    ExecStateLaneMissing(LaneId),
     TrailingBytes,
 }
 
@@ -1369,12 +1513,60 @@ fn read_order_key(cursor: &mut Cursor<'_>) -> Result<String, DecodeError> {
     }
 }
 
+fn read_bool(cursor: &mut Cursor<'_>) -> Result<bool, DecodeError> {
+    match cursor.read_byte()? {
+        0 => Ok(false),
+        1 => Ok(true),
+        tag => Err(DecodeError::InvalidBool(tag)),
+    }
+}
+
+fn read_option_i32(cursor: &mut Cursor<'_>) -> Result<Option<i32>, DecodeError> {
+    match cursor.read_byte()? {
+        0 => Ok(None),
+        1 => Ok(Some(cursor.read_i32()?)),
+        tag => Err(DecodeError::InvalidExecState(tag)),
+    }
+}
+
+fn read_option_string(cursor: &mut Cursor<'_>) -> Result<Option<String>, DecodeError> {
+    match cursor.read_byte()? {
+        0 => Ok(None),
+        1 => Ok(Some(read_string(cursor)?)),
+        tag => Err(DecodeError::InvalidExecState(tag)),
+    }
+}
+
+fn write_option_i32(target: &mut Vec<u8>, value: Option<i32>) {
+    match value {
+        Some(value) => {
+            target.push(1);
+            write_i32(target, value);
+        }
+        None => target.push(0),
+    }
+}
+
+fn write_option_string(target: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            target.push(1);
+            write_bytes(target, value.as_bytes());
+        }
+        None => target.push(0),
+    }
+}
+
 fn write_bytes(target: &mut Vec<u8>, bytes: &[u8]) {
     write_u64(target, bytes.len() as u64);
     target.extend_from_slice(bytes);
 }
 
 fn write_u64(target: &mut Vec<u8>, value: u64) {
+    target.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_i32(target: &mut Vec<u8>, value: i32) {
     target.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -1404,6 +1596,11 @@ impl<'a> Cursor<'a> {
     fn read_u64(&mut self) -> Result<u64, DecodeError> {
         let bytes = self.take(8)?;
         Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
+    fn read_i32(&mut self) -> Result<i32, DecodeError> {
+        let bytes = self.take(4)?;
+        Ok(i32::from_le_bytes(bytes.try_into().unwrap()))
     }
 
     fn read_bytes(&mut self) -> Result<&'a [u8], DecodeError> {

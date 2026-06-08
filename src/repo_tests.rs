@@ -1,4 +1,4 @@
-use super::{LaneError, LaneRepo, PromotedFile};
+use super::{LaneError, LaneExecState, LaneRepo, PromotedFile};
 use sha2::{Digest, Sha256};
 use std::ops::Range;
 
@@ -324,7 +324,7 @@ fn repo_state_round_trips() {
 }
 
 #[test]
-fn repo_state_serializes_v5_sha256_base_fingerprint() {
+fn repo_state_serializes_v6_sha256_base_fingerprint() {
     let mut repo = seeded_repo();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
         .unwrap();
@@ -333,12 +333,42 @@ fn repo_state_serializes_v5_sha256_base_fingerprint() {
     let mut expected = [0; 32];
     expected.copy_from_slice(&Sha256::digest(BASE));
 
-    assert!(encoded.starts_with(b"LANEREPO\0\0\0\x05"));
+    assert!(encoded.starts_with(b"LANEREPO\0\0\0\x06"));
     assert!(
         encoded
             .windows(expected.len())
             .any(|window| window == expected.as_slice())
     );
+}
+
+#[test]
+fn repo_state_round_trips_last_exec_metadata() {
+    let mut repo = seeded_repo();
+    repo.record_last_exec(
+        "agent-a",
+        LaneExecState::new(
+            Some(7),
+            Some("worker launch failed".to_owned()),
+            &"x".repeat(5000),
+            "simulated failure\n",
+            vec!["src/partial.ts".to_owned()],
+        ),
+    )
+    .unwrap();
+
+    let decoded = LaneRepo::from_bytes(&repo.to_bytes()).unwrap();
+    let last_exec = decoded.last_exec("agent-a").unwrap().unwrap();
+
+    assert_eq!(last_exec.exit_code, Some(7));
+    assert_eq!(
+        last_exec.worker_error.as_deref(),
+        Some("worker launch failed")
+    );
+    assert_eq!(last_exec.stdout.text.len(), 4096);
+    assert!(last_exec.stdout.truncated);
+    assert_eq!(last_exec.stderr.text, "simulated failure\n");
+    assert!(!last_exec.stderr.truncated);
+    assert_eq!(last_exec.changed_paths, vec!["src/partial.ts"]);
 }
 
 #[test]

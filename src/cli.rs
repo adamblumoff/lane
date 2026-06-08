@@ -185,12 +185,13 @@ fn conflicts(repo_root: &Path, lane: &str) -> CliResult<()> {
 fn review(repo_root: &Path, lane: Option<&str>) -> CliResult<()> {
     let locked = open_locked_lane_fs(repo_root)?;
     let lanes = review_lanes(&locked.fs, lane)?;
-    let (summary, paths) = collect_review(&locked.fs, &lanes)?;
+    let (summary, lane_summaries, paths) = collect_review(&locked.fs, &lanes)?;
     let output = ReviewOutput {
         lane: lane.map(str::to_owned),
         repo_root: path_label(repo_root),
         storage_path: path_label(&locked.storage_path),
         summary,
+        lanes: lane_summaries,
         paths,
     };
     print_json(&output)?;
@@ -392,8 +393,26 @@ fn review_lanes(fs: &LaneFs, lane: Option<&str>) -> CliResult<Vec<String>> {
 fn collect_review(
     fs: &LaneFs,
     lanes: &[String],
-) -> CliResult<(ReviewSummary, Vec<ReviewPathOutput>)> {
+) -> CliResult<(ReviewSummary, Vec<ReviewLaneSummary>, Vec<ReviewPathOutput>)> {
     let mut by_path = BTreeMap::<FilePath, ReviewPathDraft>::new();
+    let mut by_lane = lanes
+        .iter()
+        .map(|lane| {
+            fs.repo()
+                .last_exec(lane)
+                .map(|last_exec| {
+                    (
+                        lane.clone(),
+                        ReviewLaneSummaryDraft {
+                            lane: lane.clone(),
+                            last_exec: last_exec.cloned(),
+                            ..ReviewLaneSummaryDraft::default()
+                        },
+                    )
+                })
+                .map_err(CliError::from)
+        })
+        .collect::<CliResult<BTreeMap<_, _>>>()?;
     let mut clean_ops = 0usize;
     let mut conflicted_ops = 0usize;
 
@@ -406,6 +425,11 @@ fn collect_review(
                 .filter(|op| op.conflicts_with.is_empty())
                 .count();
             let conflicted_count = total_ops - clean_count;
+            let lane_summary = by_lane.get_mut(lane).expect("review lane is initialized");
+            lane_summary.changed_paths += 1;
+            lane_summary.clean_ops += clean_count;
+            lane_summary.conflicted_ops += conflicted_count;
+
             let draft = by_path.entry(change.path.clone()).or_default();
             draft.lanes.insert(
                 lane.clone(),
@@ -456,6 +480,10 @@ fn collect_review(
             conflicted_ops,
             conflict_groups,
         },
+        by_lane
+            .into_values()
+            .map(ReviewLaneSummaryDraft::into_output)
+            .collect(),
         paths,
     ))
 }
@@ -792,6 +820,7 @@ struct ReviewOutput {
     repo_root: String,
     storage_path: String,
     summary: ReviewSummary,
+    lanes: Vec<ReviewLaneSummary>,
     paths: Vec<ReviewPathOutput>,
 }
 
@@ -809,6 +838,36 @@ struct ReviewPathDraft {
     lanes: BTreeMap<String, ReviewLaneOutput>,
     clean_ops: Vec<ReviewOpOutput>,
     conflicted_ops: Vec<ReviewOpOutput>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ReviewLaneSummaryDraft {
+    lane: String,
+    changed_paths: usize,
+    clean_ops: usize,
+    conflicted_ops: usize,
+    last_exec: Option<crate::LaneExecState>,
+}
+
+impl ReviewLaneSummaryDraft {
+    fn into_output(self) -> ReviewLaneSummary {
+        ReviewLaneSummary {
+            lane: self.lane,
+            changed_paths: self.changed_paths,
+            clean_ops: self.clean_ops,
+            conflicted_ops: self.conflicted_ops,
+            last_exec: self.last_exec,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ReviewLaneSummary {
+    lane: String,
+    changed_paths: usize,
+    clean_ops: usize,
+    conflicted_ops: usize,
+    last_exec: Option<crate::LaneExecState>,
 }
 
 #[derive(Clone, Debug, Serialize)]
