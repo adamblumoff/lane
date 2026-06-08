@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use similar::TextDiff;
 
 use crate::storage::{RepoLock, acquire_repo_lock, load_repo, persist_repo};
-use crate::vfs::{FileWorktree, LaneFs, LaneFsError};
+use crate::vfs::{FileWorktree, LaneFileChange, LaneFileChangeStatus, LaneFs, LaneFsError};
 use crate::{FilePath, LaneOpSummary, LaneRepo};
 
 const STORAGE_PATH: &str = ".lane/repo.lane";
@@ -42,10 +42,6 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
-    #[command(about = "List files changed in a lane")]
-    Changes { lane: String },
-    #[command(about = "List lane operations that conflict with other lanes")]
-    Conflicts { lane: String },
     #[command(about = "Review lane work across every lane or one lane")]
     Review { lane: Option<String> },
     #[command(about = "Show one lane operation with base and inserted byte previews")]
@@ -64,8 +60,6 @@ enum Command {
     },
     #[command(about = "Show a text diff for a lane")]
     Diff { lane: String, paths: Vec<String> },
-    #[command(about = "Promote one lane file into the normal repo")]
-    Promote { lane: String, path: String },
     #[command(about = "Promote selected lane operations into the normal repo")]
     PromoteOps {
         lane: String,
@@ -73,8 +67,6 @@ enum Command {
         #[arg(required = true)]
         ops: Vec<String>,
     },
-    #[command(about = "Promote every changed file in a lane")]
-    PromoteLane { lane: String },
     #[command(about = "Promote every non-conflicting operation in a lane")]
     PromoteClean { lane: String },
     #[command(about = "Remove a lane and its private changes")]
@@ -90,8 +82,6 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
     match cli.command {
         Command::Create { lane } => create(&repo_root, &lane).map(|()| ExitCode::SUCCESS),
         Command::Exec { lane, command } => exec(&repo_root, &lane, &command),
-        Command::Changes { lane } => changes(&repo_root, &lane).map(|()| ExitCode::SUCCESS),
-        Command::Conflicts { lane } => conflicts(&repo_root, &lane).map(|()| ExitCode::SUCCESS),
         Command::Review { lane } => review(&repo_root, lane.as_deref()).map(|()| ExitCode::SUCCESS),
         Command::ShowOp { lane, path, op_id } => {
             show_op(&repo_root, &lane, &path, &op_id).map(|()| ExitCode::SUCCESS)
@@ -103,14 +93,8 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
             with_file,
         } => resolve_op(&repo_root, &lane, &path, &op_id, &with_file).map(|()| ExitCode::SUCCESS),
         Command::Diff { lane, paths } => diff(&repo_root, &lane, paths).map(|()| ExitCode::SUCCESS),
-        Command::Promote { lane, path } => {
-            promote(&repo_root, &lane, &path).map(|()| ExitCode::SUCCESS)
-        }
         Command::PromoteOps { lane, path, ops } => {
             promote_ops(&repo_root, &lane, &path, &ops).map(|()| ExitCode::SUCCESS)
-        }
-        Command::PromoteLane { lane } => {
-            promote_lane(&repo_root, &lane).map(|()| ExitCode::SUCCESS)
         }
         Command::PromoteClean { lane } => {
             promote_clean(&repo_root, &lane).map(|()| ExitCode::SUCCESS)
@@ -156,41 +140,16 @@ fn exec(_repo_root: &Path, _lane: &str, _command: &[String]) -> CliResult<ExitCo
     ))
 }
 
-fn changes(repo_root: &Path, lane: &str) -> CliResult<()> {
-    let locked = open_locked_lane_fs(repo_root)?;
-    let output = ChangesOutput {
-        lane,
-        repo_root: path_label(repo_root),
-        storage_path: path_label(&locked.storage_path),
-        changes: collect_changes(&locked.fs, lane)?,
-    };
-
-    print_json(&output)?;
-    Ok(())
-}
-
-fn conflicts(repo_root: &Path, lane: &str) -> CliResult<()> {
-    let locked = open_locked_lane_fs(repo_root)?;
-    let output = ConflictsOutput {
-        lane,
-        repo_root: path_label(repo_root),
-        storage_path: path_label(&locked.storage_path),
-        conflicts: collect_conflicts(&locked.fs, lane)?,
-    };
-
-    print_json(&output)?;
-    Ok(())
-}
-
 fn review(repo_root: &Path, lane: Option<&str>) -> CliResult<()> {
     let locked = open_locked_lane_fs(repo_root)?;
     let lanes = review_lanes(&locked.fs, lane)?;
-    let (summary, paths) = collect_review(&locked.fs, &lanes)?;
+    let (summary, lane_summaries, paths) = collect_review(&locked.fs, &lanes)?;
     let output = ReviewOutput {
         lane: lane.map(str::to_owned),
         repo_root: path_label(repo_root),
         storage_path: path_label(&locked.storage_path),
         summary,
+        lanes: lane_summaries,
         paths,
     };
     print_json(&output)?;
@@ -270,30 +229,18 @@ fn diff(repo_root: &Path, lane: &str, paths: Vec<String>) -> CliResult<()> {
     Ok(())
 }
 
-fn promote(repo_root: &Path, lane: &str, path: &str) -> CliResult<()> {
-    let mut locked = open_locked_lane_fs(repo_root)?;
-    let before = change_for_path(&locked.fs, lane, path)?;
-    locked.fs.promote_file(lane, path)?;
-    locked.persist()?;
-
-    let promoted = before.into_iter().collect::<Vec<_>>();
-    let output = PromoteOutput {
-        lane,
-        repo_root: path_label(repo_root),
-        storage_path: path_label(&locked.storage_path),
-        promoted,
-    };
-    print_json(&output)?;
-    Ok(())
-}
-
 fn promote_ops(repo_root: &Path, lane: &str, path: &str, ops: &[String]) -> CliResult<()> {
     let mut locked = open_locked_lane_fs(repo_root)?;
-    let before = change_for_path(&locked.fs, lane, path)?;
-    locked.fs.promote_ops_file(lane, path, ops)?;
+    let before = change_for_path(&locked.fs, lane, path)?
+        .into_iter()
+        .collect::<Vec<_>>();
+    locked
+        .fs
+        .promote_ops_files(lane, &[(path.to_owned(), ops.to_vec())])?;
     locked.persist()?;
 
-    let promoted = before.into_iter().collect::<Vec<_>>();
+    let selected_ops = ops.iter().cloned().collect::<BTreeSet<_>>();
+    let promoted = filter_change_ops(&before, |op| selected_ops.contains(&op.op_id));
     let output = PromoteOpsOutput {
         lane,
         path,
@@ -306,22 +253,6 @@ fn promote_ops(repo_root: &Path, lane: &str, path: &str, ops: &[String]) -> CliR
     Ok(())
 }
 
-fn promote_lane(repo_root: &Path, lane: &str) -> CliResult<()> {
-    let mut locked = open_locked_lane_fs(repo_root)?;
-    let before = collect_changes(&locked.fs, lane)?;
-    locked.fs.promote_lane(lane)?;
-    locked.persist()?;
-
-    let output = PromoteOutput {
-        lane,
-        repo_root: path_label(repo_root),
-        storage_path: path_label(&locked.storage_path),
-        promoted: before,
-    };
-    print_json(&output)?;
-    Ok(())
-}
-
 fn promote_clean(repo_root: &Path, lane: &str) -> CliResult<()> {
     let mut locked = open_locked_lane_fs(repo_root)?;
     let before = collect_changes(&locked.fs, lane)?;
@@ -329,12 +260,12 @@ fn promote_clean(repo_root: &Path, lane: &str) -> CliResult<()> {
     let conflicts = filter_change_ops(&before, |op| !op.conflicts_with.is_empty());
     let promoted_ops = grouped_ops(&promoted);
 
-    for path_ops in &promoted_ops {
-        locked
-            .fs
-            .promote_ops_file(lane, &path_ops.path, &path_ops.ops)?;
-    }
     if !promoted_ops.is_empty() {
+        let selections = promoted_ops
+            .iter()
+            .map(|path_ops| (path_ops.path.clone(), path_ops.ops.clone()))
+            .collect::<Vec<_>>();
+        locked.fs.promote_ops_files(lane, &selections)?;
         locked.persist()?;
     }
 
@@ -375,11 +306,6 @@ fn collect_changes(fs: &LaneFs, lane: &str) -> CliResult<Vec<ChangeOutput>> {
         .map(|changes| changes.into_iter().flatten().collect())
 }
 
-fn collect_conflicts(fs: &LaneFs, lane: &str) -> CliResult<Vec<ChangeOutput>> {
-    collect_changes(fs, lane)
-        .map(|changes| filter_change_ops(&changes, |op| !op.conflicts_with.is_empty()))
-}
-
 fn review_lanes(fs: &LaneFs, lane: Option<&str>) -> CliResult<Vec<String>> {
     if let Some(lane) = lane {
         fs.changed_paths(lane)?;
@@ -392,8 +318,26 @@ fn review_lanes(fs: &LaneFs, lane: Option<&str>) -> CliResult<Vec<String>> {
 fn collect_review(
     fs: &LaneFs,
     lanes: &[String],
-) -> CliResult<(ReviewSummary, Vec<ReviewPathOutput>)> {
+) -> CliResult<(ReviewSummary, Vec<ReviewLaneSummary>, Vec<ReviewPathOutput>)> {
     let mut by_path = BTreeMap::<FilePath, ReviewPathDraft>::new();
+    let mut by_lane = lanes
+        .iter()
+        .map(|lane| {
+            fs.repo()
+                .last_exec(lane)
+                .map(|last_exec| {
+                    (
+                        lane.clone(),
+                        ReviewLaneSummaryDraft {
+                            lane: lane.clone(),
+                            last_exec: last_exec.cloned(),
+                            ..ReviewLaneSummaryDraft::default()
+                        },
+                    )
+                })
+                .map_err(CliError::from)
+        })
+        .collect::<CliResult<BTreeMap<_, _>>>()?;
     let mut clean_ops = 0usize;
     let mut conflicted_ops = 0usize;
 
@@ -406,6 +350,11 @@ fn collect_review(
                 .filter(|op| op.conflicts_with.is_empty())
                 .count();
             let conflicted_count = total_ops - clean_count;
+            let lane_summary = by_lane.get_mut(lane).expect("review lane is initialized");
+            lane_summary.changed_paths += 1;
+            lane_summary.clean_ops += clean_count;
+            lane_summary.conflicted_ops += conflicted_count;
+
             let draft = by_path.entry(change.path.clone()).or_default();
             draft.lanes.insert(
                 lane.clone(),
@@ -456,6 +405,10 @@ fn collect_review(
             conflicted_ops,
             conflict_groups,
         },
+        by_lane
+            .into_values()
+            .map(ReviewLaneSummaryDraft::into_output)
+            .collect(),
         paths,
     ))
 }
@@ -519,12 +472,76 @@ fn review_conflict_output(ops: Vec<ReviewOpOutput>) -> ReviewConflictOutput {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    let actions = ops
+        .iter()
+        .flat_map(|op| [show_op_action(op), resolve_op_action(op)])
+        .collect();
 
     ReviewConflictOutput {
         range_start,
         range_end,
         lanes,
+        actions,
         ops,
+    }
+}
+
+fn promote_clean_action(lane: &str) -> ReviewActionOutput {
+    ReviewActionOutput {
+        kind: ReviewActionKind::PromoteClean,
+        command: vec!["promote-clean".to_owned(), lane.to_owned()],
+        lane: Some(lane.to_owned()),
+        path: None,
+        op_id: None,
+        required_inputs: Vec::new(),
+    }
+}
+
+fn show_op_action(op: &ReviewOpOutput) -> ReviewActionOutput {
+    ReviewActionOutput {
+        kind: ReviewActionKind::ShowOp,
+        command: vec![
+            "show-op".to_owned(),
+            op.op.lane.clone(),
+            op.op.path.clone(),
+            op.op.op_id.clone(),
+        ],
+        lane: Some(op.op.lane.clone()),
+        path: Some(op.op.path.clone()),
+        op_id: Some(op.op.op_id.clone()),
+        required_inputs: Vec::new(),
+    }
+}
+
+fn resolve_op_action(op: &ReviewOpOutput) -> ReviewActionOutput {
+    ReviewActionOutput {
+        kind: ReviewActionKind::ResolveOp,
+        command: vec![
+            "resolve-op".to_owned(),
+            op.op.lane.clone(),
+            op.op.path.clone(),
+            op.op.op_id.clone(),
+            "--with-file".to_owned(),
+            "<replacement-file>".to_owned(),
+        ],
+        lane: Some(op.op.lane.clone()),
+        path: Some(op.op.path.clone()),
+        op_id: Some(op.op.op_id.clone()),
+        required_inputs: vec![ReviewActionInput {
+            name: "with_file",
+            placeholder: "<replacement-file>",
+        }],
+    }
+}
+
+fn discard_action(lane: &str) -> ReviewActionOutput {
+    ReviewActionOutput {
+        kind: ReviewActionKind::Discard,
+        command: vec!["discard".to_owned(), lane.to_owned()],
+        lane: Some(lane.to_owned()),
+        path: None,
+        op_id: None,
+        required_inputs: Vec::new(),
     }
 }
 
@@ -603,28 +620,9 @@ fn change_for_path(
     lane: &str,
     path: impl Into<String>,
 ) -> CliResult<Option<ChangeOutput>> {
-    let path = path.into();
-    let base = fs.base_file(&path)?;
-    let lane_bytes = fs.read_file(lane, &path)?;
-    if base == lane_bytes {
-        return Ok(None);
-    }
-    let status = match (&base, &lane_bytes) {
-        (None, Some(_)) => ChangeStatus::Created,
-        (Some(_), None) => ChangeStatus::Deleted,
-        (Some(_), Some(_)) => ChangeStatus::Modified,
-        (None, None) => return Ok(None),
-    };
-    let ops = fs.change_ops(lane, &path)?;
-    Ok(Some(ChangeOutput {
-        path,
-        status,
-        base_size: base.as_ref().map(Vec::len),
-        lane_size: lane_bytes.as_ref().map(Vec::len),
-        ops,
-        base,
-        lane: lane_bytes,
-    }))
+    fs.change_for_path(lane, path)
+        .map(|change| change.map(ChangeOutput::from))
+        .map_err(CliError::from)
 }
 
 fn print_diff(lane: &str, change: &ChangeOutput) {
@@ -771,27 +769,12 @@ struct CreateOutput<'a> {
 }
 
 #[derive(Serialize)]
-struct ChangesOutput<'a> {
-    lane: &'a str,
-    repo_root: String,
-    storage_path: String,
-    changes: Vec<ChangeOutput>,
-}
-
-#[derive(Serialize)]
-struct ConflictsOutput<'a> {
-    lane: &'a str,
-    repo_root: String,
-    storage_path: String,
-    conflicts: Vec<ChangeOutput>,
-}
-
-#[derive(Serialize)]
 struct ReviewOutput {
     lane: Option<String>,
     repo_root: String,
     storage_path: String,
     summary: ReviewSummary,
+    lanes: Vec<ReviewLaneSummary>,
     paths: Vec<ReviewPathOutput>,
 }
 
@@ -811,6 +794,44 @@ struct ReviewPathDraft {
     conflicted_ops: Vec<ReviewOpOutput>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct ReviewLaneSummaryDraft {
+    lane: String,
+    changed_paths: usize,
+    clean_ops: usize,
+    conflicted_ops: usize,
+    last_exec: Option<crate::LaneExecState>,
+}
+
+impl ReviewLaneSummaryDraft {
+    fn into_output(self) -> ReviewLaneSummary {
+        let mut actions = Vec::new();
+        if self.clean_ops > 0 {
+            actions.push(promote_clean_action(&self.lane));
+        }
+        actions.push(discard_action(&self.lane));
+
+        ReviewLaneSummary {
+            lane: self.lane,
+            changed_paths: self.changed_paths,
+            clean_ops: self.clean_ops,
+            conflicted_ops: self.conflicted_ops,
+            last_exec: self.last_exec,
+            actions,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ReviewLaneSummary {
+    lane: String,
+    changed_paths: usize,
+    clean_ops: usize,
+    conflicted_ops: usize,
+    last_exec: Option<crate::LaneExecState>,
+    actions: Vec<ReviewActionOutput>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct ReviewPathOutput {
     path: FilePath,
@@ -822,7 +843,7 @@ struct ReviewPathOutput {
 #[derive(Clone, Debug, Serialize)]
 struct ReviewLaneOutput {
     lane: String,
-    status: ChangeStatus,
+    status: LaneFileChangeStatus,
     base_size: Option<usize>,
     lane_size: Option<usize>,
     total_ops: usize,
@@ -835,7 +856,37 @@ struct ReviewConflictOutput {
     range_start: u64,
     range_end: u64,
     lanes: Vec<String>,
+    actions: Vec<ReviewActionOutput>,
     ops: Vec<ReviewOpOutput>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ReviewActionOutput {
+    kind: ReviewActionKind,
+    command: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lane: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<FilePath>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    op_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    required_inputs: Vec<ReviewActionInput>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReviewActionKind {
+    PromoteClean,
+    ShowOp,
+    ResolveOp,
+    Discard,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ReviewActionInput {
+    name: &'static str,
+    placeholder: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -880,7 +931,7 @@ struct BytePreview {
 #[derive(Clone, Debug, Serialize)]
 struct ChangeOutput {
     path: FilePath,
-    status: ChangeStatus,
+    status: LaneFileChangeStatus,
     base_size: Option<usize>,
     lane_size: Option<usize>,
     ops: Vec<LaneOpSummary>,
@@ -890,20 +941,18 @@ struct ChangeOutput {
     lane: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ChangeStatus {
-    Created,
-    Modified,
-    Deleted,
-}
-
-#[derive(Serialize)]
-struct PromoteOutput<'a> {
-    lane: &'a str,
-    repo_root: String,
-    storage_path: String,
-    promoted: Vec<ChangeOutput>,
+impl From<LaneFileChange> for ChangeOutput {
+    fn from(change: LaneFileChange) -> Self {
+        Self {
+            path: change.path,
+            status: change.status,
+            base_size: change.base_size,
+            lane_size: change.lane_size,
+            ops: change.ops,
+            base: change.base_bytes,
+            lane: change.lane_bytes,
+        }
+    }
 }
 
 #[derive(Serialize)]

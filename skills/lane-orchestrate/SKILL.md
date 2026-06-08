@@ -5,7 +5,7 @@ description: Run multiple isolated implementation attempts in Lane and promote t
 
 # Lane Orchestrate
 
-Use Lane as the file-versioning layer, not as a planning-file format. The user-facing flow is prompt -> `lane exec` attempts -> virtual mounted repo view -> deterministic file capture -> compare -> promote.
+Use Lane as the file-versioning layer, not as a planning-file format. The user-facing flow is prompt -> `lane exec` attempts -> virtual mounted repo view -> deterministic file capture -> `lane review` comparison -> promote or resolve selected ops.
 
 ## Workflow
 
@@ -17,8 +17,8 @@ Use Lane as the file-versioning layer, not as a planning-file format. The user-f
 6. Parse the JSON emitted by `lane exec`. It reports `mode: virtual_mount`, `workspace_root`/`mount_path`, `projected_paths`, worker-touched `changed_paths`, timings, and effective lane `changes`.
 7. For promising lanes, inspect `lane review [lane]` for the JSON decision graph, use `lane diff <lane>` for human-readable patch review, and run verification commands through `lane exec`.
 8. Pick the winner from evidence: tests, build output, screenshots, diffs, and fit to the user request.
-9. Promote only the selected result with `lane promote-lane <lane>`, selected files with `lane promote <lane> <path>`, or selected operations with `lane promote-ops <lane> <path> <op-id>...`.
-10. Discard losing lanes with `lane discard <lane>` once their useful evidence has been reported.
+9. Use `lane review` as the executable decision graph: run `promote-clean` from `review.lanes[].actions` for clean ops, `show-op` and `resolve-op --with-file <replacement-file>` from `review.paths[].conflicts[].actions` for conflicted ops, and `promote-ops <lane> <path> <op-id>...` only when deliberately selecting exact clean ops.
+10. Discard losing lanes by running their `discard` action from `review.lanes[].actions` once their useful evidence has been reported.
 
 ## Guardrails
 
@@ -26,10 +26,10 @@ Use Lane as the file-versioning layer, not as a planning-file format. The user-f
 - Treat `lane exec` as the normal capture path. It is Codex-compatible and gives each worker its own mounted file view.
 - If `lane exec` returns a non-zero `exit_code` or `worker_error`, inspect its JSON output before comparing or promoting that lane.
 - Structured commands are JSON by default; `lane diff` is the text review command.
-- Use `lane review` to compare clean ops and conflict groups before choosing `promote-clean`, `promote-ops`, or `resolve-op`.
+- Use `lane review` to compare clean ops and conflict groups before choosing `promote-clean`, `promote-ops`, or `resolve-op`. Prefer executing the command arrays emitted by `review` so the parent workflow dogfoods the same contract it presents to agents.
 - Keep the parent agent responsible for comparison and promotion. Subagents should implement their assigned variant, run local checks when asked, and summarize what changed.
 - Preserve the normal repo until promotion. Before promotion, base files changing is a product failure unless the user explicitly made those edits outside Lane.
-- Expect `changed_paths` to include temporary files a worker touched. Use `changes` and `lane diff <lane>` for the effective lane diff.
+- Expect `changed_paths` to include temporary files a worker touched. Use `lane review [lane]` for the effective structured lane state and `lane diff <lane>` for the human-readable patch.
 
 ## Example Shape
 
@@ -55,7 +55,10 @@ Finally:
 
 ```powershell
 lane review
-lane promote-lane login-enterprise
+lane promote-clean login-enterprise
+# For remaining conflicts, inspect the emitted actions and resolve only the selected op:
+lane show-op login-enterprise src/login.tsx login-enterprise:1
+lane resolve-op login-enterprise src/login.tsx login-enterprise:1 --with-file .\resolution.txt
 lane discard login-minimal
 lane discard login-playful
 lane discard login-split

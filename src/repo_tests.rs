@@ -1,4 +1,4 @@
-use super::{LaneError, LaneRepo, PromotedFile};
+use super::{LaneError, LaneExecState, LaneRepo};
 use sha2::{Digest, Sha256};
 use std::ops::Range;
 
@@ -59,7 +59,7 @@ fn overlay_paths_report_lane_overlays() {
 }
 
 #[test]
-fn promote_lane_promotes_every_changed_path_for_lane() {
+fn selected_ops_promote_every_changed_path_for_lane() {
     let mut repo = seeded_repo();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
         .unwrap();
@@ -74,23 +74,13 @@ fn promote_lane_promotes_every_changed_path_for_lane() {
     repo.write(PATH, "agent-b", BASE, 21..25, b"safe".to_vec())
         .unwrap();
 
-    let promoted = repo
-        .promote_lane(
-            "agent-a",
-            vec![
-                (PATH.to_owned(), Some(BASE.to_vec())),
-                (SETTINGS_PATH.to_owned(), Some(SETTINGS_BASE.to_vec())),
-            ],
-        )
+    let promoted_path = repo.promote_all_ops(PATH, "agent-a", BASE).unwrap();
+    let promoted_settings = repo
+        .promote_all_ops(SETTINGS_PATH, "agent-a", SETTINGS_BASE)
         .unwrap();
 
-    assert_eq!(
-        promoted,
-        vec![
-            promoted_file(PATH, b"export const mode = 'fast';\n"),
-            promoted_file(SETTINGS_PATH, b"{\"mode\":\"fast\"}\n"),
-        ]
-    );
+    assert_eq!(promoted_path, b"export const mode = 'fast';\n");
+    assert_eq!(promoted_settings, b"{\"mode\":\"fast\"}\n");
     assert_eq!(
         repo.read(PATH, "agent-b", b"export const mode = 'fast';\n")
             .unwrap(),
@@ -103,77 +93,6 @@ fn promote_lane_promotes_every_changed_path_for_lane() {
     );
     assert_eq!(repo.overlay_paths("agent-a").unwrap(), Vec::<&str>::new());
     assert_eq!(repo.overlay_paths("agent-b").unwrap(), vec![PATH]);
-    assert_eq!(
-        repo.promote_lane(
-            "agent-a",
-            vec![
-                (
-                    PATH.to_owned(),
-                    Some(b"export const mode = 'fast';\n".to_vec()),
-                ),
-                (
-                    SETTINGS_PATH.to_owned(),
-                    Some(b"{\"mode\":\"fast\"}\n".to_vec()),
-                ),
-            ],
-        )
-        .unwrap(),
-        Vec::<PromotedFile>::new()
-    );
-}
-
-#[test]
-fn promote_lane_requires_base_for_every_changed_path() {
-    let mut repo = seeded_repo();
-    repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
-        .unwrap();
-
-    assert_eq!(
-        repo.promote_lane("agent-a", Vec::<(String, Option<Vec<u8>>)>::new()),
-        Err(LaneError::BaseMissing {
-            path: PATH.to_owned()
-        })
-    );
-}
-
-#[test]
-fn failed_promote_lane_does_not_mutate_repo() {
-    let mut repo = seeded_repo();
-    repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
-        .unwrap();
-    repo.write(
-        SETTINGS_PATH,
-        "agent-a",
-        SETTINGS_BASE,
-        9..13,
-        b"fast".to_vec(),
-    )
-    .unwrap();
-
-    assert_eq!(
-        repo.promote_lane(
-            "agent-a",
-            vec![
-                (PATH.to_owned(), Some(BASE.to_vec())),
-                (
-                    SETTINGS_PATH.to_owned(),
-                    Some(b"{\"mode\":\"moved\"}\n".to_vec()),
-                ),
-            ],
-        ),
-        Err(LaneError::BaseChanged {
-            path: SETTINGS_PATH.to_owned()
-        })
-    );
-
-    assert_eq!(
-        repo.read(PATH, "agent-a", BASE).unwrap(),
-        b"export const mode = 'fast';\n"
-    );
-    assert_eq!(
-        repo.read(SETTINGS_PATH, "agent-a", SETTINGS_BASE).unwrap(),
-        b"{\"mode\":\"fast\"}\n"
-    );
 }
 
 #[test]
@@ -184,7 +103,7 @@ fn promote_returns_new_base_and_preserves_other_lane_projections() {
     repo.write(PATH, "agent-b", BASE, 21..25, b"safe".to_vec())
         .unwrap();
 
-    let promoted = repo.promote(PATH, "agent-a", BASE).unwrap();
+    let promoted = repo.promote_all_ops(PATH, "agent-a", BASE).unwrap();
 
     assert_eq!(promoted, b"export const mode = 'fast';\n");
     assert_eq!(repo.read(PATH, "base", &promoted).unwrap(), promoted);
@@ -215,7 +134,7 @@ fn untouched_lanes_follow_promoted_base() {
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
         .unwrap();
 
-    let promoted = repo.promote(PATH, "agent-a", BASE).unwrap();
+    let promoted = repo.promote_all_ops(PATH, "agent-a", BASE).unwrap();
 
     assert_eq!(promoted, b"export const mode = 'fast';\n");
     assert_eq!(repo.read(PATH, "agent-b", &promoted).unwrap(), promoted);
@@ -236,10 +155,10 @@ fn non_overlapping_promoted_lanes_follow_later_base_changes() {
     )
     .unwrap();
 
-    let badabing = repo.promote(PATH, "badabing", BASE).unwrap();
+    let badabing = repo.promote_all_ops(PATH, "badabing", BASE).unwrap();
     assert_eq!(badabing, b"export const mode = 'base';\nbadabing\n");
 
-    let promoted = repo.promote(PATH, "agent-a", &badabing).unwrap();
+    let promoted = repo.promote_all_ops(PATH, "agent-a", &badabing).unwrap();
 
     assert_eq!(promoted, b"export const mode = 'fast';\nbadabing\n");
     assert_eq!(repo.read(PATH, "agent-a", &promoted).unwrap(), promoted);
@@ -324,7 +243,7 @@ fn repo_state_round_trips() {
 }
 
 #[test]
-fn repo_state_serializes_v5_sha256_base_fingerprint() {
+fn repo_state_serializes_v6_sha256_base_fingerprint() {
     let mut repo = seeded_repo();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
         .unwrap();
@@ -333,12 +252,42 @@ fn repo_state_serializes_v5_sha256_base_fingerprint() {
     let mut expected = [0; 32];
     expected.copy_from_slice(&Sha256::digest(BASE));
 
-    assert!(encoded.starts_with(b"LANEREPO\0\0\0\x05"));
+    assert!(encoded.starts_with(b"LANEREPO\0\0\0\x06"));
     assert!(
         encoded
             .windows(expected.len())
             .any(|window| window == expected.as_slice())
     );
+}
+
+#[test]
+fn repo_state_round_trips_last_exec_metadata() {
+    let mut repo = seeded_repo();
+    repo.record_last_exec(
+        "agent-a",
+        LaneExecState::new(
+            Some(7),
+            Some("worker launch failed".to_owned()),
+            &"x".repeat(5000),
+            "simulated failure\n",
+            vec!["src/partial.ts".to_owned()],
+        ),
+    )
+    .unwrap();
+
+    let decoded = LaneRepo::from_bytes(&repo.to_bytes()).unwrap();
+    let last_exec = decoded.last_exec("agent-a").unwrap().unwrap();
+
+    assert_eq!(last_exec.exit_code, Some(7));
+    assert_eq!(
+        last_exec.worker_error.as_deref(),
+        Some("worker launch failed")
+    );
+    assert_eq!(last_exec.stdout.text.len(), 4096);
+    assert!(last_exec.stdout.truncated);
+    assert_eq!(last_exec.stderr.text, "simulated failure\n");
+    assert!(!last_exec.stderr.truncated);
+    assert_eq!(last_exec.changed_paths, vec!["src/partial.ts"]);
 }
 
 #[test]
@@ -372,7 +321,9 @@ fn non_overlapping_same_file_ops_compose_after_promotion() {
     repo.write("src/math.txt", "agent-b", base, 13..14, b"20".to_vec())
         .unwrap();
 
-    let promoted = repo.promote("src/math.txt", "agent-a", base).unwrap();
+    let promoted = repo
+        .promote_all_ops("src/math.txt", "agent-a", base)
+        .unwrap();
 
     assert_eq!(promoted, b"alpha=10\nbeta=2\n");
     assert_eq!(
@@ -434,6 +385,36 @@ fn selected_ops_promote_without_promoting_the_whole_lane_file() {
         .unwrap();
     assert_eq!(remaining_b_ops[0].op_id, "agent-b:1");
     assert_eq!(remaining_b_ops[0].base_start, 15);
+}
+
+#[test]
+fn selected_delete_promotion_preserves_other_lane_as_create() {
+    let mut repo = seeded_repo();
+    let base = b"mode=base\n";
+    repo.delete_path("src/mode.txt", "agent-a", Some(base))
+        .unwrap();
+    repo.write("src/mode.txt", "agent-b", base, 5..9, b"safe".to_vec())
+        .unwrap();
+
+    let promoted = repo
+        .promote_ops_path(
+            "src/mode.txt",
+            "agent-a",
+            Some(base),
+            &["agent-a:delete".to_owned()],
+        )
+        .unwrap();
+
+    assert_eq!(promoted, None);
+    assert_eq!(repo.read_path("src/mode.txt", "agent-a", None), Ok(None));
+    assert_eq!(
+        repo.read_path("src/mode.txt", "agent-b", None).unwrap(),
+        Some(b"mode=safe\n".to_vec())
+    );
+    let agent_b_ops = repo.change_ops("src/mode.txt", "agent-b", None).unwrap();
+    assert_eq!(agent_b_ops.len(), 1);
+    assert_eq!(agent_b_ops[0].kind, super::LaneOpKind::Create);
+    assert_eq!(agent_b_ops[0].conflicts_with, Vec::<String>::new());
 }
 
 #[test]
@@ -520,7 +501,9 @@ fn overlapping_same_file_ops_remain_alternatives_after_promotion() {
         .unwrap();
     assert_eq!(before[0].conflicts_with, vec!["agent-b".to_owned()]);
 
-    let promoted = repo.promote("src/mode.txt", "agent-a", base).unwrap();
+    let promoted = repo
+        .promote_all_ops("src/mode.txt", "agent-a", base)
+        .unwrap();
 
     assert_eq!(promoted, b"mode=fast\n");
     assert_eq!(
@@ -563,7 +546,9 @@ fn same_position_inserts_have_deterministic_order_without_conflict() {
             .is_empty()
     );
 
-    let promoted = repo.promote("src/imports.txt", "agent-a", base).unwrap();
+    let promoted = repo
+        .promote_all_ops("src/imports.txt", "agent-a", base)
+        .unwrap();
 
     assert_eq!(promoted, b"use a;\ntail\n");
     assert_eq!(
@@ -577,18 +562,18 @@ fn same_position_inserts_compose_in_stable_order_regardless_of_promotion_order()
     let base = b"tail\n";
     let mut a_then_b = repo_with_same_position_inserts(base);
     let promoted_a = a_then_b
-        .promote("src/imports.txt", "agent-a", base)
+        .promote_all_ops("src/imports.txt", "agent-a", base)
         .unwrap();
     let final_a_then_b = a_then_b
-        .promote("src/imports.txt", "agent-b", &promoted_a)
+        .promote_all_ops("src/imports.txt", "agent-b", &promoted_a)
         .unwrap();
 
     let mut b_then_a = repo_with_same_position_inserts(base);
     let promoted_b = b_then_a
-        .promote("src/imports.txt", "agent-b", base)
+        .promote_all_ops("src/imports.txt", "agent-b", base)
         .unwrap();
     let final_b_then_a = b_then_a
-        .promote("src/imports.txt", "agent-a", &promoted_b)
+        .promote_all_ops("src/imports.txt", "agent-a", &promoted_b)
         .unwrap();
 
     assert_eq!(final_a_then_b, b"use a;\nuse b;\ntail\n");
@@ -611,7 +596,9 @@ fn same_position_inserts_into_empty_file_are_not_create_conflicts() {
             .is_empty()
     );
 
-    let promoted = repo.promote("src/empty.txt", "agent-a", base).unwrap();
+    let promoted = repo
+        .promote_all_ops("src/empty.txt", "agent-a", base)
+        .unwrap();
 
     assert_eq!(promoted, b"a");
     assert_eq!(
@@ -648,13 +635,6 @@ fn repo_with_same_position_inserts(base: &[u8]) -> LaneRepo {
     repo
 }
 
-fn promoted_file(path: &str, bytes: &[u8]) -> PromotedFile {
-    PromotedFile {
-        path: path.to_owned(),
-        bytes: Some(bytes.to_vec()),
-    }
-}
-
 trait RepoTestExt {
     fn read(&self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError>;
     fn write(
@@ -672,7 +652,12 @@ trait RepoTestExt {
         base: &[u8],
         content: Vec<u8>,
     ) -> Result<(), LaneError>;
-    fn promote(&mut self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError>;
+    fn promote_all_ops(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+    ) -> Result<Vec<u8>, LaneError>;
     fn promote_ops(
         &mut self,
         path: &str,
@@ -684,10 +669,9 @@ trait RepoTestExt {
 
 impl RepoTestExt for LaneRepo {
     fn read(&self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError> {
-        self.read_path(path, lane, Some(base))?
-            .ok_or_else(|| LaneError::BaseMissing {
-                path: path.to_owned(),
-            })
+        Ok(self
+            .read_path(path, lane, Some(base))?
+            .expect("test expected file bytes"))
     }
 
     fn write(
@@ -715,11 +699,18 @@ impl RepoTestExt for LaneRepo {
         self.replace_path(path, lane, Some(base), Some(content))
     }
 
-    fn promote(&mut self, path: &str, lane: &str, base: &[u8]) -> Result<Vec<u8>, LaneError> {
-        self.promote_path(path, lane, Some(base))?
-            .ok_or_else(|| LaneError::BaseMissing {
-                path: path.to_owned(),
-            })
+    fn promote_all_ops(
+        &mut self,
+        path: &str,
+        lane: &str,
+        base: &[u8],
+    ) -> Result<Vec<u8>, LaneError> {
+        let op_ids = self
+            .change_ops(path, lane, Some(base))?
+            .into_iter()
+            .map(|op| op.op_id)
+            .collect::<Vec<_>>();
+        self.promote_ops(path, lane, base, &op_ids)
     }
 
     fn promote_ops(
@@ -729,9 +720,8 @@ impl RepoTestExt for LaneRepo {
         base: &[u8],
         op_ids: &[String],
     ) -> Result<Vec<u8>, LaneError> {
-        self.promote_ops_path(path, lane, Some(base), op_ids)?
-            .ok_or_else(|| LaneError::BaseMissing {
-                path: path.to_owned(),
-            })
+        Ok(self
+            .promote_ops_path(path, lane, Some(base), op_ids)?
+            .expect("test expected promoted file bytes"))
     }
 }

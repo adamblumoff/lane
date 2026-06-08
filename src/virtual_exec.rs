@@ -24,8 +24,10 @@ use winfsp_wrs::{
 };
 
 use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
-use crate::vfs::{DirEntryKind, FileWorktree, LaneFs, LaneFsError};
-use crate::{FilePath, LaneError, LaneOpSummary};
+use crate::vfs::{
+    DirEntryKind, FileWorktree, LaneFileChange, LaneFileChangeStatus, LaneFs, LaneFsError,
+};
+use crate::{FilePath, LaneError, LaneExecState, LaneOpSummary};
 
 const STORAGE_PATH: &str = ".lane/repo.lane";
 
@@ -61,6 +63,14 @@ pub(crate) fn run_virtual_lane(
     let changed_paths = state.worker_changed_paths()?;
     state.flush()?;
     let changes = state.collect_changes()?;
+    let exec_state = LaneExecState::new(
+        worker.exit_code,
+        worker.worker_error.clone(),
+        &worker.stdout,
+        &worker.stderr,
+        changed_paths.clone(),
+    );
+    let warnings = last_exec_warnings(state.record_last_exec(exec_state));
     let post_worker_lock_ms = elapsed_ms(collect_start);
     let snapshot = metrics.snapshot();
     let failed = worker.exit_code != Some(0) || worker.worker_error.is_some();
@@ -92,9 +102,20 @@ pub(crate) fn run_virtual_lane(
             storage_write_ops: snapshot.storage_write_ops,
         },
         changes,
+        warnings,
     };
 
     Ok(VirtualLaneRun { output, failed })
+}
+
+fn last_exec_warnings(result: Result<(), VirtualExecError>) -> Vec<VirtualExecWarning> {
+    match result {
+        Ok(()) => Vec::new(),
+        Err(error) => vec![VirtualExecWarning {
+            kind: "last_exec_not_recorded",
+            message: format!("failed to record advisory last_exec metadata: {error}"),
+        }],
+    }
 }
 
 fn start_mount(
@@ -1041,6 +1062,16 @@ impl VirtualLaneState {
             .map_err(|status| VirtualExecError::from_status("collect projected lane paths", status))
     }
 
+    fn record_last_exec(&self, exec_state: LaneExecState) -> Result<(), VirtualExecError> {
+        let metrics = VirtualFsMetrics::default();
+        with_lane_fs_write(&self.repo_root, &self.storage_path, &metrics, |latest| {
+            latest
+                .record_last_exec(&self.lane, exec_state)
+                .map_err(status_from_lane_fs_error)?;
+            Ok(())
+        })
+    }
+
     fn projected_paths(&self) -> Result<Vec<FilePath>, VirtualExecError> {
         self.fs
             .lock()
@@ -1352,30 +1383,9 @@ fn change_for_path(
     lane: &str,
     path: impl Into<String>,
 ) -> Result<Option<VirtualChangeOutput>, i32> {
-    let path = path.into();
-    let base = fs.base_file(&path).map_err(status_from_lane_fs_error)?;
-    let lane_bytes = fs
-        .read_file(lane, &path)
-        .map_err(status_from_lane_fs_error)?;
-    if base == lane_bytes {
-        return Ok(None);
-    }
-    let status = match (&base, &lane_bytes) {
-        (None, Some(_)) => VirtualChangeStatus::Created,
-        (Some(_), None) => VirtualChangeStatus::Deleted,
-        (Some(_), Some(_)) => VirtualChangeStatus::Modified,
-        (None, None) => return Ok(None),
-    };
-    let ops = fs
-        .change_ops(lane, &path)
-        .map_err(status_from_lane_fs_error)?;
-    Ok(Some(VirtualChangeOutput {
-        path,
-        status,
-        base_size: base.as_ref().map(Vec::len),
-        lane_size: lane_bytes.as_ref().map(Vec::len),
-        ops,
-    }))
+    fs.change_for_path(lane, path)
+        .map(|change| change.map(VirtualChangeOutput::from))
+        .map_err(status_from_lane_fs_error)
 }
 
 fn status_from_lane_fs_error(error: LaneFsError) -> i32 {
@@ -1388,7 +1398,7 @@ fn status_from_lane_fs_error(error: LaneFsError) -> i32 {
 
 fn status_from_lane_error(error: LaneError) -> i32 {
     match error {
-        LaneError::LaneMissing(_) | LaneError::BaseMissing { .. } => STATUS_OBJECT_NAME_NOT_FOUND,
+        LaneError::LaneMissing(_) => STATUS_OBJECT_NAME_NOT_FOUND,
         LaneError::BaseChanged { .. } => STATUS_ACCESS_DENIED,
         LaneError::ReservedLane(_) => STATUS_INVALID_PARAMETER,
         LaneError::OperationOutOfBounds { .. }
@@ -1459,6 +1469,13 @@ pub(crate) struct VirtualExecOutput {
     changed_paths: Vec<FilePath>,
     timings: VirtualExecTimings,
     changes: Vec<VirtualChangeOutput>,
+    warnings: Vec<VirtualExecWarning>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct VirtualExecWarning {
+    kind: &'static str,
+    message: String,
 }
 
 struct WorkerOutput {
@@ -1486,18 +1503,22 @@ struct VirtualExecTimings {
 #[derive(Clone, Debug, Serialize)]
 struct VirtualChangeOutput {
     path: FilePath,
-    status: VirtualChangeStatus,
+    status: LaneFileChangeStatus,
     base_size: Option<usize>,
     lane_size: Option<usize>,
     ops: Vec<LaneOpSummary>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum VirtualChangeStatus {
-    Created,
-    Modified,
-    Deleted,
+impl From<LaneFileChange> for VirtualChangeOutput {
+    fn from(change: LaneFileChange) -> Self {
+        Self {
+            path: change.path,
+            status: change.status,
+            base_size: change.base_size,
+            lane_size: change.lane_size,
+            ops: change.ops,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1547,4 +1568,27 @@ fn path_label(path: impl AsRef<Path>) -> String {
 
 fn elapsed_ms(start: Instant) -> u64 {
     start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_exec_record_failure_becomes_warning() {
+        let warnings = last_exec_warnings(Err(VirtualExecError::message("storage busy")));
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].kind, "last_exec_not_recorded");
+        assert!(
+            warnings[0]
+                .message
+                .contains("failed to record advisory last_exec metadata: storage busy")
+        );
+    }
+
+    #[test]
+    fn last_exec_record_success_has_no_warnings() {
+        assert!(last_exec_warnings(Ok(())).is_empty());
+    }
 }

@@ -4,8 +4,10 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::storage::persist_bytes;
-use crate::{FilePath, LaneError, LaneOpDetail, LaneOpSummary, LaneRepo};
+use crate::{FilePath, LaneError, LaneExecState, LaneOpDetail, LaneOpSummary, LaneRepo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DirEntry {
@@ -17,6 +19,25 @@ pub(crate) struct DirEntry {
 pub(crate) enum DirEntryKind {
     Directory,
     File,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LaneFileChange {
+    pub(crate) path: FilePath,
+    pub(crate) status: LaneFileChangeStatus,
+    pub(crate) base_size: Option<usize>,
+    pub(crate) lane_size: Option<usize>,
+    pub(crate) ops: Vec<LaneOpSummary>,
+    pub(crate) base_bytes: Option<Vec<u8>>,
+    pub(crate) lane_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LaneFileChangeStatus {
+    Created,
+    Modified,
+    Deleted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,11 +141,6 @@ impl LaneFs {
         &self.repo
     }
 
-    pub(crate) fn base_file(&self, path: &str) -> Result<Option<Vec<u8>>, LaneFsError> {
-        let path = normalize_repo_path(path)?;
-        self.worktree.read_file(&path).map_err(LaneFsError::Io)
-    }
-
     pub(crate) fn changed_paths(&self, lane: &str) -> Result<Vec<FilePath>, LaneFsError> {
         self.repo
             .overlay_paths(lane)
@@ -132,16 +148,41 @@ impl LaneFs {
             .map(|paths| paths.into_iter().map(str::to_owned).collect())
     }
 
-    pub(crate) fn change_ops(
+    pub(crate) fn change_for_path(
         &self,
         lane: &str,
-        path: &str,
-    ) -> Result<Vec<LaneOpSummary>, LaneFsError> {
-        let path = normalize_repo_path(path)?;
+        path: impl Into<String>,
+    ) -> Result<Option<LaneFileChange>, LaneFsError> {
+        let path = normalize_repo_path(&path.into())?;
         let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
-        self.repo
+        let lane_bytes = self
+            .repo
+            .read_path(&path, lane, base.as_deref())
+            .map_err(LaneFsError::Lane)?;
+        if base == lane_bytes {
+            return Ok(None);
+        }
+
+        let status = match (&base, &lane_bytes) {
+            (None, Some(_)) => LaneFileChangeStatus::Created,
+            (Some(_), None) => LaneFileChangeStatus::Deleted,
+            (Some(_), Some(_)) => LaneFileChangeStatus::Modified,
+            (None, None) => return Ok(None),
+        };
+        let ops = self
+            .repo
             .change_ops(&path, lane, base.as_deref())
-            .map_err(LaneFsError::Lane)
+            .map_err(LaneFsError::Lane)?;
+
+        Ok(Some(LaneFileChange {
+            path,
+            status,
+            base_size: base.as_ref().map(Vec::len),
+            lane_size: lane_bytes.as_ref().map(Vec::len),
+            ops,
+            base_bytes: base,
+            lane_bytes,
+        }))
     }
 
     pub(crate) fn op_detail(
@@ -163,6 +204,16 @@ impl LaneFs {
 
     pub(crate) fn create_lane(&mut self, lane: impl Into<String>) -> Result<bool, LaneFsError> {
         self.repo.create_lane(lane).map_err(LaneFsError::Lane)
+    }
+
+    pub(crate) fn record_last_exec(
+        &mut self,
+        lane: &str,
+        state: LaneExecState,
+    ) -> Result<(), LaneFsError> {
+        self.repo
+            .record_last_exec(lane, state)
+            .map_err(LaneFsError::Lane)
     }
 
     pub(crate) fn read_file(&self, lane: &str, path: &str) -> Result<Option<Vec<u8>>, LaneFsError> {
@@ -261,49 +312,38 @@ impl LaneFs {
             .collect())
     }
 
-    pub(crate) fn promote_file(
+    pub(crate) fn promote_ops_files(
         &mut self,
         lane: &str,
-        path: &str,
-    ) -> Result<Option<Vec<u8>>, LaneFsError> {
-        let path = normalize_repo_path(path)?;
-        let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
-        let mut draft = self.repo.clone();
-        let promoted = draft
-            .promote_path(&path, lane, base.as_deref())
-            .map_err(LaneFsError::Lane)?;
-        match promoted.as_deref() {
-            Some(bytes) => self
-                .worktree
-                .write_file(&path, bytes)
-                .map_err(LaneFsError::Io)?,
-            None => self.worktree.remove_file(&path).map_err(LaneFsError::Io)?,
-        }
-        self.repo = draft;
-        Ok(promoted)
-    }
+        path_ops: &[(FilePath, Vec<String>)],
+    ) -> Result<(), LaneFsError> {
+        let path_ops = path_ops
+            .iter()
+            .map(|(path, ops)| normalize_repo_path(path).map(|path| (path, ops)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let bases = path_ops
+            .iter()
+            .map(|(path, _)| {
+                self.worktree
+                    .read_file(path)
+                    .map(|base| (path.clone(), base))
+                    .map_err(LaneFsError::Io)
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
 
-    pub(crate) fn promote_ops_file(
-        &mut self,
-        lane: &str,
-        path: &str,
-        op_ids: &[String],
-    ) -> Result<Option<Vec<u8>>, LaneFsError> {
-        let path = normalize_repo_path(path)?;
-        let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
         let mut draft = self.repo.clone();
-        let promoted = draft
-            .promote_ops_path(&path, lane, base.as_deref(), op_ids)
-            .map_err(LaneFsError::Lane)?;
-        match promoted.as_deref() {
-            Some(bytes) => self
-                .worktree
-                .write_file(&path, bytes)
-                .map_err(LaneFsError::Io)?,
-            None => self.worktree.remove_file(&path).map_err(LaneFsError::Io)?,
+        let mut promoted = Vec::new();
+        for (path, ops) in path_ops {
+            let base = bases.get(&path).and_then(Option::as_deref);
+            let bytes = draft
+                .promote_ops_path(&path, lane, base, ops)
+                .map_err(LaneFsError::Lane)?;
+            promoted.push((path, bytes));
         }
+
+        self.apply_promoted_files(&promoted)?;
         self.repo = draft;
-        Ok(promoted)
+        Ok(())
     }
 
     pub(crate) fn resolve_op_file(
@@ -312,58 +352,51 @@ impl LaneFs {
         path: &str,
         op_id: &str,
         replacement: impl Into<Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, LaneFsError> {
+    ) -> Result<(), LaneFsError> {
         let path = normalize_repo_path(path)?;
         let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
         let mut draft = self.repo.clone();
         let promoted = draft
             .resolve_op_path(&path, lane, base.as_deref(), op_id, replacement)
             .map_err(LaneFsError::Lane)?;
-        match promoted.as_deref() {
-            Some(bytes) => self
-                .worktree
-                .write_file(&path, bytes)
-                .map_err(LaneFsError::Io)?,
-            None => self.worktree.remove_file(&path).map_err(LaneFsError::Io)?,
-        }
+        self.apply_promoted_files(&[(path, promoted)])?;
         self.repo = draft;
-        Ok(promoted)
+        Ok(())
     }
 
-    pub(crate) fn promote_lane(&mut self, lane: &str) -> Result<Vec<FilePath>, LaneFsError> {
-        let paths = self
-            .repo
-            .overlay_paths(lane)
-            .map_err(LaneFsError::Lane)?
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let bases = paths
+    fn apply_promoted_files(
+        &mut self,
+        promoted: &[(FilePath, Option<Vec<u8>>)],
+    ) -> Result<(), LaneFsError> {
+        let mut deletes = promoted
             .iter()
-            .map(|path| {
-                self.worktree
-                    .read_file(path)
-                    .map(|base| (path.clone(), base))
-                    .map_err(LaneFsError::Io)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut draft = self.repo.clone();
-        let promoted = draft.promote_lane(lane, bases).map_err(LaneFsError::Lane)?;
-        for file in &promoted {
-            match file.bytes.as_deref() {
-                Some(bytes) => self
-                    .worktree
-                    .write_file(&file.path, bytes)
-                    .map_err(LaneFsError::Io)?,
-                None => self
-                    .worktree
-                    .remove_file(&file.path)
-                    .map_err(LaneFsError::Io)?,
-            }
+            .filter_map(|(path, bytes)| bytes.is_none().then_some(path.as_str()))
+            .collect::<Vec<_>>();
+        deletes.sort_by(|left, right| {
+            path_depth(right)
+                .cmp(&path_depth(left))
+                .then_with(|| right.cmp(left))
+        });
+        for path in deletes {
+            self.worktree.remove_file(path).map_err(LaneFsError::Io)?;
         }
-        self.repo = draft;
-        Ok(promoted.into_iter().map(|file| file.path).collect())
+
+        let mut writes = promoted
+            .iter()
+            .filter_map(|(path, bytes)| bytes.as_deref().map(|bytes| (path.as_str(), bytes)))
+            .collect::<Vec<_>>();
+        writes.sort_by(|(left, _), (right, _)| {
+            path_depth(left)
+                .cmp(&path_depth(right))
+                .then_with(|| left.cmp(right))
+        });
+        for (path, bytes) in writes {
+            self.worktree
+                .write_file(path, bytes)
+                .map_err(LaneFsError::Io)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -373,6 +406,10 @@ fn child_path(parent: &str, child: &str) -> FilePath {
     } else {
         format!("{parent}/{child}")
     }
+}
+
+fn path_depth(path: &str) -> usize {
+    path.split('/').filter(|part| !part.is_empty()).count()
 }
 
 #[derive(Debug)]
