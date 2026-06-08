@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use similar::TextDiff;
 
 use crate::storage::{RepoLock, acquire_repo_lock, load_repo, persist_repo};
-use crate::vfs::{FileWorktree, LaneFs, LaneFsError};
+use crate::vfs::{FileWorktree, LaneFileChange, LaneFileChangeStatus, LaneFs, LaneFsError};
 use crate::{FilePath, LaneOpSummary, LaneRepo};
 
 const STORAGE_PATH: &str = ".lane/repo.lane";
@@ -620,28 +620,9 @@ fn change_for_path(
     lane: &str,
     path: impl Into<String>,
 ) -> CliResult<Option<ChangeOutput>> {
-    let path = path.into();
-    let base = fs.base_file(&path)?;
-    let lane_bytes = fs.read_file(lane, &path)?;
-    if base == lane_bytes {
-        return Ok(None);
-    }
-    let status = match (&base, &lane_bytes) {
-        (None, Some(_)) => ChangeStatus::Created,
-        (Some(_), None) => ChangeStatus::Deleted,
-        (Some(_), Some(_)) => ChangeStatus::Modified,
-        (None, None) => return Ok(None),
-    };
-    let ops = fs.change_ops(lane, &path)?;
-    Ok(Some(ChangeOutput {
-        path,
-        status,
-        base_size: base.as_ref().map(Vec::len),
-        lane_size: lane_bytes.as_ref().map(Vec::len),
-        ops,
-        base,
-        lane: lane_bytes,
-    }))
+    fs.change_for_path(lane, path)
+        .map(|change| change.map(ChangeOutput::from))
+        .map_err(CliError::from)
 }
 
 fn print_diff(lane: &str, change: &ChangeOutput) {
@@ -966,6 +947,30 @@ enum ChangeStatus {
     Created,
     Modified,
     Deleted,
+}
+
+impl From<LaneFileChangeStatus> for ChangeStatus {
+    fn from(status: LaneFileChangeStatus) -> Self {
+        match status {
+            LaneFileChangeStatus::Created => Self::Created,
+            LaneFileChangeStatus::Modified => Self::Modified,
+            LaneFileChangeStatus::Deleted => Self::Deleted,
+        }
+    }
+}
+
+impl From<LaneFileChange> for ChangeOutput {
+    fn from(change: LaneFileChange) -> Self {
+        Self {
+            path: change.path,
+            status: change.status.into(),
+            base_size: change.base_size,
+            lane_size: change.lane_size,
+            ops: change.ops,
+            base: change.base_bytes,
+            lane: change.lane_bytes,
+        }
+    }
 }
 
 #[derive(Serialize)]

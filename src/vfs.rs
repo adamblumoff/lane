@@ -20,6 +20,24 @@ pub(crate) enum DirEntryKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LaneFileChange {
+    pub(crate) path: FilePath,
+    pub(crate) status: LaneFileChangeStatus,
+    pub(crate) base_size: Option<usize>,
+    pub(crate) lane_size: Option<usize>,
+    pub(crate) ops: Vec<LaneOpSummary>,
+    pub(crate) base_bytes: Option<Vec<u8>>,
+    pub(crate) lane_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaneFileChangeStatus {
+    Created,
+    Modified,
+    Deleted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FileWorktree {
     root_path: PathBuf,
 }
@@ -120,11 +138,6 @@ impl LaneFs {
         &self.repo
     }
 
-    pub(crate) fn base_file(&self, path: &str) -> Result<Option<Vec<u8>>, LaneFsError> {
-        let path = normalize_repo_path(path)?;
-        self.worktree.read_file(&path).map_err(LaneFsError::Io)
-    }
-
     pub(crate) fn changed_paths(&self, lane: &str) -> Result<Vec<FilePath>, LaneFsError> {
         self.repo
             .overlay_paths(lane)
@@ -132,16 +145,41 @@ impl LaneFs {
             .map(|paths| paths.into_iter().map(str::to_owned).collect())
     }
 
-    pub(crate) fn change_ops(
+    pub(crate) fn change_for_path(
         &self,
         lane: &str,
-        path: &str,
-    ) -> Result<Vec<LaneOpSummary>, LaneFsError> {
-        let path = normalize_repo_path(path)?;
+        path: impl Into<String>,
+    ) -> Result<Option<LaneFileChange>, LaneFsError> {
+        let path = normalize_repo_path(&path.into())?;
         let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
-        self.repo
+        let lane_bytes = self
+            .repo
+            .read_path(&path, lane, base.as_deref())
+            .map_err(LaneFsError::Lane)?;
+        if base == lane_bytes {
+            return Ok(None);
+        }
+
+        let status = match (&base, &lane_bytes) {
+            (None, Some(_)) => LaneFileChangeStatus::Created,
+            (Some(_), None) => LaneFileChangeStatus::Deleted,
+            (Some(_), Some(_)) => LaneFileChangeStatus::Modified,
+            (None, None) => return Ok(None),
+        };
+        let ops = self
+            .repo
             .change_ops(&path, lane, base.as_deref())
-            .map_err(LaneFsError::Lane)
+            .map_err(LaneFsError::Lane)?;
+
+        Ok(Some(LaneFileChange {
+            path,
+            status,
+            base_size: base.as_ref().map(Vec::len),
+            lane_size: lane_bytes.as_ref().map(Vec::len),
+            ops,
+            base_bytes: base,
+            lane_bytes,
+        }))
     }
 
     pub(crate) fn op_detail(

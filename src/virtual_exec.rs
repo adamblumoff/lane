@@ -24,7 +24,9 @@ use winfsp_wrs::{
 };
 
 use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
-use crate::vfs::{DirEntryKind, FileWorktree, LaneFs, LaneFsError};
+use crate::vfs::{
+    DirEntryKind, FileWorktree, LaneFileChange, LaneFileChangeStatus, LaneFs, LaneFsError,
+};
 use crate::{FilePath, LaneError, LaneExecState, LaneOpSummary};
 
 const STORAGE_PATH: &str = ".lane/repo.lane";
@@ -1370,30 +1372,9 @@ fn change_for_path(
     lane: &str,
     path: impl Into<String>,
 ) -> Result<Option<VirtualChangeOutput>, i32> {
-    let path = path.into();
-    let base = fs.base_file(&path).map_err(status_from_lane_fs_error)?;
-    let lane_bytes = fs
-        .read_file(lane, &path)
-        .map_err(status_from_lane_fs_error)?;
-    if base == lane_bytes {
-        return Ok(None);
-    }
-    let status = match (&base, &lane_bytes) {
-        (None, Some(_)) => VirtualChangeStatus::Created,
-        (Some(_), None) => VirtualChangeStatus::Deleted,
-        (Some(_), Some(_)) => VirtualChangeStatus::Modified,
-        (None, None) => return Ok(None),
-    };
-    let ops = fs
-        .change_ops(lane, &path)
-        .map_err(status_from_lane_fs_error)?;
-    Ok(Some(VirtualChangeOutput {
-        path,
-        status,
-        base_size: base.as_ref().map(Vec::len),
-        lane_size: lane_bytes.as_ref().map(Vec::len),
-        ops,
-    }))
+    fs.change_for_path(lane, path)
+        .map(|change| change.map(VirtualChangeOutput::from))
+        .map_err(status_from_lane_fs_error)
 }
 
 fn status_from_lane_fs_error(error: LaneFsError) -> i32 {
@@ -1516,6 +1497,28 @@ enum VirtualChangeStatus {
     Created,
     Modified,
     Deleted,
+}
+
+impl From<LaneFileChangeStatus> for VirtualChangeStatus {
+    fn from(status: LaneFileChangeStatus) -> Self {
+        match status {
+            LaneFileChangeStatus::Created => Self::Created,
+            LaneFileChangeStatus::Modified => Self::Modified,
+            LaneFileChangeStatus::Deleted => Self::Deleted,
+        }
+    }
+}
+
+impl From<LaneFileChange> for VirtualChangeOutput {
+    fn from(change: LaneFileChange) -> Self {
+        Self {
+            path: change.path,
+            status: change.status.into(),
+            base_size: change.base_size,
+            lane_size: change.lane_size,
+            ops: change.ops,
+        }
+    }
 }
 
 #[derive(Debug)]
