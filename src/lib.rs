@@ -50,12 +50,6 @@ pub(crate) struct LaneTextPreview {
     pub(crate) truncated: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PromotedFile {
-    pub(crate) path: FilePath,
-    pub(crate) bytes: Option<Vec<u8>>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct LaneOpSummary {
     pub(crate) op_id: String,
@@ -121,7 +115,6 @@ struct FileOp {
 pub(crate) enum LaneError {
     ReservedLane(LaneId),
     LaneMissing(LaneId),
-    BaseMissing { path: FilePath },
     BaseChanged { path: FilePath },
     OperationOutOfBounds { path: FilePath },
     OperationConflict { path: FilePath },
@@ -258,24 +251,6 @@ impl LaneRepo {
         self.replace_path(path, lane, base, None)
     }
 
-    pub(crate) fn promote_path(
-        &mut self,
-        path: &str,
-        lane: &str,
-        base: Option<&[u8]>,
-    ) -> Result<Option<Vec<u8>>, LaneError> {
-        self.ensure_lane(lane)?;
-        let Some(file) = self.files.get_mut(path) else {
-            return Ok(base.map(<[u8]>::to_vec));
-        };
-
-        let promoted = file.promote(path, lane, base)?;
-        if file.is_empty() {
-            self.files.remove(path);
-        }
-        Ok(promoted)
-    }
-
     pub(crate) fn promote_ops_path(
         &mut self,
         path: &str,
@@ -318,46 +293,6 @@ impl LaneRepo {
         if file.is_empty() {
             self.files.remove(path);
         }
-        Ok(promoted)
-    }
-
-    pub(crate) fn promote_lane(
-        &mut self,
-        lane: &str,
-        bases: impl IntoIterator<Item = (FilePath, Option<Vec<u8>>)>,
-    ) -> Result<Vec<PromotedFile>, LaneError> {
-        let base_by_path: BTreeMap<_, _> = bases.into_iter().collect();
-        let mut changed_bases = Vec::new();
-        for path in self.overlay_paths(lane)? {
-            let base = base_by_path
-                .get(path)
-                .ok_or_else(|| LaneError::BaseMissing {
-                    path: path.to_owned(),
-                })?;
-            if self.read_path(path, lane, base.as_deref())? != *base {
-                changed_bases.push((path.to_owned(), base.clone()));
-            }
-        }
-        self.promote_paths(lane, changed_bases)
-    }
-
-    fn promote_paths(
-        &mut self,
-        lane: &str,
-        bases: impl IntoIterator<Item = (FilePath, Option<Vec<u8>>)>,
-    ) -> Result<Vec<PromotedFile>, LaneError> {
-        self.ensure_lane(lane)?;
-        let mut draft = self.clone();
-        let mut promoted = Vec::new();
-
-        for (path, base) in bases {
-            promoted.push(PromotedFile {
-                bytes: draft.promote_path(&path, lane, base.as_deref())?,
-                path,
-            });
-        }
-
-        *self = draft;
         Ok(promoted)
     }
 

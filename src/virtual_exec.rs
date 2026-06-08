@@ -1406,7 +1406,7 @@ fn status_from_lane_fs_error(error: LaneFsError) -> i32 {
 
 fn status_from_lane_error(error: LaneError) -> i32 {
     match error {
-        LaneError::LaneMissing(_) | LaneError::BaseMissing { .. } => STATUS_OBJECT_NAME_NOT_FOUND,
+        LaneError::LaneMissing(_) => STATUS_OBJECT_NAME_NOT_FOUND,
         LaneError::BaseChanged { .. } => STATUS_ACCESS_DENIED,
         LaneError::ReservedLane(_) => STATUS_INVALID_PARAMETER,
         LaneError::OperationOutOfBounds { .. }
