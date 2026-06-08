@@ -190,7 +190,7 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
                 continue;
             }
             if !expected_last_exec.contains(file_name) {
-                report.errors.push(format!(
+                report.warnings.push(format!(
                     "last_exec file {} does not belong to a manifest lane",
                     path.display()
                 ));
@@ -835,6 +835,29 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| error.contains("last_exec file"))
+        );
+    }
+
+    #[test]
+    fn orphan_last_exec_is_warning_not_error() {
+        let temp = TempStorage::new();
+        let repo = repo_with_agent_file();
+        persist_repo(temp.path(), &repo).unwrap();
+        fs::create_dir_all(temp.path().join("last_exec")).unwrap();
+        fs::write(last_exec_path(temp.path(), "agent-b"), b"not json").unwrap();
+
+        let loaded = load_repo(temp.path()).unwrap().unwrap();
+        assert!(loaded.last_exec("agent-a").unwrap().is_none());
+
+        let report = doctor_storage(temp.path()).unwrap();
+        assert!(report.is_healthy());
+        assert_eq!(report.last_exec_files, 1);
+        assert!(report.errors.is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("does not belong to a manifest lane"))
         );
     }
 

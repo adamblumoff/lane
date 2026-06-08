@@ -1644,6 +1644,29 @@ fn cli_discard_prunes_last_exec_metadata_for_removed_lane() {
 }
 
 #[test]
+fn cli_doctor_warns_for_orphan_last_exec_without_failing() {
+    let repo = repo_with_agent_exec();
+    repo.run_json(["discard", "agent-a"]);
+    fs::create_dir_all(repo.path().join(".lane/last_exec")).unwrap();
+    repo.write(".lane/last_exec/agent-a.json", b"not json");
+
+    let doctor = repo.run_json(["doctor"]);
+    assert_eq!(doctor["healthy"], true);
+    assert_eq!(doctor["report"]["last_exec_files"], 1);
+    assert!(doctor["report"]["errors"].as_array().unwrap().is_empty());
+    assert!(
+        doctor["report"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .unwrap()
+                .contains("does not belong to a manifest lane"))
+    );
+}
+
+#[test]
 fn cli_doctor_reports_corrupt_repo_manifest_shape() {
     let repo = repo_with_agent_exec();
     fs::write(repo.path().join(".lane/repo.json"), b"not json").unwrap();
