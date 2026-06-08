@@ -74,7 +74,7 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
     let bytes = match fs::read(&manifest_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            report.blobs_present = count_present_blobs(storage_root)?;
+            report_blob_inventory(storage_root, &BTreeSet::new(), &mut report)?;
             report.last_exec_files = count_json_files(&storage_root.join("last_exec"))?;
             return Ok(report);
         }
@@ -89,7 +89,7 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
                 "manifest {} is invalid JSON: {error}",
                 manifest_path.display()
             ));
-            report.blobs_present = count_present_blobs(storage_root)?;
+            report_blob_inventory(storage_root, &BTreeSet::new(), &mut report)?;
             report.last_exec_files = count_json_files(&storage_root.join("last_exec"))?;
             return Ok(report);
         }
@@ -201,7 +201,7 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
         }
     }
 
-    report.blobs_present = count_present_blobs(storage_root)?;
+    report_blob_inventory(storage_root, &referenced_blobs, &mut report)?;
     for blob in referenced_blobs {
         if !blob_path(storage_root, &blob)?.exists() {
             report
@@ -222,7 +222,9 @@ pub(crate) struct StorageDoctorReport {
     pub(crate) ops: usize,
     pub(crate) blobs_referenced: usize,
     pub(crate) blobs_present: usize,
+    pub(crate) blobs_unreferenced: usize,
     pub(crate) last_exec_files: usize,
+    pub(crate) warnings: Vec<String>,
     pub(crate) errors: Vec<String>,
 }
 
@@ -495,9 +497,61 @@ fn encode_path_component(value: &str) -> String {
     encoded
 }
 
+#[cfg(test)]
 fn count_present_blobs(storage_root: &Path) -> io::Result<usize> {
     let dir = storage_root.join("blobs").join("sha256");
     count_files(&dir)
+}
+
+fn report_blob_inventory(
+    storage_root: &Path,
+    referenced_blobs: &BTreeSet<String>,
+    report: &mut StorageDoctorReport,
+) -> io::Result<()> {
+    let present_blobs = present_blob_references(storage_root, report)?;
+    for blob in present_blobs.difference(referenced_blobs) {
+        report.blobs_unreferenced += 1;
+        report
+            .warnings
+            .push(format!("blob {blob} is not referenced by repo.json"));
+    }
+    Ok(())
+}
+
+fn present_blob_references(
+    storage_root: &Path,
+    report: &mut StorageDoctorReport,
+) -> io::Result<BTreeSet<String>> {
+    let dir = storage_root.join("blobs").join("sha256");
+    if !dir.exists() {
+        return Ok(BTreeSet::new());
+    }
+    let mut blobs = BTreeSet::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        report.blobs_present += 1;
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            report
+                .warnings
+                .push(format!("blob file {} has a non-UTF-8 name", path.display()));
+            continue;
+        };
+        let reference = format!("sha256/{file_name}");
+        match validate_blob_reference(&reference) {
+            Ok(()) => {
+                blobs.insert(reference);
+            }
+            Err(error) => report.warnings.push(format!(
+                "blob file {} is not a valid sha256 blob name: {error}",
+                path.display()
+            )),
+        }
+    }
+    Ok(blobs)
 }
 
 fn count_json_files(dir: &Path) -> io::Result<usize> {
@@ -515,6 +569,7 @@ fn count_json_files(dir: &Path) -> io::Result<usize> {
     Ok(count)
 }
 
+#[cfg(test)]
 fn count_files(dir: &Path) -> io::Result<usize> {
     if !dir.exists() {
         return Ok(0);
@@ -847,6 +902,34 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| error.contains("is unreadable"))
+        );
+    }
+
+    #[test]
+    fn unreferenced_blob_is_reported_as_warning_not_error() {
+        let temp = TempStorage::new();
+        let mut repo = LaneRepo::new();
+        repo.create_lane("agent-a").unwrap();
+        repo.replace_path("src/new.ts", "agent-a", None, Some(b"new\n".to_vec()))
+            .unwrap();
+        persist_repo(temp.path(), &repo).unwrap();
+        persist_blob(
+            temp.path(),
+            "sha256/0000000000000000000000000000000000000000000000000000000000000000",
+            b"stale",
+        )
+        .unwrap();
+
+        let report = doctor_storage(temp.path()).unwrap();
+        assert!(report.is_healthy());
+        assert_eq!(report.blobs_referenced, 1);
+        assert_eq!(report.blobs_unreferenced, 1);
+        assert!(report.errors.is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("is not referenced by repo.json"))
         );
     }
 

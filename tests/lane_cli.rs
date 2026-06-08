@@ -1639,6 +1639,103 @@ fn cli_review_ignores_corrupt_last_exec_but_doctor_reports_it() {
 }
 
 #[test]
+fn cli_doctor_reports_corrupt_repo_manifest_shape() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;\n");
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
+    ]);
+    fs::write(repo.path().join(".lane/repo.json"), b"not json").unwrap();
+
+    let output = repo.run_unchecked(&["doctor"]);
+    assert!(!output.status.success());
+    let doctor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor["healthy"], false);
+    assert_eq!(doctor["report"]["manifest_present"], true);
+    assert_eq!(doctor["report"]["blobs_present"].as_u64().unwrap(), 1);
+    assert!(
+        doctor["report"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("invalid JSON"))
+    );
+}
+
+#[test]
+fn cli_doctor_reports_missing_blob_shape() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;\n");
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
+    ]);
+    let missing_blob = first_blob_path(&repo);
+    fs::remove_file(&missing_blob).unwrap();
+
+    let output = repo.run_unchecked(&["doctor"]);
+    assert!(!output.status.success());
+    let doctor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor["healthy"], false);
+    assert_eq!(doctor["report"]["blobs_referenced"], 1);
+    assert_eq!(doctor["report"]["blobs_present"], 0);
+    assert_eq!(doctor["report"]["blobs_unreferenced"], 0);
+    assert!(
+        doctor["report"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("is unreadable"))
+    );
+}
+
+#[test]
+fn cli_doctor_reports_unreferenced_blob_without_failing() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;\n");
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
+    ]);
+    repo.write(
+        ".lane/blobs/sha256/0000000000000000000000000000000000000000000000000000000000000000",
+        b"stale",
+    );
+
+    let doctor = repo.run_json(["doctor"]);
+    assert_eq!(doctor["healthy"], true);
+    assert_eq!(doctor["report"]["blobs_referenced"], 1);
+    assert_eq!(doctor["report"]["blobs_unreferenced"], 1);
+    assert!(doctor["report"]["errors"].as_array().unwrap().is_empty());
+    assert!(
+        doctor["report"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .unwrap()
+                .contains("is not referenced by repo.json"))
+    );
+}
+
+#[test]
 fn cli_exec_keeps_git_metadata_read_only_for_agent_processes() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;\n");
@@ -1842,6 +1939,15 @@ impl Drop for TempRepo {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn first_blob_path(repo: &TempRepo) -> PathBuf {
+    fs::read_dir(repo.path().join(".lane/blobs/sha256"))
+        .unwrap()
+        .next()
+        .expect("test expected one blob file")
+        .unwrap()
+        .path()
 }
 
 fn run_lane_exec(repo_root: &Path, lane: &str, script: &str) -> Output {
