@@ -51,6 +51,18 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
         b"export const mode = 'base';\n"
     );
     assert!(!repo.path().join("src/created.ts").exists());
+    assert!(repo.path().join(".lane/repo.json").exists());
+    assert!(!repo.path().join(".lane/repo.lane").exists());
+    assert!(repo.path().join(".lane/last_exec/agent-a.json").exists());
+    assert!(
+        fs::read_dir(repo.path().join(".lane/blobs/sha256"))
+            .unwrap()
+            .next()
+            .is_some()
+    );
+    let doctor = repo.run_json(["doctor"]);
+    assert_eq!(doctor["healthy"], true);
+    assert!(doctor["report"]["errors"].as_array().unwrap().is_empty());
 
     let review = repo.run_json(["review", "agent-a"]);
     assert_eq!(review_change_statuses(&review, "agent-a"), {
@@ -1417,7 +1429,7 @@ fn cli_exec_buffers_chunked_writes_until_worker_finishes() {
     assert_eq!(result["exit_code"], 0);
     assert_eq!(result["worker_error"], Value::Null);
     assert_eq!(string_array(&result["changed_paths"]), vec!["src/big.bin"]);
-    assert_eq!(result["timings"]["storage_write_ops"], 2);
+    assert_eq!(result["timings"]["storage_write_ops"], 3);
     assert_eq!(change_statuses(&result), {
         let mut expected = BTreeMap::new();
         expected.insert("src/big.bin".to_owned(), "created".to_owned());
@@ -1591,6 +1603,166 @@ fn cli_exec_runs_agent_like_process_with_git_view_and_atomic_save() {
 }
 
 #[test]
+fn cli_review_ignores_corrupt_last_exec_but_doctor_reports_it() {
+    let repo = repo_with_agent_exec();
+    fs::write(
+        repo.path().join(".lane/last_exec/agent-a.json"),
+        b"not json",
+    )
+    .unwrap();
+
+    let review = repo.run_json(["review", "agent-a"]);
+    assert_eq!(review["lanes"][0]["last_exec"], Value::Null);
+    assert_eq!(review["summary"]["changed_paths"], 1);
+
+    let doctor_output = repo.run_unchecked(&["doctor"]);
+    assert!(!doctor_output.status.success());
+    let doctor: Value = serde_json::from_slice(&doctor_output.stdout).unwrap();
+    assert_eq!(doctor["healthy"], false);
+    assert!(
+        doctor["report"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("last_exec file"))
+    );
+}
+
+#[test]
+fn cli_discard_prunes_last_exec_metadata_for_removed_lane() {
+    let repo = repo_with_agent_exec();
+    assert!(repo.path().join(".lane/last_exec/agent-a.json").exists());
+
+    let discarded = repo.run_json(["discard", "agent-a"]);
+    assert_eq!(discarded["removed"], true);
+    assert!(!repo.path().join(".lane/last_exec/agent-a.json").exists());
+
+    let doctor = repo.run_json(["doctor"]);
+    assert_eq!(doctor["healthy"], true);
+    assert_eq!(doctor["report"]["last_exec_files"], 0);
+    assert!(doctor["report"]["errors"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn cli_doctor_warns_for_orphan_last_exec_without_failing() {
+    let repo = repo_with_agent_exec();
+    repo.run_json(["discard", "agent-a"]);
+    fs::create_dir_all(repo.path().join(".lane/last_exec")).unwrap();
+    repo.write(".lane/last_exec/agent-a.json", b"not json");
+
+    let doctor = repo.run_json(["doctor"]);
+    assert_eq!(doctor["healthy"], true);
+    assert_eq!(doctor["report"]["last_exec_files"], 1);
+    assert!(doctor["report"]["errors"].as_array().unwrap().is_empty());
+    assert!(
+        doctor["report"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .unwrap()
+                .contains("does not belong to a manifest lane"))
+    );
+}
+
+#[test]
+fn cli_doctor_reports_corrupt_repo_manifest_shape() {
+    let repo = repo_with_agent_exec();
+    fs::write(repo.path().join(".lane/repo.json"), b"not json").unwrap();
+
+    let output = repo.run_unchecked(&["doctor"]);
+    assert!(!output.status.success());
+    let doctor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor["healthy"], false);
+    assert_eq!(doctor["report"]["manifest_present"], true);
+    assert_eq!(doctor["report"]["blobs_present"].as_u64().unwrap(), 1);
+    assert!(
+        doctor["report"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("invalid JSON"))
+    );
+}
+
+#[test]
+fn cli_doctor_reports_missing_blob_shape() {
+    let repo = repo_with_agent_exec();
+    let missing_blob = first_blob_path(&repo);
+    fs::remove_file(&missing_blob).unwrap();
+
+    let output = repo.run_unchecked(&["doctor"]);
+    assert!(!output.status.success());
+    let doctor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor["healthy"], false);
+    assert_eq!(doctor["report"]["blobs_referenced"], 1);
+    assert_eq!(doctor["report"]["blobs_present"], 0);
+    assert_eq!(doctor["report"]["blobs_unreferenced"], 0);
+    let errors = doctor["report"]["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("is unreadable"))
+    );
+    assert!(
+        !errors
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("referenced blob"))
+    );
+}
+
+#[test]
+fn cli_doctor_rejects_reserved_manifest_lane() {
+    let repo = repo_with_agent_exec();
+    let manifest_path = repo.path().join(".lane/repo.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["lanes"] = serde_json::json!(["base", "agent-a"]);
+    fs::write(manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+    let output = repo.run_unchecked(&["doctor"]);
+    assert!(!output.status.success());
+    let doctor: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor["healthy"], false);
+    assert!(
+        doctor["report"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("manifest lane \"base\" is invalid"))
+    );
+}
+
+#[test]
+fn cli_doctor_reports_unreferenced_blob_without_failing() {
+    let repo = repo_with_agent_exec();
+    repo.write(
+        ".lane/blobs/sha256/0000000000000000000000000000000000000000000000000000000000000000",
+        b"stale",
+    );
+
+    let doctor = repo.run_json(["doctor"]);
+    assert_eq!(doctor["healthy"], true);
+    assert_eq!(doctor["report"]["blobs_referenced"], 1);
+    assert_eq!(doctor["report"]["blobs_unreferenced"], 1);
+    assert!(doctor["report"]["errors"].as_array().unwrap().is_empty());
+    assert!(
+        doctor["report"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .unwrap()
+                .contains("is not referenced by repo.json"))
+    );
+}
+
+#[test]
 fn cli_exec_keeps_git_metadata_read_only_for_agent_processes() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;\n");
@@ -1631,7 +1803,7 @@ fn cli_exec_rejects_incompatible_pre_alpha_lane_storage_without_reset() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("invalid lane storage"),
+        String::from_utf8_lossy(&output.stderr).contains("legacy lane storage"),
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1794,6 +1966,30 @@ impl Drop for TempRepo {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn repo_with_agent_exec() -> TempRepo {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;\n");
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
+    ]);
+    repo
+}
+
+fn first_blob_path(repo: &TempRepo) -> PathBuf {
+    fs::read_dir(repo.path().join(".lane/blobs/sha256"))
+        .unwrap()
+        .next()
+        .expect("test expected one blob file")
+        .unwrap()
+        .path()
 }
 
 fn run_lane_exec(repo_root: &Path, lane: &str, script: &str) -> Output {

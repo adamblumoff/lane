@@ -23,13 +23,13 @@ use winfsp_wrs::{
     SecurityDescriptor, U16CStr, U16CString, VolumeInfo, WriteMode, filetime_now, u16cstr,
 };
 
-use crate::storage::{acquire_repo_lock, load_repo, persist_repo};
+use crate::storage::{acquire_repo_lock, load_repo, persist_last_exec, persist_repo};
 use crate::vfs::{
     DirEntryKind, FileWorktree, LaneFileChange, LaneFileChangeStatus, LaneFs, LaneFsError,
 };
 use crate::{FilePath, LaneError, LaneExecState, LaneOpSummary};
 
-const STORAGE_PATH: &str = ".lane/repo.lane";
+const STORAGE_PATH: &str = ".lane";
 
 pub(crate) fn run_virtual_lane(
     repo_root: &Path,
@@ -1063,13 +1063,25 @@ impl VirtualLaneState {
     }
 
     fn record_last_exec(&self, exec_state: LaneExecState) -> Result<(), VirtualExecError> {
-        let metrics = VirtualFsMetrics::default();
-        with_lane_fs_write(&self.repo_root, &self.storage_path, &metrics, |latest| {
-            latest
-                .record_last_exec(&self.lane, exec_state)
-                .map_err(status_from_lane_fs_error)?;
-            Ok(())
-        })
+        let wait_start = Instant::now();
+        let lock = acquire_repo_lock(&self.storage_path).map_err(|error| {
+            VirtualExecError::message(format!(
+                "failed to acquire lane storage lock {}: {error}",
+                self.storage_path.display()
+            ))
+        })?;
+        let wait_ms = elapsed_ms(wait_start);
+        let held_start = Instant::now();
+        persist_last_exec(&self.storage_path, &self.lane, &exec_state).map_err(|error| {
+            VirtualExecError::message(format!(
+                "failed to persist last_exec metadata {}: {error}",
+                self.storage_path.display()
+            ))
+        })?;
+        let held_ms = elapsed_ms(held_start);
+        drop(lock);
+        self.metrics.record_write(wait_ms, held_ms);
+        Ok(())
     }
 
     fn projected_paths(&self) -> Result<Vec<FilePath>, VirtualExecError> {
