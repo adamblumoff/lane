@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::Serialize;
 
 use crate::storage::persist_bytes;
-use crate::{FilePath, LaneError, LaneExecState, LaneOpDetail, LaneOpSummary, LaneRepo};
+use crate::{FilePath, LaneError, LaneOpDetail, LaneOpSummary, LaneRepo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DirEntry {
@@ -204,16 +204,6 @@ impl LaneFs {
 
     pub(crate) fn create_lane(&mut self, lane: impl Into<String>) -> Result<bool, LaneFsError> {
         self.repo.create_lane(lane).map_err(LaneFsError::Lane)
-    }
-
-    pub(crate) fn record_last_exec(
-        &mut self,
-        lane: &str,
-        state: LaneExecState,
-    ) -> Result<(), LaneFsError> {
-        self.repo
-            .record_last_exec(lane, state)
-            .map_err(LaneFsError::Lane)
     }
 
     pub(crate) fn read_file(&self, lane: &str, path: &str) -> Result<Option<Vec<u8>>, LaneFsError> {

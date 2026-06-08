@@ -215,7 +215,7 @@ fn created_and_deleted_paths_round_trip_through_storage() {
         .unwrap();
     repo.delete_path(PATH, "agent-b", Some(BASE)).unwrap();
 
-    let decoded = LaneRepo::from_bytes(&repo.to_bytes()).unwrap();
+    let decoded = round_trip_repo(&repo);
 
     assert_eq!(
         decoded.read_path("src/new.ts", "agent-a", None).unwrap(),
@@ -233,7 +233,7 @@ fn repo_state_round_trips() {
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
         .unwrap();
 
-    let decoded = LaneRepo::from_bytes(&repo.to_bytes()).unwrap();
+    let decoded = round_trip_repo(&repo);
 
     assert_eq!(decoded.read(PATH, "base", BASE).unwrap(), BASE);
     assert_eq!(
@@ -243,20 +243,18 @@ fn repo_state_round_trips() {
 }
 
 #[test]
-fn repo_state_serializes_v6_sha256_base_fingerprint() {
+fn repo_state_snapshot_uses_sha256_base_fingerprint() {
     let mut repo = seeded_repo();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
         .unwrap();
 
-    let encoded = repo.to_bytes();
     let mut expected = [0; 32];
     expected.copy_from_slice(&Sha256::digest(BASE));
+    let snapshot = repo.storage_snapshot();
 
-    assert!(encoded.starts_with(b"LANEREPO\0\0\0\x06"));
-    assert!(
-        encoded
-            .windows(expected.len())
-            .any(|window| window == expected.as_slice())
+    assert_eq!(
+        snapshot.files.get(PATH).unwrap().base,
+        super::BaseStorageSnapshot::Present(expected)
     );
 }
 
@@ -275,7 +273,7 @@ fn repo_state_round_trips_last_exec_metadata() {
     )
     .unwrap();
 
-    let decoded = LaneRepo::from_bytes(&repo.to_bytes()).unwrap();
+    let decoded = round_trip_repo(&repo);
     let last_exec = decoded.last_exec("agent-a").unwrap().unwrap();
 
     assert_eq!(last_exec.exit_code, Some(7));
@@ -612,6 +610,10 @@ fn seeded_repo() -> LaneRepo {
     repo.create_lane("agent-a").unwrap();
     repo.create_lane("agent-b").unwrap();
     repo
+}
+
+fn round_trip_repo(repo: &LaneRepo) -> LaneRepo {
+    LaneRepo::from_storage_snapshot(repo.storage_snapshot()).unwrap()
 }
 
 fn repo_with_same_position_inserts(base: &[u8]) -> LaneRepo {

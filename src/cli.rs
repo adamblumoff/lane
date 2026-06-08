@@ -11,11 +11,11 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use similar::TextDiff;
 
-use crate::storage::{RepoLock, acquire_repo_lock, load_repo, persist_repo};
+use crate::storage::{RepoLock, acquire_repo_lock, doctor_storage, load_repo, persist_repo};
 use crate::vfs::{FileWorktree, LaneFileChange, LaneFileChangeStatus, LaneFs, LaneFsError};
 use crate::{FilePath, LaneOpSummary, LaneRepo};
 
-const STORAGE_PATH: &str = ".lane/repo.lane";
+const STORAGE_PATH: &str = ".lane";
 
 type CliResult<T> = Result<T, CliError>;
 
@@ -71,6 +71,8 @@ enum Command {
     PromoteClean { lane: String },
     #[command(about = "Remove a lane and its private changes")]
     Discard { lane: String },
+    #[command(about = "Validate lane storage and report repairable state")]
+    Doctor,
 }
 
 pub fn run() -> CliResult<ExitCode> {
@@ -100,6 +102,7 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
             promote_clean(&repo_root, &lane).map(|()| ExitCode::SUCCESS)
         }
         Command::Discard { lane } => discard(&repo_root, &lane).map(|()| ExitCode::SUCCESS),
+        Command::Doctor => doctor(&repo_root),
     }
 }
 
@@ -154,6 +157,24 @@ fn review(repo_root: &Path, lane: Option<&str>) -> CliResult<()> {
     };
     print_json(&output)?;
     Ok(())
+}
+
+fn doctor(repo_root: &Path) -> CliResult<ExitCode> {
+    let storage_path = storage_path(repo_root);
+    let report = doctor_storage(&storage_path)?;
+    let healthy = report.is_healthy();
+    let output = DoctorOutput {
+        repo_root: path_label(repo_root),
+        storage_path: path_label(storage_path),
+        healthy,
+        report,
+    };
+    print_json(&output)?;
+    if healthy {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
+    }
 }
 
 fn show_op(repo_root: &Path, lane: &str, path: &str, op_id: &str) -> CliResult<()> {
@@ -776,6 +797,14 @@ struct ReviewOutput {
     summary: ReviewSummary,
     lanes: Vec<ReviewLaneSummary>,
     paths: Vec<ReviewPathOutput>,
+}
+
+#[derive(Serialize)]
+struct DoctorOutput {
+    repo_root: String,
+    storage_path: String,
+    healthy: bool,
+    report: crate::storage::StorageDoctorReport,
 }
 
 #[derive(Clone, Debug, Serialize)]

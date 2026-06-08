@@ -51,6 +51,18 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
         b"export const mode = 'base';\n"
     );
     assert!(!repo.path().join("src/created.ts").exists());
+    assert!(repo.path().join(".lane/repo.json").exists());
+    assert!(!repo.path().join(".lane/repo.lane").exists());
+    assert!(repo.path().join(".lane/last_exec/agent-a.json").exists());
+    assert!(
+        fs::read_dir(repo.path().join(".lane/blobs/sha256"))
+            .unwrap()
+            .next()
+            .is_some()
+    );
+    let doctor = repo.run_json(["doctor"]);
+    assert_eq!(doctor["healthy"], true);
+    assert!(doctor["report"]["errors"].as_array().unwrap().is_empty());
 
     let review = repo.run_json(["review", "agent-a"]);
     assert_eq!(review_change_statuses(&review, "agent-a"), {
@@ -1417,7 +1429,7 @@ fn cli_exec_buffers_chunked_writes_until_worker_finishes() {
     assert_eq!(result["exit_code"], 0);
     assert_eq!(result["worker_error"], Value::Null);
     assert_eq!(string_array(&result["changed_paths"]), vec!["src/big.bin"]);
-    assert_eq!(result["timings"]["storage_write_ops"], 2);
+    assert_eq!(result["timings"]["storage_write_ops"], 3);
     assert_eq!(change_statuses(&result), {
         let mut expected = BTreeMap::new();
         expected.insert("src/big.bin".to_owned(), "created".to_owned());
@@ -1591,6 +1603,42 @@ fn cli_exec_runs_agent_like_process_with_git_view_and_atomic_save() {
 }
 
 #[test]
+fn cli_review_ignores_corrupt_last_exec_but_doctor_reports_it() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;\n");
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
+    ]);
+    fs::write(
+        repo.path().join(".lane/last_exec/agent-a.json"),
+        b"not json",
+    )
+    .unwrap();
+
+    let review = repo.run_json(["review", "agent-a"]);
+    assert_eq!(review["lanes"][0]["last_exec"], Value::Null);
+    assert_eq!(review["summary"]["changed_paths"], 1);
+
+    let doctor_output = repo.run_unchecked(&["doctor"]);
+    assert!(!doctor_output.status.success());
+    let doctor: Value = serde_json::from_slice(&doctor_output.stdout).unwrap();
+    assert_eq!(doctor["healthy"], false);
+    assert!(
+        doctor["report"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("last_exec file"))
+    );
+}
+
+#[test]
 fn cli_exec_keeps_git_metadata_read_only_for_agent_processes() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;\n");
@@ -1631,7 +1679,7 @@ fn cli_exec_rejects_incompatible_pre_alpha_lane_storage_without_reset() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("invalid lane storage"),
+        String::from_utf8_lossy(&output.stderr).contains("legacy lane storage"),
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );

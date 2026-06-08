@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Range;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use similar::{Algorithm, DiffTag, capture_diff_slices};
 
@@ -21,12 +21,11 @@ mod repo_tests;
 pub(crate) type FilePath = String;
 pub(crate) type LaneId = String;
 
-const STORAGE_MAGIC: &[u8] = b"LANEREPO\0\0\0\x06";
 const BASE_FINGERPRINT_LEN: usize = 32;
 const EXEC_OUTPUT_PREVIEW_LIMIT: usize = 4096;
 const ORDER_ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-type BaseFingerprint = [u8; BASE_FINGERPRINT_LEN];
+pub(crate) type BaseFingerprint = [u8; BASE_FINGERPRINT_LEN];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LaneRepo {
@@ -35,7 +34,7 @@ pub(crate) struct LaneRepo {
     files: BTreeMap<FilePath, LaneFile>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct LaneExecState {
     pub(crate) exit_code: Option<i32>,
     pub(crate) worker_error: Option<String>,
@@ -44,7 +43,7 @@ pub(crate) struct LaneExecState {
     pub(crate) changed_paths: Vec<FilePath>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct LaneTextPreview {
     pub(crate) text: String,
     pub(crate) truncated: bool,
@@ -118,6 +117,40 @@ struct FileOp {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LaneRepoStorageSnapshot {
+    pub(crate) lanes: BTreeSet<LaneId>,
+    pub(crate) last_exec: BTreeMap<LaneId, LaneExecState>,
+    pub(crate) files: BTreeMap<FilePath, LaneFileStorageSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LaneFileStorageSnapshot {
+    pub(crate) base: BaseStorageSnapshot,
+    pub(crate) lanes: BTreeMap<LaneId, LaneEntryStorageSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BaseStorageSnapshot {
+    Present(BaseFingerprint),
+    Missing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LaneEntryStorageSnapshot {
+    Present(Vec<FileOpStorageSnapshot>),
+    Deleted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileOpStorageSnapshot {
+    pub(crate) id: u64,
+    pub(crate) base_start: u64,
+    pub(crate) base_len: u64,
+    pub(crate) order_key: String,
+    pub(crate) inserted: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LaneError {
     ReservedLane(LaneId),
     LaneMissing(LaneId),
@@ -156,6 +189,7 @@ impl LaneRepo {
         Ok(self.lanes.insert(lane))
     }
 
+    #[cfg(test)]
     pub(crate) fn record_last_exec(
         &mut self,
         lane: &str,
@@ -302,129 +336,35 @@ impl LaneRepo {
         Ok(promoted)
     }
 
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(STORAGE_MAGIC);
-
-        write_u64(&mut bytes, self.lanes.len() as u64);
-        for lane in &self.lanes {
-            write_bytes(&mut bytes, lane.as_bytes());
-            match self.last_exec.get(lane) {
-                Some(state) => {
-                    bytes.push(1);
-                    state.write_to(&mut bytes);
-                }
-                None => bytes.push(0),
-            }
+    pub(crate) fn storage_snapshot(&self) -> LaneRepoStorageSnapshot {
+        LaneRepoStorageSnapshot {
+            lanes: self.lanes.clone(),
+            last_exec: self.last_exec.clone(),
+            files: self
+                .files
+                .iter()
+                .map(|(path, file)| (path.clone(), file.storage_snapshot()))
+                .collect(),
         }
-
-        write_u64(&mut bytes, self.files.len() as u64);
-        for (path, file) in &self.files {
-            write_bytes(&mut bytes, path.as_bytes());
-            match file.base {
-                BaseState::Present(fingerprint) => {
-                    bytes.push(1);
-                    bytes.extend_from_slice(&fingerprint);
-                }
-                BaseState::Missing => {
-                    bytes.push(0);
-                }
-            }
-
-            write_u64(&mut bytes, file.lanes.len() as u64);
-            for (lane, entry) in &file.lanes {
-                write_bytes(&mut bytes, lane.as_bytes());
-                match entry {
-                    LaneEntry::Deleted => bytes.push(0),
-                    LaneEntry::Present(view) => {
-                        bytes.push(1);
-                        write_u64(&mut bytes, view.ops.len() as u64);
-                        for op in &view.ops {
-                            write_u64(&mut bytes, op.id);
-                            write_u64(&mut bytes, op.base_start);
-                            write_u64(&mut bytes, op.base_len);
-                            write_bytes(&mut bytes, op.order_key.as_bytes());
-                            write_bytes(&mut bytes, &op.inserted);
-                        }
-                    }
-                }
-            }
-        }
-
-        bytes
     }
 
-    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut cursor = Cursor::new(bytes);
-        cursor.expect(STORAGE_MAGIC)?;
-
-        let mut lanes = BTreeSet::new();
-        let mut last_exec = BTreeMap::new();
-        for _ in 0..cursor.read_u64()? {
-            let lane = read_string(&mut cursor)?;
-            let exec_state = match cursor.read_byte()? {
-                0 => None,
-                1 => Some(LaneExecState::read_from(&mut cursor)?),
-                tag => return Err(DecodeError::InvalidExecState(tag)),
-            };
-            lanes.insert(lane.clone());
-            if let Some(exec_state) = exec_state {
-                last_exec.insert(lane, exec_state);
-            }
-        }
-
-        let mut files = BTreeMap::new();
-        for _ in 0..cursor.read_u64()? {
-            let path = read_string(&mut cursor)?;
-            let base = match cursor.read_byte()? {
-                0 => BaseState::Missing,
-                1 => BaseState::Present(cursor.read_fingerprint()?),
-                tag => return Err(DecodeError::InvalidBase(tag)),
-            };
-
-            let mut overlays = BTreeMap::new();
-            for _ in 0..cursor.read_u64()? {
-                let lane = read_string(&mut cursor)?;
-                let entry = match cursor.read_byte()? {
-                    0 => LaneEntry::Deleted,
-                    1 => {
-                        let mut ops = Vec::new();
-                        for _ in 0..cursor.read_u64()? {
-                            ops.push(FileOp {
-                                id: cursor.read_u64()?,
-                                base_start: cursor.read_u64()?,
-                                base_len: cursor.read_u64()?,
-                                order_key: read_order_key(&mut cursor)?,
-                                inserted: cursor.read_bytes()?.to_vec(),
-                            });
-                        }
-                        LaneEntry::Present(LaneView {
-                            ops: normalize_ops_checked(ops)?,
-                        })
-                    }
-                    tag => return Err(DecodeError::InvalidEntry(tag)),
-                };
-                overlays.insert(lane, entry);
-            }
-
-            files.insert(
-                path,
-                LaneFile {
-                    base,
-                    lanes: overlays,
-                },
-            );
+    pub(crate) fn from_storage_snapshot(
+        snapshot: LaneRepoStorageSnapshot,
+    ) -> Result<Self, DecodeError> {
+        for lane in &snapshot.lanes {
+            ensure_user_lane(lane).map_err(|_| DecodeError::ReservedLane(lane.clone()))?;
         }
 
         let repo = Self {
-            lanes,
-            last_exec,
-            files,
+            lanes: snapshot.lanes,
+            last_exec: snapshot.last_exec,
+            files: snapshot
+                .files
+                .into_iter()
+                .map(|(path, file)| file.into_lane_file().map(|file| (path, file)))
+                .collect::<Result<_, _>>()?,
         };
         repo.validate()?;
-        if !cursor.is_finished() {
-            return Err(DecodeError::TrailingBytes);
-        }
         Ok(repo)
     }
 
@@ -470,35 +410,6 @@ impl LaneExecState {
             changed_paths,
         }
     }
-
-    fn write_to(&self, bytes: &mut Vec<u8>) {
-        write_option_i32(bytes, self.exit_code);
-        write_option_string(bytes, self.worker_error.as_deref());
-        self.stdout.write_to(bytes);
-        self.stderr.write_to(bytes);
-        write_u64(bytes, self.changed_paths.len() as u64);
-        for path in &self.changed_paths {
-            write_bytes(bytes, path.as_bytes());
-        }
-    }
-
-    fn read_from(cursor: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        let exit_code = read_option_i32(cursor)?;
-        let worker_error = read_option_string(cursor)?;
-        let stdout = LaneTextPreview::read_from(cursor)?;
-        let stderr = LaneTextPreview::read_from(cursor)?;
-        let mut changed_paths = Vec::new();
-        for _ in 0..cursor.read_u64()? {
-            changed_paths.push(read_string(cursor)?);
-        }
-        Ok(Self {
-            exit_code,
-            worker_error,
-            stdout,
-            stderr,
-            changed_paths,
-        })
-    }
 }
 
 impl LaneTextPreview {
@@ -521,17 +432,6 @@ impl LaneTextPreview {
             text: text[..end].to_owned(),
             truncated,
         }
-    }
-
-    fn write_to(&self, bytes: &mut Vec<u8>) {
-        write_bytes(bytes, self.text.as_bytes());
-        bytes.push(u8::from(self.truncated));
-    }
-
-    fn read_from(cursor: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        let text = read_string(cursor)?;
-        let truncated = read_bool(cursor)?;
-        Ok(Self { text, truncated })
     }
 }
 
@@ -943,21 +843,94 @@ impl LaneFile {
     }
 }
 
+impl LaneFile {
+    fn storage_snapshot(&self) -> LaneFileStorageSnapshot {
+        LaneFileStorageSnapshot {
+            base: match self.base {
+                BaseState::Present(fingerprint) => BaseStorageSnapshot::Present(fingerprint),
+                BaseState::Missing => BaseStorageSnapshot::Missing,
+            },
+            lanes: self
+                .lanes
+                .iter()
+                .map(|(lane, entry)| (lane.clone(), entry.storage_snapshot()))
+                .collect(),
+        }
+    }
+}
+
+impl LaneFileStorageSnapshot {
+    fn into_lane_file(self) -> Result<LaneFile, DecodeError> {
+        let file = LaneFile {
+            base: match self.base {
+                BaseStorageSnapshot::Present(fingerprint) => BaseState::Present(fingerprint),
+                BaseStorageSnapshot::Missing => BaseState::Missing,
+            },
+            lanes: self
+                .lanes
+                .into_iter()
+                .map(|(lane, entry)| entry.into_lane_entry().map(|entry| (lane, entry)))
+                .collect::<Result<_, _>>()?,
+        };
+        file.validate()?;
+        Ok(file)
+    }
+}
+
+impl LaneEntry {
+    fn storage_snapshot(&self) -> LaneEntryStorageSnapshot {
+        match self {
+            LaneEntry::Present(view) => LaneEntryStorageSnapshot::Present(
+                view.ops.iter().map(FileOp::storage_snapshot).collect(),
+            ),
+            LaneEntry::Deleted => LaneEntryStorageSnapshot::Deleted,
+        }
+    }
+}
+
+impl LaneEntryStorageSnapshot {
+    fn into_lane_entry(self) -> Result<LaneEntry, DecodeError> {
+        match self {
+            LaneEntryStorageSnapshot::Present(ops) => Ok(LaneEntry::Present(LaneView {
+                ops: normalize_ops_checked(
+                    ops.into_iter().map(FileOp::from_storage_snapshot).collect(),
+                )?,
+            })),
+            LaneEntryStorageSnapshot::Deleted => Ok(LaneEntry::Deleted),
+        }
+    }
+}
+
+impl FileOp {
+    fn storage_snapshot(&self) -> FileOpStorageSnapshot {
+        FileOpStorageSnapshot {
+            id: self.id,
+            base_start: self.base_start,
+            base_len: self.base_len,
+            order_key: self.order_key.clone(),
+            inserted: self.inserted.clone(),
+        }
+    }
+
+    fn from_storage_snapshot(snapshot: FileOpStorageSnapshot) -> Self {
+        Self {
+            id: snapshot.id,
+            base_start: snapshot.base_start,
+            base_len: snapshot.base_len,
+            order_key: snapshot.order_key,
+            inserted: snapshot.inserted,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DecodeError {
-    BadMagic,
-    UnexpectedEof,
-    InvalidUtf8,
-    InvalidBase(u8),
-    InvalidEntry(u8),
-    InvalidExecState(u8),
-    InvalidBool(u8),
     InvalidOrderKey,
     OperationConflict,
     OperationOutOfBounds,
     OverlayLaneMissing(LaneId),
     ExecStateLaneMissing(LaneId),
-    TrailingBytes,
+    ReservedLane(LaneId),
 }
 
 impl fmt::Display for DecodeError {
@@ -1406,138 +1379,6 @@ fn base_fingerprint(bytes: &[u8]) -> BaseFingerprint {
     let mut fingerprint = [0; BASE_FINGERPRINT_LEN];
     fingerprint.copy_from_slice(&digest);
     fingerprint
-}
-
-fn read_string(cursor: &mut Cursor<'_>) -> Result<String, DecodeError> {
-    String::from_utf8(cursor.read_bytes()?.to_vec()).map_err(|_| DecodeError::InvalidUtf8)
-}
-
-fn read_order_key(cursor: &mut Cursor<'_>) -> Result<String, DecodeError> {
-    let key = read_string(cursor)?;
-    if is_valid_order_key(&key) {
-        Ok(key)
-    } else {
-        Err(DecodeError::InvalidOrderKey)
-    }
-}
-
-fn read_bool(cursor: &mut Cursor<'_>) -> Result<bool, DecodeError> {
-    match cursor.read_byte()? {
-        0 => Ok(false),
-        1 => Ok(true),
-        tag => Err(DecodeError::InvalidBool(tag)),
-    }
-}
-
-fn read_option_i32(cursor: &mut Cursor<'_>) -> Result<Option<i32>, DecodeError> {
-    match cursor.read_byte()? {
-        0 => Ok(None),
-        1 => Ok(Some(cursor.read_i32()?)),
-        tag => Err(DecodeError::InvalidExecState(tag)),
-    }
-}
-
-fn read_option_string(cursor: &mut Cursor<'_>) -> Result<Option<String>, DecodeError> {
-    match cursor.read_byte()? {
-        0 => Ok(None),
-        1 => Ok(Some(read_string(cursor)?)),
-        tag => Err(DecodeError::InvalidExecState(tag)),
-    }
-}
-
-fn write_option_i32(target: &mut Vec<u8>, value: Option<i32>) {
-    match value {
-        Some(value) => {
-            target.push(1);
-            write_i32(target, value);
-        }
-        None => target.push(0),
-    }
-}
-
-fn write_option_string(target: &mut Vec<u8>, value: Option<&str>) {
-    match value {
-        Some(value) => {
-            target.push(1);
-            write_bytes(target, value.as_bytes());
-        }
-        None => target.push(0),
-    }
-}
-
-fn write_bytes(target: &mut Vec<u8>, bytes: &[u8]) {
-    write_u64(target, bytes.len() as u64);
-    target.extend_from_slice(bytes);
-}
-
-fn write_u64(target: &mut Vec<u8>, value: u64) {
-    target.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_i32(target: &mut Vec<u8>, value: i32) {
-    target.extend_from_slice(&value.to_le_bytes());
-}
-
-struct Cursor<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Cursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn expect(&mut self, expected: &[u8]) -> Result<(), DecodeError> {
-        let actual = self.take(expected.len())?;
-        if actual == expected {
-            Ok(())
-        } else {
-            Err(DecodeError::BadMagic)
-        }
-    }
-
-    fn read_byte(&mut self) -> Result<u8, DecodeError> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn read_u64(&mut self) -> Result<u64, DecodeError> {
-        let bytes = self.take(8)?;
-        Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
-    }
-
-    fn read_i32(&mut self) -> Result<i32, DecodeError> {
-        let bytes = self.take(4)?;
-        Ok(i32::from_le_bytes(bytes.try_into().unwrap()))
-    }
-
-    fn read_bytes(&mut self) -> Result<&'a [u8], DecodeError> {
-        let len = self.read_u64()? as usize;
-        self.take(len)
-    }
-
-    fn read_fingerprint(&mut self) -> Result<BaseFingerprint, DecodeError> {
-        let mut fingerprint = [0; BASE_FINGERPRINT_LEN];
-        fingerprint.copy_from_slice(self.take(BASE_FINGERPRINT_LEN)?);
-        Ok(fingerprint)
-    }
-
-    fn take(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
-        let end = self
-            .offset
-            .checked_add(len)
-            .ok_or(DecodeError::UnexpectedEof)?;
-        let slice = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or(DecodeError::UnexpectedEof)?;
-        self.offset = end;
-        Ok(slice)
-    }
-
-    fn is_finished(&self) -> bool {
-        self.offset == self.bytes.len()
-    }
 }
 
 #[cfg(test)]
