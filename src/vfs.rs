@@ -300,6 +300,33 @@ impl LaneFs {
             promoted.push((path, bytes));
         }
 
+        self.apply_promoted_files(&promoted)?;
+        self.repo = draft;
+        Ok(())
+    }
+
+    pub(crate) fn resolve_op_file(
+        &mut self,
+        lane: &str,
+        path: &str,
+        op_id: &str,
+        replacement: impl Into<Vec<u8>>,
+    ) -> Result<(), LaneFsError> {
+        let path = normalize_repo_path(path)?;
+        let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
+        let mut draft = self.repo.clone();
+        let promoted = draft
+            .resolve_op_path(&path, lane, base.as_deref(), op_id, replacement)
+            .map_err(LaneFsError::Lane)?;
+        self.apply_promoted_files(&[(path, promoted)])?;
+        self.repo = draft;
+        Ok(())
+    }
+
+    fn apply_promoted_files(
+        &mut self,
+        promoted: &[(FilePath, Option<Vec<u8>>)],
+    ) -> Result<(), LaneFsError> {
         let mut deletes = promoted
             .iter()
             .filter_map(|(path, bytes)| bytes.is_none().then_some(path.as_str()))
@@ -328,32 +355,7 @@ impl LaneFs {
                 .map_err(LaneFsError::Io)?;
         }
 
-        self.repo = draft;
         Ok(())
-    }
-
-    pub(crate) fn resolve_op_file(
-        &mut self,
-        lane: &str,
-        path: &str,
-        op_id: &str,
-        replacement: impl Into<Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, LaneFsError> {
-        let path = normalize_repo_path(path)?;
-        let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
-        let mut draft = self.repo.clone();
-        let promoted = draft
-            .resolve_op_path(&path, lane, base.as_deref(), op_id, replacement)
-            .map_err(LaneFsError::Lane)?;
-        match promoted.as_deref() {
-            Some(bytes) => self
-                .worktree
-                .write_file(&path, bytes)
-                .map_err(LaneFsError::Io)?,
-            None => self.worktree.remove_file(&path).map_err(LaneFsError::Io)?,
-        }
-        self.repo = draft;
-        Ok(promoted)
     }
 }
 
