@@ -15,63 +15,60 @@ pub(crate) mod virtual_exec;
 
 pub use cli::{CliError, run};
 
-#[cfg(test)]
-mod repo_tests;
-
-pub(crate) type FilePath = String;
-pub(crate) type LaneId = String;
+pub type FilePath = String;
+pub type LaneId = String;
 
 const BASE_FINGERPRINT_LEN: usize = 32;
 const EXEC_OUTPUT_PREVIEW_LIMIT: usize = 4096;
 const ORDER_ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-pub(crate) type BaseFingerprint = [u8; BASE_FINGERPRINT_LEN];
+pub type BaseFingerprint = [u8; BASE_FINGERPRINT_LEN];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LaneRepo {
+pub struct LaneRepo {
     lanes: BTreeSet<LaneId>,
     last_exec: BTreeMap<LaneId, LaneExecState>,
     files: BTreeMap<FilePath, LaneFile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub(crate) struct LaneExecState {
-    pub(crate) exit_code: Option<i32>,
-    pub(crate) worker_error: Option<String>,
-    pub(crate) stdout: LaneTextPreview,
-    pub(crate) stderr: LaneTextPreview,
-    pub(crate) changed_paths: Vec<FilePath>,
+pub struct LaneExecState {
+    pub exit_code: Option<i32>,
+    pub worker_error: Option<String>,
+    pub stdout: LaneTextPreview,
+    pub stderr: LaneTextPreview,
+    pub changed_paths: Vec<FilePath>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub(crate) struct LaneTextPreview {
-    pub(crate) text: String,
-    pub(crate) truncated: bool,
+pub struct LaneTextPreview {
+    pub text: String,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct LaneOpSummary {
-    pub(crate) op_id: String,
-    pub(crate) lane: LaneId,
-    pub(crate) path: FilePath,
-    pub(crate) kind: LaneOpKind,
-    pub(crate) base_start: u64,
-    pub(crate) base_end: u64,
-    pub(crate) inserted_len: u64,
-    pub(crate) order_key: String,
-    pub(crate) conflicts_with: Vec<LaneId>,
+pub struct LaneOpSummary {
+    pub op_id: String,
+    pub lane: LaneId,
+    pub path: FilePath,
+    pub kind: LaneOpKind,
+    pub base_start: u64,
+    pub base_end: u64,
+    pub inserted_len: u64,
+    pub order_key: String,
+    pub conflicts_with: Vec<LaneId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LaneOpDetail {
-    pub(crate) summary: LaneOpSummary,
-    pub(crate) base: Vec<u8>,
-    pub(crate) inserted: Vec<u8>,
+pub struct LaneOpDetail {
+    pub summary: LaneOpSummary,
+    pub base: Vec<u8>,
+    pub inserted: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum LaneOpKind {
+pub enum LaneOpKind {
     Create,
     Insert,
     Delete,
@@ -117,41 +114,41 @@ struct FileOp {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LaneRepoStorageSnapshot {
-    pub(crate) lanes: BTreeSet<LaneId>,
-    pub(crate) last_exec: BTreeMap<LaneId, LaneExecState>,
-    pub(crate) files: BTreeMap<FilePath, LaneFileStorageSnapshot>,
+pub struct LaneRepoStorageSnapshot {
+    pub lanes: BTreeSet<LaneId>,
+    pub last_exec: BTreeMap<LaneId, LaneExecState>,
+    pub files: BTreeMap<FilePath, LaneFileStorageSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LaneFileStorageSnapshot {
-    pub(crate) base: BaseStorageSnapshot,
-    pub(crate) lanes: BTreeMap<LaneId, LaneEntryStorageSnapshot>,
+pub struct LaneFileStorageSnapshot {
+    pub base: BaseStorageSnapshot,
+    pub lanes: BTreeMap<LaneId, LaneEntryStorageSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum BaseStorageSnapshot {
+pub enum BaseStorageSnapshot {
     Present(BaseFingerprint),
     Missing,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LaneEntryStorageSnapshot {
+pub enum LaneEntryStorageSnapshot {
     Present(Vec<FileOpStorageSnapshot>),
     Deleted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FileOpStorageSnapshot {
-    pub(crate) id: u64,
-    pub(crate) base_start: u64,
-    pub(crate) base_len: u64,
-    pub(crate) order_key: String,
-    pub(crate) inserted: Vec<u8>,
+pub struct FileOpStorageSnapshot {
+    pub id: u64,
+    pub base_start: u64,
+    pub base_len: u64,
+    pub order_key: String,
+    pub inserted: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LaneError {
+pub enum LaneError {
     ReservedLane(LaneId),
     LaneMissing(LaneId),
     BaseChanged { path: FilePath },
@@ -162,7 +159,7 @@ pub(crate) enum LaneError {
 }
 
 impl LaneRepo {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             lanes: BTreeSet::new(),
             last_exec: BTreeMap::new(),
@@ -170,11 +167,11 @@ impl LaneRepo {
         }
     }
 
-    pub(crate) fn lane_ids(&self) -> impl Iterator<Item = &str> {
+    pub fn lane_ids(&self) -> impl Iterator<Item = &str> {
         self.lanes.iter().map(String::as_str)
     }
 
-    pub(crate) fn overlay_paths(&self, lane: &str) -> Result<Vec<&str>, LaneError> {
+    pub fn overlay_paths(&self, lane: &str) -> Result<Vec<&str>, LaneError> {
         self.ensure_lane(lane)?;
         Ok(self
             .files
@@ -183,29 +180,24 @@ impl LaneRepo {
             .collect())
     }
 
-    pub(crate) fn create_lane(&mut self, lane: impl Into<LaneId>) -> Result<bool, LaneError> {
+    pub fn create_lane(&mut self, lane: impl Into<LaneId>) -> Result<bool, LaneError> {
         let lane = lane.into();
         ensure_user_lane(&lane)?;
         Ok(self.lanes.insert(lane))
     }
 
-    #[cfg(test)]
-    pub(crate) fn record_last_exec(
-        &mut self,
-        lane: &str,
-        state: LaneExecState,
-    ) -> Result<(), LaneError> {
+    pub fn record_last_exec(&mut self, lane: &str, state: LaneExecState) -> Result<(), LaneError> {
         self.ensure_lane(lane)?;
         self.last_exec.insert(lane.to_owned(), state);
         Ok(())
     }
 
-    pub(crate) fn last_exec(&self, lane: &str) -> Result<Option<&LaneExecState>, LaneError> {
+    pub fn last_exec(&self, lane: &str) -> Result<Option<&LaneExecState>, LaneError> {
         self.ensure_lane(lane)?;
         Ok(self.last_exec.get(lane))
     }
 
-    pub(crate) fn discard_lane(&mut self, lane: &str) -> bool {
+    pub fn discard_lane(&mut self, lane: &str) -> bool {
         let removed = self.lanes.remove(lane);
         self.last_exec.remove(lane);
         for file in self.files.values_mut() {
@@ -215,7 +207,7 @@ impl LaneRepo {
         removed
     }
 
-    pub(crate) fn read_path(
+    pub fn read_path(
         &self,
         path: &str,
         lane: &str,
@@ -231,7 +223,7 @@ impl LaneRepo {
         }
     }
 
-    pub(crate) fn change_ops(
+    pub fn change_ops(
         &self,
         path: &str,
         lane: &str,
@@ -244,7 +236,7 @@ impl LaneRepo {
         file.change_ops(path, lane, base)
     }
 
-    pub(crate) fn op_detail(
+    pub fn op_detail(
         &self,
         path: &str,
         lane: &str,
@@ -258,7 +250,7 @@ impl LaneRepo {
         file.op_detail(path, lane, base, op_id)
     }
 
-    pub(crate) fn replace_path(
+    pub fn replace_path(
         &mut self,
         path: &str,
         lane: &str,
@@ -282,7 +274,7 @@ impl LaneRepo {
         Ok(())
     }
 
-    pub(crate) fn delete_path(
+    pub fn delete_path(
         &mut self,
         path: &str,
         lane: &str,
@@ -291,7 +283,7 @@ impl LaneRepo {
         self.replace_path(path, lane, base, None)
     }
 
-    pub(crate) fn promote_ops_path(
+    pub fn promote_ops_path(
         &mut self,
         path: &str,
         lane: &str,
@@ -316,7 +308,7 @@ impl LaneRepo {
         Ok(promoted)
     }
 
-    pub(crate) fn resolve_op_path(
+    pub fn resolve_op_path(
         &mut self,
         path: &str,
         lane: &str,
@@ -336,7 +328,7 @@ impl LaneRepo {
         Ok(promoted)
     }
 
-    pub(crate) fn storage_snapshot(&self) -> LaneRepoStorageSnapshot {
+    pub fn storage_snapshot(&self) -> LaneRepoStorageSnapshot {
         LaneRepoStorageSnapshot {
             lanes: self.lanes.clone(),
             last_exec: self.last_exec.clone(),
@@ -348,9 +340,7 @@ impl LaneRepo {
         }
     }
 
-    pub(crate) fn from_storage_snapshot(
-        snapshot: LaneRepoStorageSnapshot,
-    ) -> Result<Self, DecodeError> {
+    pub fn from_storage_snapshot(snapshot: LaneRepoStorageSnapshot) -> Result<Self, DecodeError> {
         for lane in &snapshot.lanes {
             ensure_user_lane(lane).map_err(|_| DecodeError::ReservedLane(lane.clone()))?;
         }
@@ -395,7 +385,7 @@ impl LaneRepo {
 }
 
 impl LaneExecState {
-    pub(crate) fn new(
+    pub fn new(
         exit_code: Option<i32>,
         worker_error: Option<String>,
         stdout: &str,
@@ -924,7 +914,7 @@ impl FileOp {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum DecodeError {
+pub enum DecodeError {
     InvalidOrderKey,
     OperationConflict,
     OperationOutOfBounds,
@@ -1366,7 +1356,7 @@ fn normalize_ops_checked(ops: Vec<FileOp>) -> Result<Vec<FileOp>, DecodeError> {
         .collect())
 }
 
-pub(crate) fn ensure_user_lane(lane: &str) -> Result<(), LaneError> {
+pub fn ensure_user_lane(lane: &str) -> Result<(), LaneError> {
     if lane.trim().is_empty() || lane == "base" {
         Err(LaneError::ReservedLane(lane.to_owned()))
     } else {
@@ -1379,29 +1369,4 @@ fn base_fingerprint(bytes: &[u8]) -> BaseFingerprint {
     let mut fingerprint = [0; BASE_FINGERPRINT_LEN];
     fingerprint.copy_from_slice(&digest);
     fingerprint
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fractional_keys_are_dense_between_neighbors() {
-        let left = first_fractional_key();
-        let right = next_fractional_key(Some(&left));
-        let middle = fractional_key_between(Some(&left), Some(&right));
-
-        assert!(left < middle);
-        assert!(middle < right);
-    }
-
-    #[test]
-    fn fractional_keys_can_grow_without_renumbering() {
-        let mut keys = vec![first_fractional_key()];
-        for _ in 0..128 {
-            let next = next_fractional_key(keys.last().map(String::as_str));
-            assert!(keys.last().unwrap() < &next);
-            keys.push(next);
-        }
-    }
 }

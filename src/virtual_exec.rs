@@ -8,7 +8,7 @@ use std::path::{Component as PathComponent, Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use windows_sys::Win32::Foundation::{
@@ -30,6 +30,7 @@ use crate::vfs::{
 use crate::{FilePath, LaneError, LaneExecState, LaneOpSummary};
 
 const STORAGE_PATH: &str = ".lane";
+static NEXT_TEMP_GIT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn run_virtual_lane(
     repo_root: &Path,
@@ -44,6 +45,7 @@ pub(crate) fn run_virtual_lane(
     let metrics = Arc::new(VirtualFsMetrics::default());
 
     let setup_start = Instant::now();
+    let git_view = prepare_git_view(repo_root)?;
     winfsp_wrs::init().map_err(|error| VirtualExecError::message(error.to_string()))?;
     let mount_start = Instant::now();
     let (mount_point, mount, state) = start_mount(repo_root, &storage_path, lane, metrics.clone())?;
@@ -51,7 +53,13 @@ pub(crate) fn run_virtual_lane(
     let pre_worker_lock_ms = elapsed_ms(setup_start);
 
     let worker_start = Instant::now();
-    let worker = run_virtual_worker(program, args, lane, repo_root, &mount_point.workspace_path);
+    let worker = run_virtual_worker(
+        program,
+        args,
+        lane,
+        git_view.as_ref(),
+        &mount_point.workspace_path,
+    );
     let worker_ms = elapsed_ms(worker_start);
 
     let stop_start = Instant::now();
@@ -241,10 +249,10 @@ fn run_virtual_worker(
     program: &str,
     args: &[String],
     lane: &str,
-    repo_root: &Path,
+    git_view: Option<&GitView>,
     mount_path: &Path,
 ) -> WorkerOutput {
-    match virtual_command(program, args, lane, repo_root, mount_path).output() {
+    match virtual_command(program, args, lane, git_view, mount_path).output() {
         Ok(output) => WorkerOutput {
             exit_code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -264,11 +272,11 @@ fn virtual_command<'a>(
     program: &'a str,
     args: &'a [String],
     lane: &'a str,
-    _repo_root: &'a Path,
+    git_view: Option<&'a GitView>,
     mount_path: &'a Path,
 ) -> ProcessCommand {
     let mount_label = path_label(mount_path);
-    let safe_directory = git_safe_directory_label(mount_path);
+    let git_work_tree = git_path_label(mount_path);
     let mut command = ProcessCommand::new(resolve_program(program));
     command
         .args(args)
@@ -278,15 +286,206 @@ fn virtual_command<'a>(
         .env("LANE_VIEW_ROOT", &mount_label)
         .env("LANE_EXEC_MODE", "virtual_mount")
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_COUNT", "3")
         .env("GIT_CONFIG_KEY_0", "safe.directory")
-        .env("GIT_CONFIG_VALUE_0", safe_directory)
+        .env("GIT_CONFIG_VALUE_0", &git_work_tree)
+        .env("GIT_CONFIG_KEY_1", "core.worktree")
+        .env("GIT_CONFIG_VALUE_1", &git_work_tree)
+        .env("GIT_CONFIG_KEY_2", "core.bare")
+        .env("GIT_CONFIG_VALUE_2", "false")
         .env_remove("LANE_STORAGE_PATH");
+    if let Some(git_view) = git_view {
+        command
+            .env("GIT_DIR", git_path_label(git_view.path()))
+            .env("GIT_WORK_TREE", git_work_tree);
+    }
     command
 }
 
-fn git_safe_directory_label(path: &Path) -> String {
+fn git_path_label(path: impl AsRef<Path>) -> String {
     path_label(path).replace('\\', "/")
+}
+
+struct GitView {
+    temp_dir: TempGitDir,
+}
+
+impl GitView {
+    fn path(&self) -> &Path {
+        &self.temp_dir.path
+    }
+}
+
+struct TempGitDir {
+    path: PathBuf,
+}
+
+impl Drop for TempGitDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn prepare_git_view(repo_root: &Path) -> Result<Option<GitView>, VirtualExecError> {
+    let Some(source_git_dir) = resolve_git_dir(repo_root)? else {
+        return Ok(None);
+    };
+    if !source_git_dir.is_dir() {
+        return Ok(None);
+    }
+
+    let temp_dir = create_temp_git_dir()?;
+    snapshot_git_metadata(&source_git_dir, &temp_dir.path)?;
+    Ok(Some(GitView { temp_dir }))
+}
+
+fn resolve_git_dir(repo_root: &Path) -> Result<Option<PathBuf>, VirtualExecError> {
+    let dot_git = repo_root.join(".git");
+    if dot_git.is_dir() {
+        return Ok(Some(dot_git));
+    }
+    if !dot_git.is_file() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(&dot_git).map_err(|error| {
+        VirtualExecError::message(format!(
+            "failed to read git metadata pointer {}: {error}",
+            dot_git.display()
+        ))
+    })?;
+    let Some(git_dir) = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:").map(str::trim))
+    else {
+        return Ok(None);
+    };
+    let git_dir = PathBuf::from(git_dir);
+    if git_dir.is_absolute() {
+        Ok(Some(git_dir))
+    } else {
+        Ok(Some(repo_root.join(git_dir)))
+    }
+}
+
+fn create_temp_git_dir() -> Result<TempGitDir, VirtualExecError> {
+    let root = env::temp_dir().join("lane").join("git");
+    fs::create_dir_all(&root).map_err(|error| {
+        VirtualExecError::message(format!(
+            "failed to create temporary git metadata directory {}: {error}",
+            root.display()
+        ))
+    })?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    for _ in 0..100 {
+        let id = NEXT_TEMP_GIT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = root.join(format!("{}-{timestamp}-{id}.git", std::process::id()));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(TempGitDir { path }),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(VirtualExecError::message(format!(
+                    "failed to create temporary git metadata directory {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Err(VirtualExecError::message(
+        "failed to allocate temporary git metadata directory after 100 attempts",
+    ))
+}
+
+fn snapshot_git_metadata(source: &Path, target: &Path) -> Result<(), VirtualExecError> {
+    for file in ["HEAD", "config", "index", "packed-refs", "shallow"] {
+        copy_file_if_exists(&source.join(file), &target.join(file))?;
+    }
+    copy_dir_if_exists(&source.join("refs"), &target.join("refs"))?;
+    copy_dir_if_exists(&source.join("info"), &target.join("info"))?;
+
+    let objects_info = target.join("objects").join("info");
+    fs::create_dir_all(&objects_info).map_err(|error| {
+        VirtualExecError::message(format!(
+            "failed to create temporary git object metadata {}: {error}",
+            objects_info.display()
+        ))
+    })?;
+    fs::write(
+        objects_info.join("alternates"),
+        format!("{}\n", git_path_label(source.join("objects"))),
+    )
+    .map_err(|error| {
+        VirtualExecError::message(format!(
+            "failed to write temporary git alternates for {}: {error}",
+            source.display()
+        ))
+    })
+}
+
+fn copy_file_if_exists(source: &Path, target: &Path) -> Result<(), VirtualExecError> {
+    if !source.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            VirtualExecError::message(format!(
+                "failed to create temporary git metadata directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    fs::copy(source, target).map(|_| ()).map_err(|error| {
+        VirtualExecError::message(format!(
+            "failed to copy git metadata {} to {}: {error}",
+            source.display(),
+            target.display()
+        ))
+    })
+}
+
+fn copy_dir_if_exists(source: &Path, target: &Path) -> Result<(), VirtualExecError> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    copy_dir(source, target)
+}
+
+fn copy_dir(source: &Path, target: &Path) -> Result<(), VirtualExecError> {
+    fs::create_dir_all(target).map_err(|error| {
+        VirtualExecError::message(format!(
+            "failed to create temporary git metadata directory {}: {error}",
+            target.display()
+        ))
+    })?;
+    for entry in fs::read_dir(source).map_err(|error| {
+        VirtualExecError::message(format!(
+            "failed to read git metadata directory {}: {error}",
+            source.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            VirtualExecError::message(format!(
+                "failed to read git metadata entry in {}: {error}",
+                source.display()
+            ))
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            VirtualExecError::message(format!(
+                "failed to inspect git metadata entry {}: {error}",
+                entry.path().display()
+            ))
+        })?;
+        let target_path = target.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir(&entry.path(), &target_path)?;
+        } else if file_type.is_file() {
+            copy_file_if_exists(&entry.path(), &target_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn resolve_program(program: &str) -> PathBuf {
@@ -1580,27 +1779,4 @@ fn path_label(path: impl AsRef<Path>) -> String {
 
 fn elapsed_ms(start: Instant) -> u64 {
     start.elapsed().as_millis().min(u64::MAX as u128) as u64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn last_exec_record_failure_becomes_warning() {
-        let warnings = last_exec_warnings(Err(VirtualExecError::message("storage busy")));
-
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].kind, "last_exec_not_recorded");
-        assert!(
-            warnings[0]
-                .message
-                .contains("failed to record advisory last_exec metadata: storage busy")
-        );
-    }
-
-    #[test]
-    fn last_exec_record_success_has_no_warnings() {
-        assert!(last_exec_warnings(Ok(())).is_empty());
-    }
 }

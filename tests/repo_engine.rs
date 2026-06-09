@@ -1,4 +1,4 @@
-use super::{LaneError, LaneExecState, LaneRepo};
+use lane::{BaseStorageSnapshot, LaneError, LaneExecState, LaneOpKind, LaneRepo};
 use sha2::{Digest, Sha256};
 use std::ops::Range;
 
@@ -254,7 +254,7 @@ fn repo_state_snapshot_uses_sha256_base_fingerprint() {
 
     assert_eq!(
         snapshot.files.get(PATH).unwrap().base,
-        super::BaseStorageSnapshot::Present(expected)
+        BaseStorageSnapshot::Present(expected)
     );
 }
 
@@ -308,6 +308,38 @@ fn snapshot_replacement_is_stored_as_byte_ops() {
     assert_eq!(ops[1].base_end, 22);
     assert_eq!(ops[1].inserted_len, 1);
     assert_eq!(repo.read("src/math.txt", "agent-a", base).unwrap(), edited);
+}
+
+#[test]
+fn many_independent_ops_keep_stable_increasing_order_keys() {
+    let mut repo = seeded_repo();
+    let base = (0..128)
+        .map(|index| format!("line-{index:03}\n"))
+        .collect::<String>();
+    let edited = (0..128)
+        .map(|index| format!("line-{index:03}\ninsert-{index:03}\n"))
+        .collect::<String>();
+
+    repo.replace(
+        "src/order.txt",
+        "agent-a",
+        base.as_bytes(),
+        edited.as_bytes().to_vec(),
+    )
+    .unwrap();
+    let ops = repo
+        .change_ops("src/order.txt", "agent-a", Some(base.as_bytes()))
+        .unwrap();
+
+    assert_eq!(ops.len(), 128);
+    assert!(ops.windows(2).all(|window| {
+        window[0].base_start < window[1].base_start && window[0].order_key < window[1].order_key
+    }));
+    assert_eq!(
+        repo.read("src/order.txt", "agent-a", base.as_bytes())
+            .unwrap(),
+        edited.as_bytes()
+    );
 }
 
 #[test]
@@ -411,7 +443,7 @@ fn selected_delete_promotion_preserves_other_lane_as_create() {
     );
     let agent_b_ops = repo.change_ops("src/mode.txt", "agent-b", None).unwrap();
     assert_eq!(agent_b_ops.len(), 1);
-    assert_eq!(agent_b_ops[0].kind, super::LaneOpKind::Create);
+    assert_eq!(agent_b_ops[0].kind, LaneOpKind::Create);
     assert_eq!(agent_b_ops[0].conflicts_with, Vec::<String>::new());
 }
 
@@ -579,6 +611,35 @@ fn same_position_inserts_compose_in_stable_order_regardless_of_promotion_order()
 }
 
 #[test]
+fn three_same_position_inserts_compose_in_stable_order_across_promotion_orders() {
+    let base = b"tail\n";
+    let promotion_orders = [
+        ["agent-a", "agent-b", "agent-c"],
+        ["agent-c", "agent-b", "agent-a"],
+        ["agent-b", "agent-a", "agent-c"],
+    ];
+    let mut final_versions = Vec::new();
+
+    for promotion_order in promotion_orders {
+        let mut repo = repo_with_three_same_position_inserts(base);
+        let mut current_base = base.to_vec();
+        for lane in promotion_order {
+            current_base = repo
+                .promote_all_ops("src/imports.txt", lane, &current_base)
+                .unwrap();
+        }
+        final_versions.push(current_base);
+    }
+
+    assert_eq!(final_versions[0], b"use a;\nuse b;\nuse c;\ntail\n");
+    assert!(
+        final_versions
+            .iter()
+            .all(|version| version == &final_versions[0])
+    );
+}
+
+#[test]
 fn same_position_inserts_into_empty_file_are_not_create_conflicts() {
     let mut repo = seeded_repo();
     let base = b"";
@@ -632,6 +693,20 @@ fn repo_with_same_position_inserts(base: &[u8]) -> LaneRepo {
         base,
         0..0,
         b"use b;\n".to_vec(),
+    )
+    .unwrap();
+    repo
+}
+
+fn repo_with_three_same_position_inserts(base: &[u8]) -> LaneRepo {
+    let mut repo = repo_with_same_position_inserts(base);
+    repo.create_lane("agent-c").unwrap();
+    repo.write(
+        "src/imports.txt",
+        "agent-c",
+        base,
+        0..0,
+        b"use c;\n".to_vec(),
     )
     .unwrap();
     repo
