@@ -268,7 +268,8 @@ fn virtual_command<'a>(
     mount_path: &'a Path,
 ) -> ProcessCommand {
     let mount_label = path_label(mount_path);
-    let safe_directory = git_safe_directory_label(mount_path);
+    let git_work_tree = git_path_label(mount_path);
+    let git_dir = git_path_label(mount_path.join(".git"));
     let mut command = ProcessCommand::new(resolve_program(program));
     command
         .args(args)
@@ -280,17 +281,17 @@ fn virtual_command<'a>(
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", "safe.directory")
-        .env("GIT_CONFIG_VALUE_0", safe_directory)
+        .env("GIT_CONFIG_VALUE_0", &git_work_tree)
         .env_remove("LANE_STORAGE_PATH");
     if repo_root.join(".git").exists() {
         command
-            .env("GIT_DIR", path_label(mount_path.join(".git")))
-            .env("GIT_WORK_TREE", &mount_label);
+            .env("GIT_DIR", git_dir)
+            .env("GIT_WORK_TREE", git_work_tree);
     }
     command
 }
 
-fn git_safe_directory_label(path: &Path) -> String {
+fn git_path_label(path: impl AsRef<Path>) -> String {
     path_label(path).replace('\\', "/")
 }
 
