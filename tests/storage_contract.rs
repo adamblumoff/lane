@@ -1,14 +1,20 @@
 mod common;
 
 use common::fs;
-use lane::storage::{
-    doctor_storage, is_lock_contention, load_repo, persist_last_exec, persist_repo,
+pub use lane::{
+    BaseFingerprint, BaseStorageSnapshot, FileOpStorageSnapshot, FilePath,
+    LaneEntryStorageSnapshot, LaneExecState, LaneFileStorageSnapshot, LaneId, LaneRepo,
+    LaneRepoStorageSnapshot, ensure_user_lane,
 };
-use lane::{LaneExecState, LaneRepo};
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use storage::{doctor_storage, is_lock_contention, load_repo, persist_last_exec, persist_repo};
+
+#[allow(dead_code)]
+#[path = "../src/storage.rs"]
+mod storage;
 
 #[test]
 fn storage_v2_persists_manifest_blobs_and_last_exec() {

@@ -23,7 +23,7 @@ const SHA256_HEX_LEN: usize = 64;
 const LOCK_RETRY_ATTEMPTS: usize = 1200;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 
-pub fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
+pub(crate) fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
     reject_legacy_storage(storage_root)?;
     let manifest_path = manifest_path(storage_root);
     let bytes = match fs::read(&manifest_path) {
@@ -39,7 +39,7 @@ pub fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
         .map_err(|error| invalid_storage(&manifest_path, error))
 }
 
-pub fn persist_repo(storage_root: &Path, repo: &LaneRepo) -> io::Result<()> {
+pub(crate) fn persist_repo(storage_root: &Path, repo: &LaneRepo) -> io::Result<()> {
     let snapshot = repo.storage_snapshot();
     fs::create_dir_all(storage_root)?;
     reject_legacy_storage(storage_root)?;
@@ -51,12 +51,16 @@ pub fn persist_repo(storage_root: &Path, repo: &LaneRepo) -> io::Result<()> {
     Ok(())
 }
 
-pub fn persist_last_exec(storage_root: &Path, lane: &str, state: &LaneExecState) -> io::Result<()> {
+pub(crate) fn persist_last_exec(
+    storage_root: &Path,
+    lane: &str,
+    state: &LaneExecState,
+) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(state).map_err(json_error)?;
     persist_bytes(&last_exec_path(storage_root, lane), &bytes)
 }
 
-pub fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorReport> {
+pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorReport> {
     let mut report = StorageDoctorReport::default();
 
     if storage_root.join(LEGACY_REPO_FILE).exists() {
@@ -209,32 +213,32 @@ pub fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorReport> {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub struct StorageDoctorReport {
-    pub manifest_present: bool,
-    pub version: Option<u32>,
-    pub lanes: usize,
-    pub files: usize,
-    pub ops: usize,
-    pub blobs_referenced: usize,
-    pub blobs_present: usize,
-    pub blobs_unreferenced: usize,
-    pub last_exec_files: usize,
-    pub warnings: Vec<String>,
-    pub errors: Vec<String>,
+pub(crate) struct StorageDoctorReport {
+    pub(crate) manifest_present: bool,
+    pub(crate) version: Option<u32>,
+    pub(crate) lanes: usize,
+    pub(crate) files: usize,
+    pub(crate) ops: usize,
+    pub(crate) blobs_referenced: usize,
+    pub(crate) blobs_present: usize,
+    pub(crate) blobs_unreferenced: usize,
+    pub(crate) last_exec_files: usize,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) errors: Vec<String>,
 }
 
 impl StorageDoctorReport {
-    pub fn is_healthy(&self) -> bool {
+    pub(crate) fn is_healthy(&self) -> bool {
         self.errors.is_empty()
     }
 }
 
-pub struct RepoLock {
+pub(crate) struct RepoLock {
     path: PathBuf,
     _file: File,
 }
 
-pub fn acquire_repo_lock(storage_root: &Path) -> io::Result<RepoLock> {
+pub(crate) fn acquire_repo_lock(storage_root: &Path) -> io::Result<RepoLock> {
     acquire_path_lock(&storage_root.join(REPO_LOCK_FILE))
 }
 
@@ -642,7 +646,7 @@ fn acquire_path_lock(lock_path: &Path) -> io::Result<RepoLock> {
     }))
 }
 
-pub fn is_lock_contention(error: &io::Error) -> bool {
+pub(crate) fn is_lock_contention(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::AlreadyExists
         || (cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied)
 }

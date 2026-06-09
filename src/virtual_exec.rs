@@ -108,7 +108,7 @@ pub(crate) fn run_virtual_lane(
     Ok(VirtualLaneRun { output, failed })
 }
 
-pub fn last_exec_warnings(result: Result<(), VirtualExecError>) -> Vec<VirtualExecWarning> {
+fn last_exec_warnings(result: Result<(), VirtualExecError>) -> Vec<VirtualExecWarning> {
     match result {
         Ok(()) => Vec::new(),
         Err(error) => vec![VirtualExecWarning {
@@ -1485,9 +1485,9 @@ pub(crate) struct VirtualExecOutput {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
-pub struct VirtualExecWarning {
-    pub kind: &'static str,
-    pub message: String,
+struct VirtualExecWarning {
+    kind: &'static str,
+    message: String,
 }
 
 struct WorkerOutput {
@@ -1534,12 +1534,12 @@ impl From<LaneFileChange> for VirtualChangeOutput {
 }
 
 #[derive(Debug)]
-pub struct VirtualExecError {
+pub(crate) struct VirtualExecError {
     message: String,
 }
 
 impl VirtualExecError {
-    pub fn message(message: impl Into<String>) -> Self {
+    fn message(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }

@@ -8,10 +8,10 @@ use sha2::{Digest, Sha256};
 use similar::{Algorithm, DiffTag, capture_diff_slices};
 
 mod cli;
-pub mod storage;
+mod storage;
 mod vfs;
 #[cfg(windows)]
-pub mod virtual_exec;
+pub(crate) mod virtual_exec;
 
 pub use cli::{CliError, run};
 
