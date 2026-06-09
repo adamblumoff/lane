@@ -264,7 +264,7 @@ fn virtual_command<'a>(
     program: &'a str,
     args: &'a [String],
     lane: &'a str,
-    _repo_root: &'a Path,
+    repo_root: &'a Path,
     mount_path: &'a Path,
 ) -> ProcessCommand {
     let mount_label = path_label(mount_path);
@@ -282,6 +282,11 @@ fn virtual_command<'a>(
         .env("GIT_CONFIG_KEY_0", "safe.directory")
         .env("GIT_CONFIG_VALUE_0", safe_directory)
         .env_remove("LANE_STORAGE_PATH");
+    if repo_root.join(".git").exists() {
+        command
+            .env("GIT_DIR", path_label(mount_path.join(".git")))
+            .env("GIT_WORK_TREE", &mount_label);
+    }
     command
 }
 
