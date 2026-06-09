@@ -516,7 +516,33 @@ fn cli_exec_runs_agent_like_process_with_git_view_and_atomic_save() {
         "pwsh",
         "-NoProfile",
         "-Command",
-        "$ErrorActionPreference = \"Stop\"; if ((git rev-parse --show-toplevel).TrimEnd('/') -ne (Get-Location).ProviderPath.TrimEnd('\\')) { throw \"git root must be the mounted lane view\" }; if ($env:GIT_OPTIONAL_LOCKS -ne \"0\") { throw \"git optional locks must be disabled in lane views\" }; pwsh -NoProfile -Command '$tmp = Join-Path (Get-Location) \"src/login.tsx.tmp\"; $target = Join-Path (Get-Location) \"src/login.tsx\"; Set-Content -LiteralPath $tmp -Value \"export const design = ''agent-realish'';\" -NoNewline; [IO.File]::Move($tmp, $target, $true)'; $diff = git diff -- src/login.tsx; if (-not ($diff -match \"agent-realish\")) { throw \"git diff did not see mounted lane changes\" }",
+        r#"
+$ErrorActionPreference = "Stop"
+function Show-GitState($label) {
+    Write-Output "[$label] cwd=$((Get-Location).ProviderPath)"
+    Write-Output "[$label] GIT_DIR=$env:GIT_DIR"
+    Write-Output "[$label] GIT_WORK_TREE=$env:GIT_WORK_TREE"
+    Write-Output "[$label] git-version=$(git --version)"
+    Write-Output "[$label] inside=$(git rev-parse --is-inside-work-tree 2>&1)"
+    Write-Output "[$label] top=$(git rev-parse --show-toplevel 2>&1)"
+    Write-Output "[$label] status=$(git status --short 2>&1 | Out-String)"
+}
+Show-GitState before
+if ((git rev-parse --show-toplevel).TrimEnd('/') -ne (Get-Location).ProviderPath.TrimEnd('\')) {
+    throw "git root must be the mounted lane view"
+}
+if ($env:GIT_OPTIONAL_LOCKS -ne "0") {
+    throw "git optional locks must be disabled in lane views"
+}
+pwsh -NoProfile -Command '$tmp = Join-Path (Get-Location) "src/login.tsx.tmp"; $target = Join-Path (Get-Location) "src/login.tsx"; Set-Content -LiteralPath $tmp -Value "export const design = ''agent-realish'';" -NoNewline; [IO.File]::Move($tmp, $target, $true)'
+Show-GitState after
+$env:GIT_TRACE_SETUP = "1"
+$diff = git diff -- src/login.tsx 2>&1 | Out-String
+Write-Output "[diff] $diff"
+if (-not ($diff -match "agent-realish")) {
+    throw "git diff did not see mounted lane changes"
+}
+"#,
     ]);
 
     assert_eq!(result["exit_code"], 0);
