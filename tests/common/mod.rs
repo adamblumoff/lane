@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) use serde_json::Value;
@@ -12,6 +13,8 @@ pub(crate) use std::fs;
 pub(crate) use std::thread;
 #[allow(unused_imports)]
 pub(crate) use std::time::{Duration, Instant};
+
+static NEXT_UNIQUE_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct TempRepo {
     root: PathBuf,
@@ -478,9 +481,11 @@ pub(crate) fn change_statuses_from_key(value: &Value, key: &str) -> BTreeMap<Str
         .collect()
 }
 
-pub(crate) fn unique_suffix() -> u128 {
-    SystemTime::now()
+pub(crate) fn unique_suffix() -> String {
+    let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
+        .as_nanos();
+    let sequence = NEXT_UNIQUE_SUFFIX.fetch_add(1, Ordering::Relaxed);
+    format!("{timestamp}-{sequence}")
 }

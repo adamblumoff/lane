@@ -9,12 +9,15 @@ pub use lane::{
 use serde_json::Value;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::{doctor_storage, is_lock_contention, load_repo, persist_last_exec, persist_repo};
 
 #[allow(dead_code)]
 #[path = "../src/storage.rs"]
 mod storage;
+
+static NEXT_UNIQUE_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 #[test]
 fn storage_v2_persists_manifest_blobs_and_last_exec() {
@@ -239,9 +242,11 @@ impl Drop for TempStorage {
     }
 }
 
-fn unique_suffix() -> u128 {
-    SystemTime::now()
+fn unique_suffix() -> String {
+    let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
+        .as_nanos();
+    let sequence = NEXT_UNIQUE_SUFFIX.fetch_add(1, Ordering::Relaxed);
+    format!("{timestamp}-{sequence}")
 }
