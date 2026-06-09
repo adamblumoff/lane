@@ -936,6 +936,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lock_contention_includes_windows_permission_denied_errors() {
+        assert!(is_lock_contention(&io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "lock exists",
+        )));
+        assert_eq!(
+            is_lock_contention(&io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "lock denied",
+            )),
+            cfg!(windows)
+        );
+        assert!(!is_lock_contention(&io::Error::new(
+            io::ErrorKind::NotFound,
+            "not contention",
+        )));
+    }
+
     fn repo_with_agent_file() -> LaneRepo {
         let mut repo = LaneRepo::new();
         repo.create_lane("agent-a").unwrap();

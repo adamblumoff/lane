@@ -17,6 +17,8 @@ pub use cli::{CliError, run};
 
 #[cfg(test)]
 mod repo_tests;
+#[cfg(test)]
+mod vfs_tests;
 
 pub(crate) type FilePath = String;
 pub(crate) type LaneId = String;

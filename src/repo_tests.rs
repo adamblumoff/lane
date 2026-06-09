@@ -579,6 +579,35 @@ fn same_position_inserts_compose_in_stable_order_regardless_of_promotion_order()
 }
 
 #[test]
+fn three_same_position_inserts_compose_in_stable_order_across_promotion_orders() {
+    let base = b"tail\n";
+    let promotion_orders = [
+        ["agent-a", "agent-b", "agent-c"],
+        ["agent-c", "agent-b", "agent-a"],
+        ["agent-b", "agent-a", "agent-c"],
+    ];
+    let mut final_versions = Vec::new();
+
+    for promotion_order in promotion_orders {
+        let mut repo = repo_with_three_same_position_inserts(base);
+        let mut current_base = base.to_vec();
+        for lane in promotion_order {
+            current_base = repo
+                .promote_all_ops("src/imports.txt", lane, &current_base)
+                .unwrap();
+        }
+        final_versions.push(current_base);
+    }
+
+    assert_eq!(final_versions[0], b"use a;\nuse b;\nuse c;\ntail\n");
+    assert!(
+        final_versions
+            .iter()
+            .all(|version| version == &final_versions[0])
+    );
+}
+
+#[test]
 fn same_position_inserts_into_empty_file_are_not_create_conflicts() {
     let mut repo = seeded_repo();
     let base = b"";
@@ -632,6 +661,20 @@ fn repo_with_same_position_inserts(base: &[u8]) -> LaneRepo {
         base,
         0..0,
         b"use b;\n".to_vec(),
+    )
+    .unwrap();
+    repo
+}
+
+fn repo_with_three_same_position_inserts(base: &[u8]) -> LaneRepo {
+    let mut repo = repo_with_same_position_inserts(base);
+    repo.create_lane("agent-c").unwrap();
+    repo.write(
+        "src/imports.txt",
+        "agent-c",
+        base,
+        0..0,
+        b"use c;\n".to_vec(),
     )
     .unwrap();
     repo

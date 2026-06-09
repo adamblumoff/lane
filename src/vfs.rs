@@ -90,6 +90,53 @@ impl FileWorktree {
         }
     }
 
+    fn transaction(&self, paths: &[FilePath]) -> io::Result<FileWorktreeTransaction> {
+        let mut snapshot_paths = Vec::new();
+        for path in paths {
+            push_unique(&mut snapshot_paths, path.clone());
+            for ancestor in ancestor_paths(path) {
+                let file_path = self.file_path(&ancestor);
+                if !file_path.exists() || file_path.is_file() {
+                    push_unique(&mut snapshot_paths, ancestor);
+                }
+            }
+        }
+        snapshot_paths.sort_by(|left, right| {
+            path_depth(right)
+                .cmp(&path_depth(left))
+                .then_with(|| right.cmp(left))
+        });
+
+        let snapshots = snapshot_paths
+            .into_iter()
+            .map(|path| self.snapshot_path(path))
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(FileWorktreeTransaction {
+            root_path: self.root_path.clone(),
+            snapshots,
+        })
+    }
+
+    fn snapshot_path(&self, path: FilePath) -> io::Result<FileWorktreeSnapshot> {
+        let file_path = self.file_path(&path);
+        if file_path.is_file() {
+            return fs::read(file_path).map(|bytes| FileWorktreeSnapshot::File { path, bytes });
+        }
+        if file_path.is_dir() {
+            let mut directories = Vec::new();
+            let mut files = Vec::new();
+            collect_directory_contents(&file_path, "", &mut directories, &mut files)?;
+            directories.sort();
+            files.sort_by(|(left, _), (right, _)| left.cmp(right));
+            return Ok(FileWorktreeSnapshot::Directory {
+                path,
+                directories,
+                files,
+            });
+        }
+        Ok(FileWorktreeSnapshot::Missing { path })
+    }
+
     pub(crate) fn list_dir(&self, path: &str) -> io::Result<Vec<DirEntry>> {
         let directory = self.file_path(path);
         let entries = match fs::read_dir(&directory) {
@@ -123,6 +170,63 @@ impl FileWorktree {
         }
         dir_entries.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(dir_entries)
+    }
+}
+
+struct FileWorktreeTransaction {
+    root_path: PathBuf,
+    snapshots: Vec<FileWorktreeSnapshot>,
+}
+
+impl FileWorktreeTransaction {
+    fn rollback(&self) -> io::Result<()> {
+        for snapshot in &self.snapshots {
+            snapshot.restore(&self.root_path)?;
+        }
+        Ok(())
+    }
+}
+
+enum FileWorktreeSnapshot {
+    Missing {
+        path: FilePath,
+    },
+    File {
+        path: FilePath,
+        bytes: Vec<u8>,
+    },
+    Directory {
+        path: FilePath,
+        directories: Vec<FilePath>,
+        files: Vec<(FilePath, Vec<u8>)>,
+    },
+}
+
+impl FileWorktreeSnapshot {
+    fn restore(&self, root_path: &Path) -> io::Result<()> {
+        match self {
+            Self::Missing { path } => remove_path_if_exists(&root_path.join(path)),
+            Self::File { path, bytes } => {
+                remove_path_if_exists(&root_path.join(path))?;
+                persist_bytes(&root_path.join(path), bytes)
+            }
+            Self::Directory {
+                path,
+                directories,
+                files,
+            } => {
+                let directory = root_path.join(path);
+                remove_path_if_exists(&directory)?;
+                fs::create_dir_all(&directory)?;
+                for relative_path in directories {
+                    fs::create_dir_all(directory.join(relative_path))?;
+                }
+                for (relative_path, bytes) in files {
+                    persist_bytes(&directory.join(relative_path), bytes)?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -358,32 +462,53 @@ impl LaneFs {
         &mut self,
         promoted: &[(FilePath, Option<Vec<u8>>)],
     ) -> Result<(), LaneFsError> {
-        let mut deletes = promoted
+        let promoted_paths = promoted
             .iter()
-            .filter_map(|(path, bytes)| bytes.is_none().then_some(path.as_str()))
+            .map(|(path, _)| path.clone())
             .collect::<Vec<_>>();
-        deletes.sort_by(|left, right| {
-            path_depth(right)
-                .cmp(&path_depth(left))
-                .then_with(|| right.cmp(left))
-        });
-        for path in deletes {
-            self.worktree.remove_file(path).map_err(LaneFsError::Io)?;
-        }
+        let transaction = self
+            .worktree
+            .transaction(&promoted_paths)
+            .map_err(LaneFsError::Io)?;
 
-        let mut writes = promoted
-            .iter()
-            .filter_map(|(path, bytes)| bytes.as_deref().map(|bytes| (path.as_str(), bytes)))
-            .collect::<Vec<_>>();
-        writes.sort_by(|(left, _), (right, _)| {
-            path_depth(left)
-                .cmp(&path_depth(right))
-                .then_with(|| left.cmp(right))
-        });
-        for (path, bytes) in writes {
-            self.worktree
-                .write_file(path, bytes)
-                .map_err(LaneFsError::Io)?;
+        let result = (|| {
+            let mut deletes = promoted
+                .iter()
+                .filter_map(|(path, bytes)| bytes.is_none().then_some(path.as_str()))
+                .collect::<Vec<_>>();
+            deletes.sort_by(|left, right| {
+                path_depth(right)
+                    .cmp(&path_depth(left))
+                    .then_with(|| right.cmp(left))
+            });
+            for path in deletes {
+                self.worktree.remove_file(path).map_err(LaneFsError::Io)?;
+            }
+
+            let mut writes = promoted
+                .iter()
+                .filter_map(|(path, bytes)| bytes.as_deref().map(|bytes| (path.as_str(), bytes)))
+                .collect::<Vec<_>>();
+            writes.sort_by(|(left, _), (right, _)| {
+                path_depth(left)
+                    .cmp(&path_depth(right))
+                    .then_with(|| left.cmp(right))
+            });
+            for (path, bytes) in writes {
+                self.worktree
+                    .write_file(path, bytes)
+                    .map_err(LaneFsError::Io)?;
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            if let Err(rollback_error) = transaction.rollback() {
+                return Err(LaneFsError::Io(io::Error::other(format!(
+                    "failed to apply promoted files: {error}; rollback failed: {rollback_error}"
+                ))));
+            }
+            return Err(error);
         }
 
         Ok(())
@@ -400,6 +525,60 @@ fn child_path(parent: &str, child: &str) -> FilePath {
 
 fn path_depth(path: &str) -> usize {
     path.split('/').filter(|part| !part.is_empty()).count()
+}
+
+fn push_unique(paths: &mut Vec<FilePath>, path: FilePath) {
+    if !paths.contains(&path) {
+        paths.push(path);
+    }
+}
+
+fn ancestor_paths(path: &str) -> Vec<FilePath> {
+    let mut ancestors = Vec::new();
+    let mut parts = path.split('/').collect::<Vec<_>>();
+    while parts.len() > 1 {
+        parts.pop();
+        ancestors.push(parts.join("/"));
+    }
+    ancestors
+}
+
+fn collect_directory_contents(
+    directory: &Path,
+    relative_prefix: &str,
+    directories: &mut Vec<FilePath>,
+    files: &mut Vec<(FilePath, Vec<u8>)>,
+) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let relative_path = child_path(relative_prefix, &name);
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            directories.push(relative_path.clone());
+            collect_directory_contents(&path, &relative_path, directories, files)?;
+        } else if file_type.is_file() {
+            files.push((relative_path, fs::read(path)?));
+        }
+    }
+    Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[derive(Debug)]
