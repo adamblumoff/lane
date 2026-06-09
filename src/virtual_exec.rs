@@ -286,9 +286,13 @@ fn virtual_command<'a>(
         .env("LANE_VIEW_ROOT", &mount_label)
         .env("LANE_EXEC_MODE", "virtual_mount")
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_COUNT", "3")
         .env("GIT_CONFIG_KEY_0", "safe.directory")
         .env("GIT_CONFIG_VALUE_0", &git_work_tree)
+        .env("GIT_CONFIG_KEY_1", "core.worktree")
+        .env("GIT_CONFIG_VALUE_1", &git_work_tree)
+        .env("GIT_CONFIG_KEY_2", "core.bare")
+        .env("GIT_CONFIG_VALUE_2", "false")
         .env_remove("LANE_STORAGE_PATH");
     if let Some(git_view) = git_view {
         command
