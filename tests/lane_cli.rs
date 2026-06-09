@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -23,6 +23,7 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
         "-Command",
         "$ErrorActionPreference = \"Stop\"; if ((Resolve-Path $env:LANE_REPO_ROOT).ProviderPath -ne (Get-Location).ProviderPath) { throw \"LANE_REPO_ROOT must be the mounted view\" }; if ((Resolve-Path $env:LANE_VIEW_ROOT).ProviderPath -ne (Get-Location).ProviderPath) { throw \"LANE_VIEW_ROOT must be the mounted view\" }; if ($env:LANE_STORAGE_PATH) { throw \"LANE_STORAGE_PATH leaked\" }; if ($env:LANE_EXEC_MODE -ne \"virtual_mount\") { throw \"expected virtual_mount mode\" }; Set-Content -Path src/example.ts -Value \"export const mode = 'agent-a';\" -NoNewline; Set-Content -Path src/created.ts -Value \"export const created = true;\" -NoNewline",
     ]);
+    assert_exec_contract(&exec_result);
     assert_eq!(exec_result["lane"], "agent-a");
     assert_eq!(exec_result["mode"], "virtual_mount");
     assert_eq!(exec_result["exit_code"], 0);
@@ -139,6 +140,81 @@ fn cli_rejects_collapsed_review_and_promotion_shortcuts() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn cli_rejects_reserved_lane_names_at_entry_points() {
+    let repo = TempRepo::new();
+
+    for lane in ["base", "   "] {
+        let output = repo.run_unchecked(&["create", lane]);
+        assert_command_fails_with(&output, "ReservedLane");
+    }
+    assert!(!repo.path().join(".lane/repo.json").exists());
+}
+
+#[test]
+fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
+    let repo = TempRepo::new();
+    repo.run_json(["create", "agent-a"]);
+    let replacement = repo.path().join("replacement.txt");
+    fs::write(&replacement, b"replacement").unwrap();
+    let absolute_path = repo.path().join("src/example.ts").display().to_string();
+
+    for (args, message) in [
+        (
+            vec![
+                "diff".to_owned(),
+                "agent-a".to_owned(),
+                ".lane/repo.json".to_owned(),
+            ],
+            "cannot project lane state files",
+        ),
+        (
+            vec![
+                "show-op".to_owned(),
+                "agent-a".to_owned(),
+                ".lane/repo.json".to_owned(),
+                "agent-a:1".to_owned(),
+            ],
+            "cannot project lane state files",
+        ),
+        (
+            vec![
+                "resolve-op".to_owned(),
+                "agent-a".to_owned(),
+                ".lane/repo.json".to_owned(),
+                "agent-a:1".to_owned(),
+                "--with-file".to_owned(),
+                replacement.display().to_string(),
+            ],
+            "cannot project lane state files",
+        ),
+        (
+            vec![
+                "promote-ops".to_owned(),
+                "agent-a".to_owned(),
+                "..\\outside.ts".to_owned(),
+                "agent-a:1".to_owned(),
+            ],
+            "path must stay inside the repo",
+        ),
+        (
+            vec![
+                "promote-ops".to_owned(),
+                "agent-a".to_owned(),
+                absolute_path,
+                "agent-a:1".to_owned(),
+            ],
+            "path must be repo-relative",
+        ),
+    ] {
+        let output = repo.run_vec_unchecked(args);
+        assert_command_fails_with(&output, message);
+    }
+
+    assert_eq!(repo.run_json(["doctor"])["healthy"], true);
+    assert!(!repo.path().join("outside.ts").exists());
 }
 
 #[test]
@@ -266,6 +342,48 @@ fn cli_exec_deleting_lane_created_file_clears_overlay() {
             .as_array()
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn cli_exec_parent_relative_escape_stays_inside_virtual_lane_view() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;\n");
+    let escaped_name = format!("escaped-by-parent-{}.txt", unique_suffix());
+    let parent_candidate = repo.path().parent().unwrap().join(&escaped_name);
+    assert!(!parent_candidate.exists());
+
+    let result = output_json(&repo.run_vec(vec![
+        "exec".to_owned(),
+        "escape-check".to_owned(),
+        "--".to_owned(),
+        "pwsh".to_owned(),
+        "-NoProfile".to_owned(),
+        "-Command".to_owned(),
+        format!(
+            "$ErrorActionPreference = \"Stop\"; Set-Content -LiteralPath ..\\{escaped_name} -Value virtualized -NoNewline; if (-not (Test-Path -LiteralPath .\\{escaped_name})) {{ throw \"parent-relative write was not projected at the mount root\" }}"
+        ),
+    ]));
+
+    assert_exec_contract(&result);
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(
+        string_array(&result["changed_paths"]),
+        vec![escaped_name.clone()]
+    );
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert(escaped_name.clone(), "created".to_owned());
+        expected
+    });
+    assert!(!repo.path().join(&escaped_name).exists());
+    assert!(!parent_candidate.exists());
+
+    repo.run_json(["promote-clean", "escape-check"]);
+    assert_eq!(
+        fs::read(repo.path().join(&escaped_name)).unwrap(),
+        b"virtualized"
     );
 }
 
@@ -1306,7 +1424,17 @@ fn cli_parent_can_orchestrate_five_parallel_lane_execs_directly() {
         .map(|job| output_json(&assert_success(job.join().unwrap())))
         .collect::<Vec<_>>();
     assert_eq!(exec_outputs.len(), 5);
+    let mount_roots = exec_outputs
+        .iter()
+        .map(|output| output["workspace_root"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        mount_roots.len(),
+        exec_outputs.len(),
+        "parallel lane execs must use distinct virtual mount roots"
+    );
     for output in &exec_outputs {
+        assert_exec_contract(output);
         assert_eq!(output["exit_code"], 0);
         assert_eq!(output["worker_error"], Value::Null);
         assert_eq!(output["changes"].as_array().unwrap().len(), 2);
@@ -1399,6 +1527,7 @@ fn cli_exec_returns_json_for_child_failure() {
     assert!(!output.status.success());
     assert!(output.stderr.is_empty());
     let result = output_json(&output);
+    assert_exec_contract(&result);
     assert_eq!(result["lane"], "failing-lane");
     assert_eq!(result["exit_code"], 7);
     assert_eq!(result["worker_error"], Value::Null);
@@ -1763,7 +1892,7 @@ fn cli_doctor_reports_unreferenced_blob_without_failing() {
 }
 
 #[test]
-fn cli_exec_keeps_git_metadata_read_only_for_agent_processes() {
+fn cli_exec_keeps_lane_and_git_metadata_private_for_agent_processes() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;\n");
     repo.init_git_repo();
@@ -1775,9 +1904,10 @@ fn cli_exec_keeps_git_metadata_read_only_for_agent_processes() {
         "pwsh",
         "-NoProfile",
         "-Command",
-        "$ErrorActionPreference = \"Stop\"; git status --short | Out-Null; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
+        "$ErrorActionPreference = \"Stop\"; git status --short | Out-Null; foreach ($path in @('.lane/agent-owned.json', '.git/index.lock')) { $wrote = $false; try { Set-Content -LiteralPath $path -Value nope -NoNewline -ErrorAction Stop; $wrote = $true } catch { } if ($wrote) { throw \"metadata write unexpectedly succeeded: $path\" } }; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
     ]);
 
+    assert_exec_contract(&result);
     assert_eq!(result["exit_code"], 0);
     assert_eq!(result["worker_error"], Value::Null);
     assert_eq!(string_array(&result["changed_paths"]), vec!["src/agent.ts"]);
@@ -1787,6 +1917,11 @@ fn cli_exec_keeps_git_metadata_read_only_for_agent_processes() {
         expected
     });
     assert!(!repo.path().join("src/agent.ts").exists());
+    assert!(!repo.path().join(".lane/agent-owned.json").exists());
+    assert!(!repo.path().join(".git/index.lock").exists());
+    let doctor = repo.run_json(["doctor"]);
+    assert_eq!(doctor["healthy"], true);
+    assert!(doctor["report"]["errors"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -1899,6 +2034,10 @@ impl TempRepo {
     }
 
     fn run_unchecked(&self, args: &[&str]) -> Output {
+        self.run_vec_unchecked(args.iter().map(|arg| (*arg).to_owned()).collect())
+    }
+
+    fn run_vec_unchecked(&self, args: Vec<String>) -> Output {
         Command::new(env!("CARGO_BIN_EXE_lane"))
             .arg("--repo-root")
             .arg(&self.root)
@@ -2031,6 +2170,103 @@ fn assert_success(output: Output) -> Output {
 
 fn output_json(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn assert_command_fails_with(output: &Output, message: &str) {
+    assert!(
+        !output.status.success(),
+        "lane command unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failing lane command should not emit JSON stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(message),
+        "expected stderr to contain {message:?}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_exec_contract(output: &Value) {
+    assert!(
+        output["lane"].is_string(),
+        "lane must be a string: {output}"
+    );
+    assert!(
+        output["repo_root"].is_string(),
+        "repo_root must be a string: {output}"
+    );
+    assert!(
+        output["storage_path"].is_string(),
+        "storage_path must be a string: {output}"
+    );
+    assert!(
+        output["workspace_root"].is_string(),
+        "workspace_root must be a string: {output}"
+    );
+    assert!(
+        output["mount_path"].is_string(),
+        "mount_path must be a string: {output}"
+    );
+    assert_eq!(output["workspace_root"], output["mount_path"]);
+    assert_eq!(output["mode"], "virtual_mount");
+    assert!(
+        output["projected_paths"].is_array(),
+        "projected_paths must be an array: {output}"
+    );
+    assert!(
+        output["exit_code"].is_i64() || output["exit_code"].is_null(),
+        "exit_code must be an integer or null: {output}"
+    );
+    assert!(
+        output["stdout"].is_string(),
+        "stdout must be a string: {output}"
+    );
+    assert!(
+        output["stderr"].is_string(),
+        "stderr must be a string: {output}"
+    );
+    assert!(
+        output["worker_error"].is_string() || output["worker_error"].is_null(),
+        "worker_error must be a string or null: {output}"
+    );
+    assert!(
+        output["changed_paths"].is_array(),
+        "changed_paths must be an array: {output}"
+    );
+    assert!(
+        output["changes"].is_array(),
+        "changes must be an array: {output}"
+    );
+    assert!(
+        output["warnings"].is_array(),
+        "warnings must be an array: {output}"
+    );
+
+    let timings = &output["timings"];
+    assert!(timings.is_object(), "timings must be an object: {output}");
+    for key in [
+        "total_ms",
+        "lock_wait_ms",
+        "lock_held_ms",
+        "storage_lock_wait_ms",
+        "storage_lock_held_ms",
+        "pre_worker_lock_ms",
+        "worker_ms",
+        "post_worker_lock_ms",
+        "mount_ms",
+        "unmount_ms",
+        "storage_write_ops",
+    ] {
+        assert!(
+            timings[key].is_u64(),
+            "timing {key} must be an unsigned integer: {output}"
+        );
+    }
 }
 
 fn run_checked(command: &mut Command) -> Vec<u8> {
