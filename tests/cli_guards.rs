@@ -41,12 +41,22 @@ fn cli_rejects_reserved_lane_names_at_entry_points() {
 #[test]
 fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
     let repo = TempRepo::new();
+    repo.write("src/example.ts", b"base");
     repo.run_json(["create", "agent-a"]);
     let replacement = repo.path().join("replacement.txt");
     fs::write(&replacement, b"replacement").unwrap();
     let absolute_path = repo.path().join("src/example.ts").display().to_string();
 
+    assert!(
+        repo.run_text(["diff", "agent-a", "./src/example.ts"])
+            .contains("no changes in lane agent-a")
+    );
+
     for (args, message) in [
+        (
+            vec!["diff".to_owned(), "agent-a".to_owned(), "".to_owned()],
+            "missing path",
+        ),
         (
             vec![
                 "diff".to_owned(),

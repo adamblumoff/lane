@@ -23,7 +23,7 @@ const SHA256_HEX_LEN: usize = 64;
 const LOCK_RETRY_ATTEMPTS: usize = 1200;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 
-pub(crate) fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
+pub fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
     reject_legacy_storage(storage_root)?;
     let manifest_path = manifest_path(storage_root);
     let bytes = match fs::read(&manifest_path) {
@@ -39,7 +39,7 @@ pub(crate) fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
         .map_err(|error| invalid_storage(&manifest_path, error))
 }
 
-pub(crate) fn persist_repo(storage_root: &Path, repo: &LaneRepo) -> io::Result<()> {
+pub fn persist_repo(storage_root: &Path, repo: &LaneRepo) -> io::Result<()> {
     let snapshot = repo.storage_snapshot();
     fs::create_dir_all(storage_root)?;
     reject_legacy_storage(storage_root)?;
@@ -51,16 +51,12 @@ pub(crate) fn persist_repo(storage_root: &Path, repo: &LaneRepo) -> io::Result<(
     Ok(())
 }
 
-pub(crate) fn persist_last_exec(
-    storage_root: &Path,
-    lane: &str,
-    state: &LaneExecState,
-) -> io::Result<()> {
+pub fn persist_last_exec(storage_root: &Path, lane: &str, state: &LaneExecState) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(state).map_err(json_error)?;
     persist_bytes(&last_exec_path(storage_root, lane), &bytes)
 }
 
-pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorReport> {
+pub fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorReport> {
     let mut report = StorageDoctorReport::default();
 
     if storage_root.join(LEGACY_REPO_FILE).exists() {
@@ -213,32 +209,32 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub(crate) struct StorageDoctorReport {
-    pub(crate) manifest_present: bool,
-    pub(crate) version: Option<u32>,
-    pub(crate) lanes: usize,
-    pub(crate) files: usize,
-    pub(crate) ops: usize,
-    pub(crate) blobs_referenced: usize,
-    pub(crate) blobs_present: usize,
-    pub(crate) blobs_unreferenced: usize,
-    pub(crate) last_exec_files: usize,
-    pub(crate) warnings: Vec<String>,
-    pub(crate) errors: Vec<String>,
+pub struct StorageDoctorReport {
+    pub manifest_present: bool,
+    pub version: Option<u32>,
+    pub lanes: usize,
+    pub files: usize,
+    pub ops: usize,
+    pub blobs_referenced: usize,
+    pub blobs_present: usize,
+    pub blobs_unreferenced: usize,
+    pub last_exec_files: usize,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
 }
 
 impl StorageDoctorReport {
-    pub(crate) fn is_healthy(&self) -> bool {
+    pub fn is_healthy(&self) -> bool {
         self.errors.is_empty()
     }
 }
 
-pub(crate) struct RepoLock {
+pub struct RepoLock {
     path: PathBuf,
     _file: File,
 }
 
-pub(crate) fn acquire_repo_lock(storage_root: &Path) -> io::Result<RepoLock> {
+pub fn acquire_repo_lock(storage_root: &Path) -> io::Result<RepoLock> {
     acquire_path_lock(&storage_root.join(REPO_LOCK_FILE))
 }
 
@@ -646,7 +642,7 @@ fn acquire_path_lock(lock_path: &Path) -> io::Result<RepoLock> {
     }))
 }
 
-fn is_lock_contention(error: &io::Error) -> bool {
+pub fn is_lock_contention(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::AlreadyExists
         || (cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied)
 }
@@ -773,241 +769,4 @@ struct StoredOp {
     order_key: String,
     inserted_blob: String,
     inserted_len: u64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn storage_v2_persists_manifest_blobs_and_last_exec() {
-        let temp = TempStorage::new();
-        let repo = repo_with_agent_file();
-
-        persist_repo(temp.path(), &repo).unwrap();
-        persist_last_exec(
-            temp.path(),
-            "agent-a",
-            &LaneExecState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
-        )
-        .unwrap();
-
-        assert!(temp.path().join("repo.json").exists());
-        assert!(!temp.path().join("repo.lane").exists());
-        assert_eq!(doctor_storage(temp.path()).unwrap().blobs_present, 1);
-        assert!(last_exec_path(temp.path(), "agent-a").exists());
-
-        let loaded = load_repo(temp.path()).unwrap().unwrap();
-        assert_eq!(
-            loaded.read_path("src/new.ts", "agent-a", None).unwrap(),
-            Some(b"new\n".to_vec())
-        );
-        assert_eq!(
-            loaded.last_exec("agent-a").unwrap().unwrap().changed_paths,
-            vec!["src/new.ts"]
-        );
-    }
-
-    #[test]
-    fn corrupt_last_exec_is_advisory_but_doctor_reports_it() {
-        let temp = TempStorage::new();
-        let repo = repo_with_agent_file();
-        persist_repo(temp.path(), &repo).unwrap();
-        persist_last_exec(
-            temp.path(),
-            "agent-a",
-            &LaneExecState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
-        )
-        .unwrap();
-        fs::write(last_exec_path(temp.path(), "agent-a"), b"not json").unwrap();
-
-        let loaded = load_repo(temp.path()).unwrap().unwrap();
-        assert_eq!(
-            loaded.read_path("src/new.ts", "agent-a", None).unwrap(),
-            Some(b"new\n".to_vec())
-        );
-        assert!(loaded.last_exec("agent-a").unwrap().is_none());
-
-        let report = doctor_storage(temp.path()).unwrap();
-        assert!(!report.is_healthy());
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|error| error.contains("last_exec file"))
-        );
-    }
-
-    #[test]
-    fn orphan_last_exec_is_warning_not_error() {
-        let temp = TempStorage::new();
-        let repo = repo_with_agent_file();
-        persist_repo(temp.path(), &repo).unwrap();
-        fs::create_dir_all(temp.path().join("last_exec")).unwrap();
-        fs::write(last_exec_path(temp.path(), "agent-b"), b"not json").unwrap();
-
-        let loaded = load_repo(temp.path()).unwrap().unwrap();
-        assert!(loaded.last_exec("agent-a").unwrap().is_none());
-
-        let report = doctor_storage(temp.path()).unwrap();
-        assert!(report.is_healthy());
-        assert_eq!(report.last_exec_files, 1);
-        assert!(report.errors.is_empty());
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("does not belong to a manifest lane"))
-        );
-    }
-
-    #[test]
-    fn missing_blob_breaks_load_and_is_reported_by_doctor() {
-        let temp = TempStorage::new();
-        let repo = repo_with_agent_file();
-        persist_repo(temp.path(), &repo).unwrap();
-
-        fs::remove_file(first_blob_path(temp.path())).unwrap();
-
-        let load_error = load_repo(temp.path()).unwrap_err();
-        assert_eq!(load_error.kind(), io::ErrorKind::NotFound);
-        let report = doctor_storage(temp.path()).unwrap();
-        assert!(!report.is_healthy());
-        assert_eq!(report.errors.len(), 1);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|error| error.contains("is unreadable"))
-        );
-        assert!(
-            !report
-                .errors
-                .iter()
-                .any(|error| error.contains("referenced blob"))
-        );
-    }
-
-    #[test]
-    fn unreferenced_blob_is_reported_as_warning_not_error() {
-        let temp = TempStorage::new();
-        let repo = repo_with_agent_file();
-        persist_repo(temp.path(), &repo).unwrap();
-        persist_blob(
-            temp.path(),
-            "sha256/0000000000000000000000000000000000000000000000000000000000000000",
-            b"stale",
-        )
-        .unwrap();
-
-        let report = doctor_storage(temp.path()).unwrap();
-        assert!(report.is_healthy());
-        assert_eq!(report.blobs_referenced, 1);
-        assert_eq!(report.blobs_unreferenced, 1);
-        assert!(report.errors.is_empty());
-        assert!(
-            report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("is not referenced by repo.json"))
-        );
-    }
-
-    #[test]
-    fn reserved_manifest_lane_is_reported_by_doctor() {
-        let temp = TempStorage::new();
-        let repo = repo_with_agent_file();
-        persist_repo(temp.path(), &repo).unwrap();
-        let path = manifest_path(temp.path());
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        manifest["lanes"] = serde_json::json!(["base", "agent-a"]);
-        fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
-
-        let load_error = load_repo(temp.path()).unwrap_err();
-        assert_eq!(load_error.kind(), io::ErrorKind::InvalidData);
-        let report = doctor_storage(temp.path()).unwrap();
-        assert!(!report.is_healthy());
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|error| error.contains("manifest lane \"base\" is invalid"))
-        );
-    }
-
-    #[test]
-    fn lock_contention_includes_windows_permission_denied_errors() {
-        assert!(is_lock_contention(&io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "lock exists",
-        )));
-        assert_eq!(
-            is_lock_contention(&io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "lock denied",
-            )),
-            cfg!(windows)
-        );
-        assert!(!is_lock_contention(&io::Error::new(
-            io::ErrorKind::NotFound,
-            "not contention",
-        )));
-    }
-
-    fn repo_with_agent_file() -> LaneRepo {
-        let mut repo = LaneRepo::new();
-        repo.create_lane("agent-a").unwrap();
-        repo.replace_path("src/new.ts", "agent-a", None, Some(b"new\n".to_vec()))
-            .unwrap();
-        repo
-    }
-
-    fn first_blob_path(storage_root: &Path) -> PathBuf {
-        fs::read_dir(storage_root.join("blobs").join("sha256"))
-            .unwrap()
-            .next()
-            .expect("test expected one blob file")
-            .unwrap()
-            .path()
-    }
-
-    struct TempStorage {
-        root: PathBuf,
-    }
-
-    impl TempStorage {
-        fn new() -> Self {
-            let root = std::env::temp_dir()
-                .join(format!(
-                    "lane-storage-test-{}-{}",
-                    std::process::id(),
-                    unique_suffix()
-                ))
-                .join(".lane");
-            fs::create_dir_all(&root).unwrap();
-            Self { root }
-        }
-
-        fn path(&self) -> &Path {
-            &self.root
-        }
-    }
-
-    impl Drop for TempStorage {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(
-                self.root
-                    .parent()
-                    .expect("test storage root has parent directory"),
-            );
-        }
-    }
-
-    fn unique_suffix() -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    }
 }

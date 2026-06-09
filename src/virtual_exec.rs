@@ -108,7 +108,7 @@ pub(crate) fn run_virtual_lane(
     Ok(VirtualLaneRun { output, failed })
 }
 
-fn last_exec_warnings(result: Result<(), VirtualExecError>) -> Vec<VirtualExecWarning> {
+pub fn last_exec_warnings(result: Result<(), VirtualExecError>) -> Vec<VirtualExecWarning> {
     match result {
         Ok(()) => Vec::new(),
         Err(error) => vec![VirtualExecWarning {
@@ -1485,9 +1485,9 @@ pub(crate) struct VirtualExecOutput {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
-struct VirtualExecWarning {
-    kind: &'static str,
-    message: String,
+pub struct VirtualExecWarning {
+    pub kind: &'static str,
+    pub message: String,
 }
 
 struct WorkerOutput {
@@ -1534,12 +1534,12 @@ impl From<LaneFileChange> for VirtualChangeOutput {
 }
 
 #[derive(Debug)]
-pub(crate) struct VirtualExecError {
+pub struct VirtualExecError {
     message: String,
 }
 
 impl VirtualExecError {
-    fn message(message: impl Into<String>) -> Self {
+    pub fn message(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -1580,27 +1580,4 @@ fn path_label(path: impl AsRef<Path>) -> String {
 
 fn elapsed_ms(start: Instant) -> u64 {
     start.elapsed().as_millis().min(u64::MAX as u128) as u64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn last_exec_record_failure_becomes_warning() {
-        let warnings = last_exec_warnings(Err(VirtualExecError::message("storage busy")));
-
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].kind, "last_exec_not_recorded");
-        assert!(
-            warnings[0]
-                .message
-                .contains("failed to record advisory last_exec metadata: storage busy")
-        );
-    }
-
-    #[test]
-    fn last_exec_record_success_has_no_warnings() {
-        assert!(last_exec_warnings(Ok(())).is_empty());
-    }
 }

@@ -107,10 +107,20 @@ impl FileWorktree {
                 .then_with(|| right.cmp(left))
         });
 
-        let snapshots = snapshot_paths
+        let mut snapshots = snapshot_paths
             .into_iter()
             .map(|path| self.snapshot_path(path))
             .collect::<io::Result<Vec<_>>>()?;
+        let directory_paths = snapshots
+            .iter()
+            .filter_map(FileWorktreeSnapshot::directory_path)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        snapshots.retain(|snapshot| {
+            !directory_paths.iter().any(|directory| {
+                snapshot.path() != directory && is_descendant_path(snapshot.path(), directory)
+            })
+        });
         Ok(FileWorktreeTransaction {
             root_path: self.root_path.clone(),
             snapshots,
@@ -181,7 +191,12 @@ struct FileWorktreeTransaction {
 impl FileWorktreeTransaction {
     fn rollback(&self) -> io::Result<()> {
         for snapshot in &self.snapshots {
-            snapshot.restore(&self.root_path)?;
+            snapshot.restore(&self.root_path).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("failed to restore {}: {error}", snapshot.path()),
+                )
+            })?;
         }
         Ok(())
     }
@@ -203,6 +218,19 @@ enum FileWorktreeSnapshot {
 }
 
 impl FileWorktreeSnapshot {
+    fn path(&self) -> &str {
+        match self {
+            Self::Missing { path } | Self::File { path, .. } | Self::Directory { path, .. } => path,
+        }
+    }
+
+    fn directory_path(&self) -> Option<&str> {
+        match self {
+            Self::Directory { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+
     fn restore(&self, root_path: &Path) -> io::Result<()> {
         match self {
             Self::Missing { path } => remove_path_if_exists(&root_path.join(path)),
@@ -216,8 +244,7 @@ impl FileWorktreeSnapshot {
                 files,
             } => {
                 let directory = root_path.join(path);
-                remove_path_if_exists(&directory)?;
-                fs::create_dir_all(&directory)?;
+                recreate_directory(&directory)?;
                 for relative_path in directories {
                     fs::create_dir_all(directory.join(relative_path))?;
                 }
@@ -543,6 +570,11 @@ fn ancestor_paths(path: &str) -> Vec<FilePath> {
     ancestors
 }
 
+fn is_descendant_path(path: &str, ancestor: &str) -> bool {
+    path.strip_prefix(ancestor)
+        .is_some_and(|tail| tail.starts_with('/'))
+}
+
 fn collect_directory_contents(
     directory: &Path,
     relative_prefix: &str,
@@ -579,6 +611,26 @@ fn remove_path_if_exists(path: &Path) -> io::Result<()> {
         }
         Err(error) => Err(error),
     }
+}
+
+fn recreate_directory(path: &Path) -> io::Result<()> {
+    for attempt in 0..3 {
+        remove_path_if_exists(path)?;
+        match fs::create_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt < 2
+                    && matches!(
+                        error.kind(),
+                        io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied
+                    ) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

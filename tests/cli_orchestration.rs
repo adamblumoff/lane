@@ -251,6 +251,62 @@ fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
 }
 
 #[test]
+fn cli_promote_clean_rolls_back_worktree_when_later_write_fails() {
+    let repo = TempRepo::new();
+    repo.write("src/swap/original.txt", b"original");
+
+    let result = repo.run_json([
+        "exec",
+        "rollback-lane",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path a.txt -Value created -NoNewline; Remove-Item -Recurse -LiteralPath src/swap; Set-Content -Path src/swap -Value \"now a file\" -NoNewline; New-Item -ItemType Directory -Path zz-blocked -Force | Out-Null; Set-Content -Path zz-blocked/nested.txt -Value \"cannot write\" -NoNewline",
+    ]);
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert!(!repo.path().join("a.txt").exists());
+    assert!(!repo.path().join("zz-blocked").exists());
+
+    fs::write(repo.path().join("zz-blocked"), b"still a file").unwrap();
+    let output = repo.run_unchecked(&["promote-clean", "rollback-lane"]);
+    assert!(
+        !output.status.success(),
+        "promotion unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failing promotion should not emit JSON stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert!(!repo.path().join("a.txt").exists());
+    assert!(repo.path().join("src/swap").is_dir());
+    assert_eq!(
+        fs::read(repo.path().join("src/swap/original.txt")).unwrap(),
+        b"original"
+    );
+    assert_eq!(
+        fs::read(repo.path().join("zz-blocked")).unwrap(),
+        b"still a file"
+    );
+    assert_eq!(
+        review_change_statuses(&repo.run_json(["review", "rollback-lane"]), "rollback-lane"),
+        {
+            let mut expected = BTreeMap::new();
+            expected.insert("a.txt".to_owned(), "created".to_owned());
+            expected.insert("src/swap".to_owned(), "created".to_owned());
+            expected.insert("src/swap/original.txt".to_owned(), "deleted".to_owned());
+            expected.insert("zz-blocked/nested.txt".to_owned(), "created".to_owned());
+            expected
+        }
+    );
+}
+
+#[test]
 fn cli_review_groups_clean_ops_and_conflict_decisions_json_first() {
     let repo = TempRepo::new();
     repo.write("src/vars.txt", b"a=1\nb=2\nc=3\nd=4\n");
