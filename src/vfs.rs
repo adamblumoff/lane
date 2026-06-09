@@ -630,7 +630,7 @@ fn recreate_directory(path: &Path) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    Ok(())
+    unreachable!("retry loop always exits via return on the final attempt")
 }
 
 #[derive(Debug)]

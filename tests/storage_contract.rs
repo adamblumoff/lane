@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::{doctor_storage, is_lock_contention, load_repo, persist_last_exec, persist_repo};
 
+// This recompiles the crate-private storage module inside the integration test.
+// Keep the lane::* re-exports above aligned with storage.rs crate:: imports.
 #[allow(dead_code)]
 #[path = "../src/storage.rs"]
 mod storage;
