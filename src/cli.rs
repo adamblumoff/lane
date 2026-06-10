@@ -233,10 +233,13 @@ fn resolve_op(
     let replacement_file = fs::canonicalize(with_file).unwrap_or_else(|_| with_file.to_path_buf());
     let mut locked = open_locked_lane_fs(repo_root)?;
     let detail = locked.fs.op_detail(lane, path, op_id)?;
-    locked
-        .fs
-        .resolve_op_file(lane, path, op_id, replacement.clone())?;
-    locked.persist()?;
+    locked.fs.resolve_op_file(
+        lane,
+        path,
+        op_id,
+        replacement.clone(),
+        persist_lane_repo(&locked.storage_path),
+    )?;
 
     let output = ResolveOpOutput {
         lane,
@@ -283,10 +286,11 @@ fn promote_ops(repo_root: &Path, lane: &str, path: &str, ops: &[String]) -> CliR
     let before = change_for_path(&locked.fs, lane, path)?
         .into_iter()
         .collect::<Vec<_>>();
-    locked
-        .fs
-        .promote_ops_files(lane, &[(path.to_owned(), ops.to_vec())])?;
-    locked.persist()?;
+    locked.fs.promote_ops_files(
+        lane,
+        &[(path.to_owned(), ops.to_vec())],
+        persist_lane_repo(&locked.storage_path),
+    )?;
 
     let selected_ops = ops.iter().cloned().collect::<BTreeSet<_>>();
     let promoted = filter_change_ops(&before, |op| selected_ops.contains(&op.op_id));
@@ -314,8 +318,9 @@ fn promote_clean(repo_root: &Path, lane: &str) -> CliResult<()> {
             .iter()
             .map(|path_ops| (path_ops.path.clone(), path_ops.ops.clone()))
             .collect::<Vec<_>>();
-        locked.fs.promote_ops_files(lane, &selections)?;
-        locked.persist()?;
+        locked
+            .fs
+            .promote_ops_files(lane, &selections, persist_lane_repo(&locked.storage_path))?;
     }
 
     let output = PromoteCleanOutput {
@@ -703,6 +708,12 @@ struct LockedLaneFs {
     storage_path: PathBuf,
     fs: LaneFs,
     _lock: RepoLock,
+}
+
+fn persist_lane_repo(
+    storage_path: &Path,
+) -> impl FnOnce(&LaneRepo) -> Result<(), LaneFsError> + '_ {
+    move |repo| persist_repo(storage_path, repo).map_err(LaneFsError::Io)
 }
 
 impl LockedLaneFs {

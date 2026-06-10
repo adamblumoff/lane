@@ -9,7 +9,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use windows_sys::Win32::Foundation::{
@@ -30,9 +30,13 @@ use crate::storage::{
 use crate::vfs::{
     DirEntryKind, FileWorktree, LaneFileChange, LaneFileChangeStatus, LaneFs, LaneFsError,
 };
-use crate::{FilePath, LaneError, LaneExecState, LaneOpSummary};
+use crate::{
+    FilePath, LaneError, LaneExecState, LaneOpSummary, is_git_metadata_path, is_lane_state_path,
+};
 
 const STORAGE_PATH: &str = ".lane";
+const MOUNT_READY_ATTEMPTS: usize = 40;
+const MOUNT_READY_DELAY: Duration = Duration::from_millis(25);
 static NEXT_TEMP_GIT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn run_virtual_lane(
@@ -235,7 +239,10 @@ fn start_mount(
         };
         let params = winfsp_params()?;
         match FileSystem::start(params, Some(mount_point.mount_name.as_ucstr()), context) {
-            Ok(file_system) => return Ok((mount_point, file_system, state)),
+            Ok(file_system) => {
+                wait_for_mount_ready(&mount_point.workspace_path)?;
+                return Ok((mount_point, file_system, state));
+            }
             Err(STATUS_OBJECT_NAME_COLLISION | STATUS_ACCESS_DENIED) => {
                 last_unavailable = Some(letter);
             }
@@ -272,6 +279,19 @@ fn winfsp_params() -> Result<Params, VirtualExecError> {
         .set_file_system_name(u16cstr!("Lane"))
         .map_err(|_| VirtualExecError::message("WinFsp filesystem name is too long"))?;
     Ok(params)
+}
+
+fn wait_for_mount_ready(workspace_path: &Path) -> Result<(), VirtualExecError> {
+    for _ in 0..MOUNT_READY_ATTEMPTS {
+        match workspace_path.try_exists() {
+            Ok(true) => return Ok(()),
+            Ok(false) | Err(_) => thread::sleep(MOUNT_READY_DELAY),
+        }
+    }
+    Err(VirtualExecError::message(format!(
+        "WinFsp mount {} did not become visible",
+        workspace_path.display()
+    )))
 }
 
 fn try_allocate_mount_point(letter: char) -> io::Result<Option<MountPoint>> {
@@ -1111,6 +1131,9 @@ impl VirtualLaneState {
                 DirtyEntry::Deleted => None,
             });
         }
+        if self.dirty_ancestor_hides(path)? {
+            return Ok(None);
+        }
 
         self.with_fs_read(|fs| {
             let overlay_paths = fs
@@ -1153,6 +1176,9 @@ impl VirtualLaneState {
                 DirtyEntry::File(bytes) => Ok(bytes),
                 DirtyEntry::Directory | DirtyEntry::Deleted => Err(STATUS_NO_SUCH_FILE),
             };
+        }
+        if self.dirty_ancestor_hides(path)? {
+            return Err(STATUS_NO_SUCH_FILE);
         }
 
         self.with_fs_read(|fs| {
@@ -1213,6 +1239,10 @@ impl VirtualLaneState {
     fn rename_file(&self, from: &str, to: &str, replace_if_exists: bool) -> Result<u64, i32> {
         if from == to {
             return self.path_version(from);
+        }
+        if from.eq_ignore_ascii_case(to) {
+            let bytes = self.read_file(from)?;
+            return self.set_dirty_entry(to, DirtyEntry::File(bytes));
         }
         if self.node_for_path(to)?.is_some() && !replace_if_exists {
             return Err(STATUS_OBJECT_NAME_COLLISION);
@@ -1327,6 +1357,10 @@ impl VirtualLaneState {
     }
 
     fn dir_entries(&self, path: &str) -> Result<Vec<(String, FileInfo)>, i32> {
+        if self.dirty_ancestor_hides(path)? {
+            return Err(STATUS_OBJECT_NAME_NOT_FOUND);
+        }
+
         self.with_fs_read(|fs| {
             let mut entries: BTreeMap<String, FileInfo> = vec![
                 (".".to_owned(), dir_info(path)),
@@ -1357,9 +1391,10 @@ impl VirtualLaneState {
                     continue;
                 };
                 match (kind, dirty) {
-                    (DirEntryKind::Directory, _) => {
-                        entries.insert(name, dir_info(&dirty_path));
+                    (DirEntryKind::Directory, DirtyEntry::File(_) | DirtyEntry::Directory) => {
+                        entries.insert(name.clone(), dir_info(&child_path(path, &name)));
                     }
+                    (DirEntryKind::Directory, DirtyEntry::Deleted) => {}
                     (DirEntryKind::File, DirtyEntry::File(bytes)) => {
                         entries.insert(name, file_info(&dirty_path, bytes.len() as u64));
                     }
@@ -1389,6 +1424,11 @@ impl VirtualLaneState {
         if dirty.is_empty() {
             return Ok(());
         }
+        let versions = self
+            .versions
+            .lock()
+            .map_err(|_| VirtualExecError::message("virtual lane version map lock poisoned"))?
+            .clone();
 
         with_lane_fs_write(
             &self.repo_root,
@@ -1398,6 +1438,7 @@ impl VirtualLaneState {
                 latest
                     .create_lane(&self.lane)
                     .map_err(status_from_lane_fs_error)?;
+                let dirty = canonicalize_dirty_entries(latest, &self.lane, &dirty, &versions)?;
                 apply_dirty_entries(
                     latest,
                     &self.lane,
@@ -1414,11 +1455,19 @@ impl VirtualLaneState {
             .lock()
             .map_err(|_| VirtualExecError::message("virtual lane dirty map lock poisoned"))?
             .clone();
+        let versions = self
+            .versions
+            .lock()
+            .map_err(|_| VirtualExecError::message("virtual lane version map lock poisoned"))?
+            .clone();
         let fs = self
             .fs
             .lock()
             .map_err(|_| VirtualExecError::message("virtual lane session lock poisoned"))?;
         let mut draft = LaneFs::new(fs.repo().clone(), FileWorktree::new(&self.repo_root));
+        let dirty = canonicalize_dirty_entries(&draft, &self.lane, &dirty, &versions).map_err(
+            |status| VirtualExecError::from_status("collect dirty virtual changes", status),
+        )?;
         apply_dirty_entries(
             &mut draft,
             &self.lane,
@@ -1470,17 +1519,15 @@ impl VirtualLaneState {
     }
 
     fn worker_changed_paths(&self) -> Result<Vec<FilePath>, VirtualExecError> {
-        self.dirty
-            .lock()
-            .map_err(|_| VirtualExecError::message("virtual lane dirty map lock poisoned"))
-            .map(|dirty| dirty.keys().cloned().collect())
+        self.canonical_dirty_entries()
+            .map(|dirty| dirty.into_iter().map(|(path, _)| path).collect())
+            .map_err(|status| VirtualExecError::from_status("collect worker changed paths", status))
     }
 
     fn dirty_entry(&self, path: &str) -> Result<Option<DirtyEntry>, i32> {
-        self.dirty
-            .lock()
-            .map_err(|_| STATUS_ACCESS_DENIED)
-            .map(|dirty| dirty.get(path).cloned())
+        let dirty = self.dirty.lock().map_err(|_| STATUS_ACCESS_DENIED)?;
+        let versions = self.versions.lock().map_err(|_| STATUS_ACCESS_DENIED)?;
+        Ok(newest_dirty_entry_for_path(&dirty, &versions, path).cloned())
     }
 
     fn dirty_entries(&self) -> Result<Vec<(FilePath, DirtyEntry)>, i32> {
@@ -1496,16 +1543,31 @@ impl VirtualLaneState {
     }
 
     fn dirty_has_visible_children(&self, path: &str) -> Result<bool, i32> {
-        let prefix = child_prefix(path);
         self.dirty
             .lock()
             .map_err(|_| STATUS_ACCESS_DENIED)
             .map(|dirty| {
                 dirty.iter().any(|(dirty_path, entry)| {
-                    dirty_path.starts_with(&prefix)
+                    is_descendant_path(dirty_path, path)
                         && matches!(entry, DirtyEntry::File(_) | DirtyEntry::Directory)
                 })
             })
+    }
+
+    fn dirty_ancestor_hides(&self, path: &str) -> Result<bool, i32> {
+        let dirty = self.dirty.lock().map_err(|_| STATUS_ACCESS_DENIED)?;
+        let versions = self.versions.lock().map_err(|_| STATUS_ACCESS_DENIED)?;
+        Ok(dirty_ancestor_hides(&dirty, &versions, path))
+    }
+
+    fn canonical_dirty_entries(&self) -> Result<Vec<(FilePath, DirtyEntry)>, i32> {
+        let dirty = self.dirty.lock().map_err(|_| STATUS_ACCESS_DENIED)?.clone();
+        let versions = self
+            .versions
+            .lock()
+            .map_err(|_| STATUS_ACCESS_DENIED)?
+            .clone();
+        self.with_fs_read(|fs| canonicalize_dirty_entries(fs, &self.lane, &dirty, &versions))
     }
 
     fn path_version(&self, path: &str) -> Result<u64, i32> {
@@ -1563,6 +1625,46 @@ fn apply_dirty_entries<'a>(
     Ok(())
 }
 
+fn canonicalize_dirty_entries(
+    fs: &LaneFs,
+    lane: &str,
+    dirty: &BTreeMap<FilePath, DirtyEntry>,
+    versions: &BTreeMap<FilePath, u64>,
+) -> Result<Vec<(FilePath, DirtyEntry)>, i32> {
+    let mut merged: BTreeMap<String, (u64, FilePath, DirtyEntry)> = BTreeMap::new();
+    for (path, entry) in dirty {
+        let canonical_path = canonicalize_visible_path(fs, lane, path)?;
+        let canonical_key = canonical_path.to_ascii_lowercase();
+        let version = versions.get(path).copied().unwrap_or(0);
+        let replace = match merged.get(&canonical_key) {
+            Some((existing_version, _, _)) => version >= *existing_version,
+            None => true,
+        };
+        if replace {
+            merged.insert(canonical_key, (version, canonical_path, entry.clone()));
+        }
+    }
+    Ok(merged
+        .into_values()
+        .map(|(_, path, entry)| (path, entry))
+        .collect())
+}
+
+fn canonicalize_visible_path(fs: &LaneFs, lane: &str, path: &str) -> Result<FilePath, i32> {
+    let mut canonical = String::new();
+    for part in path.split('/').filter(|part| !part.is_empty()) {
+        let name = fs
+            .list_dir(lane, &canonical)
+            .map_err(status_from_lane_fs_error)?
+            .into_iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case(part))
+            .map(|entry| entry.name)
+            .unwrap_or_else(|| part.to_owned());
+        canonical = child_path(&canonical, &name);
+    }
+    Ok(canonical)
+}
+
 fn collect_visible_files(
     fs: &LaneFs,
     lane: &str,
@@ -1591,7 +1693,7 @@ fn dir_entry_for_dirty_path(directory: &str, dirty_path: &str) -> Option<(String
     let tail = if directory.is_empty() {
         dirty_path
     } else {
-        dirty_path.strip_prefix(&format!("{directory}/"))?
+        dirty_path_descendant_tail(dirty_path, directory)?
     };
     if tail.is_empty() || tail == dirty_path && !directory.is_empty() {
         return None;
@@ -1600,6 +1702,49 @@ fn dir_entry_for_dirty_path(directory: &str, dirty_path: &str) -> Option<(String
         Some((name, _)) => Some((name.to_owned(), DirEntryKind::Directory)),
         None => Some((tail.to_owned(), DirEntryKind::File)),
     }
+}
+
+fn dirty_path_descendant_tail<'a>(dirty_path: &'a str, directory: &str) -> Option<&'a str> {
+    let separator = dirty_path.as_bytes().get(directory.len())?;
+    let prefix = dirty_path.get(..directory.len())?;
+    if *separator != b'/' || !prefix.eq_ignore_ascii_case(directory) {
+        return None;
+    }
+    dirty_path.get(directory.len() + 1..)
+}
+
+fn is_descendant_path(path: &str, directory: &str) -> bool {
+    if directory.is_empty() {
+        return !path.is_empty();
+    }
+    dirty_path_descendant_tail(path, directory).is_some()
+}
+
+fn dirty_ancestor_hides(
+    dirty: &BTreeMap<FilePath, DirtyEntry>,
+    versions: &BTreeMap<FilePath, u64>,
+    path: &str,
+) -> bool {
+    let mut current = path;
+    while let Some((parent, _)) = current.rsplit_once('/') {
+        if let Some(entry) = newest_dirty_entry_for_path(dirty, versions, parent) {
+            return matches!(entry, DirtyEntry::Deleted | DirtyEntry::File(_));
+        }
+        current = parent;
+    }
+    false
+}
+
+fn newest_dirty_entry_for_path<'a>(
+    dirty: &'a BTreeMap<FilePath, DirtyEntry>,
+    versions: &BTreeMap<FilePath, u64>,
+    path: &str,
+) -> Option<&'a DirtyEntry> {
+    dirty
+        .iter()
+        .filter(|(dirty_path, _)| dirty_path.eq_ignore_ascii_case(path))
+        .max_by_key(|(dirty_path, _)| versions.get(*dirty_path).copied().unwrap_or(0))
+        .map(|(_, entry)| entry)
 }
 
 fn prepare_session_fs(
@@ -1732,14 +1877,6 @@ fn ensure_mutable_path(path: &str) -> Result<(), i32> {
     } else {
         Ok(())
     }
-}
-
-fn is_lane_state_path(path: &str) -> bool {
-    path == ".lane" || path.starts_with(".lane/")
-}
-
-fn is_git_metadata_path(path: &str) -> bool {
-    path == ".git" || path.starts_with(".git/")
 }
 
 fn child_path(parent: &str, child: &str) -> FilePath {

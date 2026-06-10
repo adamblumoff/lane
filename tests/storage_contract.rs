@@ -11,7 +11,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use storage::{doctor_storage, is_lock_contention, load_repo, persist_last_exec, persist_repo};
+use storage::{
+    acquire_repo_lock, doctor_storage, is_lock_contention, load_repo, persist_last_exec,
+    persist_repo,
+};
 
 // This recompiles the crate-private storage module inside the integration test.
 // Keep the lane::* re-exports above aligned with storage.rs crate:: imports.
@@ -217,6 +220,17 @@ fn lock_contention_includes_windows_permission_denied_errors() {
         io::ErrorKind::NotFound,
         "not contention",
     )));
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn stale_pid_lock_is_reaped_on_acquire() {
+    let temp = TempStorage::new();
+    fs::write(temp.path().join("repo.lock"), "pid=4294967295\n").unwrap();
+
+    let _lock = acquire_repo_lock(temp.path()).unwrap();
+
+    assert!(temp.path().join("repo.lock").exists());
 }
 
 fn repo_with_agent_file() -> LaneRepo {

@@ -7,7 +7,10 @@ use std::path::{Component, Path, PathBuf};
 use serde::Serialize;
 
 use crate::storage::persist_bytes;
-use crate::{FilePath, LaneError, LaneOpDetail, LaneOpSummary, LaneRepo};
+use crate::{
+    FilePath, LaneError, LaneOpDetail, LaneOpSummary, LaneRepo, is_git_metadata_path,
+    is_lane_state_path,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DirEntry {
@@ -165,7 +168,9 @@ impl FileWorktree {
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if path.is_empty() && name == ".lane" {
+            if path.is_empty()
+                && (name.eq_ignore_ascii_case(".lane") || name.eq_ignore_ascii_case(".git"))
+            {
                 continue;
             }
             let file_type = entry.file_type()?;
@@ -437,6 +442,7 @@ impl LaneFs {
         &mut self,
         lane: &str,
         path_ops: &[(FilePath, Vec<String>)],
+        persist: impl FnOnce(&LaneRepo) -> Result<(), LaneFsError>,
     ) -> Result<(), LaneFsError> {
         let path_ops = path_ops
             .iter()
@@ -462,9 +468,7 @@ impl LaneFs {
             promoted.push((path, bytes));
         }
 
-        self.apply_promoted_files(&promoted)?;
-        self.repo = draft;
-        Ok(())
+        self.commit_promoted_files(draft, &promoted, persist)
     }
 
     pub(crate) fn resolve_op_file(
@@ -473,6 +477,7 @@ impl LaneFs {
         path: &str,
         op_id: &str,
         replacement: impl Into<Vec<u8>>,
+        persist: impl FnOnce(&LaneRepo) -> Result<(), LaneFsError>,
     ) -> Result<(), LaneFsError> {
         let path = normalize_repo_path(path)?;
         let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
@@ -480,14 +485,14 @@ impl LaneFs {
         let promoted = draft
             .resolve_op_path(&path, lane, base.as_deref(), op_id, replacement)
             .map_err(LaneFsError::Lane)?;
-        self.apply_promoted_files(&[(path, promoted)])?;
-        self.repo = draft;
-        Ok(())
+        self.commit_promoted_files(draft, &[(path, promoted)], persist)
     }
 
-    fn apply_promoted_files(
+    fn commit_promoted_files(
         &mut self,
+        draft: LaneRepo,
         promoted: &[(FilePath, Option<Vec<u8>>)],
+        persist: impl FnOnce(&LaneRepo) -> Result<(), LaneFsError>,
     ) -> Result<(), LaneFsError> {
         let promoted_paths = promoted
             .iter()
@@ -498,6 +503,7 @@ impl LaneFs {
             .transaction(&promoted_paths)
             .map_err(LaneFsError::Io)?;
 
+        let old_repo = self.repo.clone();
         let result = (|| {
             let mut deletes = promoted
                 .iter()
@@ -526,13 +532,16 @@ impl LaneFs {
                     .write_file(path, bytes)
                     .map_err(LaneFsError::Io)?;
             }
+            self.repo = draft;
+            persist(&self.repo)?;
             Ok(())
         })();
 
         if let Err(error) = result {
+            self.repo = old_repo;
             if let Err(rollback_error) = transaction.rollback() {
                 return Err(LaneFsError::Io(io::Error::other(format!(
-                    "failed to apply promoted files: {error}; rollback failed: {rollback_error}"
+                    "failed to commit promoted files: {error}; rollback failed: {rollback_error}"
                 ))));
             }
             return Err(error);
@@ -691,11 +700,103 @@ fn normalize_repo_label(path: &str) -> Result<String, LaneFsError> {
     }
 
     let label = parts.join("/");
-    let reserved_label = label.to_ascii_lowercase();
-    if reserved_label == ".lane" || reserved_label.starts_with(".lane/") {
+    if is_lane_state_path(&label) {
         return Err(LaneFsError::BadPath(
             "cannot project lane state files".to_owned(),
         ));
     }
+    if is_git_metadata_path(&label) {
+        return Err(LaneFsError::BadPath(
+            "cannot project git metadata files".to_owned(),
+        ));
+    }
     Ok(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn promotion_rolls_back_worktree_when_persist_fails() {
+        let root = temp_dir();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/example.txt"), b"base").unwrap();
+
+        let mut repo = LaneRepo::new();
+        repo.create_lane("agent-a").unwrap();
+        repo.replace_path(
+            "src/example.txt",
+            "agent-a",
+            Some(b"base"),
+            Some(b"lane".to_vec()),
+        )
+        .unwrap();
+        let op_ids = repo
+            .change_ops("src/example.txt", "agent-a", Some(b"base"))
+            .unwrap()
+            .into_iter()
+            .map(|op| op.op_id)
+            .collect::<Vec<_>>();
+        let mut fs = LaneFs::new(repo, FileWorktree::new(&root));
+
+        let result =
+            fs.promote_ops_files("agent-a", &[("src/example.txt".to_owned(), op_ids)], |_| {
+                Err(LaneFsError::Io(io::Error::other(
+                    "synthetic persist failure",
+                )))
+            });
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(root.join("src/example.txt")).unwrap(),
+            b"base"
+        );
+        assert_eq!(
+            fs.read_file("agent-a", "src/example.txt").unwrap(),
+            Some(b"lane".to_vec())
+        );
+        assert_eq!(
+            fs.change_for_path("agent-a", "src/example.txt")
+                .unwrap()
+                .unwrap()
+                .status,
+            LaneFileChangeStatus::Modified
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn path_normalization_rejects_repo_metadata_case_insensitively() {
+        assert!(matches!(
+            normalize_repo_path(".LANE/repo.json"),
+            Err(LaneFsError::BadPath(message)) if message == "cannot project lane state files"
+        ));
+        assert!(matches!(
+            normalize_repo_path(".GIT/config"),
+            Err(LaneFsError::BadPath(message)) if message == "cannot project git metadata files"
+        ));
+        assert_eq!(
+            normalize_repo_path("src/.git/config").unwrap(),
+            "src/.git/config"
+        );
+    }
+
+    fn temp_dir() -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "lane-vfs-test-{}-{timestamp}-{}",
+            std::process::id(),
+            NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 }
