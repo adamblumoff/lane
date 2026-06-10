@@ -1,4 +1,4 @@
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 
 use crate::LaneOpSummary;
 use crate::vfs::LaneFileChangeStatus;
@@ -10,43 +10,45 @@ use super::{
 
 pub(super) fn format(output: &ReviewOutput) -> String {
     let mut text = String::new();
-    writeln!(&mut text, "Lane review").expect("write to string cannot fail");
+    write_review(&mut text, output).expect("write to string cannot fail");
+    text
+}
+
+fn write_review(text: &mut String, output: &ReviewOutput) -> fmt::Result {
+    writeln!(text, "Lane review")?;
     writeln!(
-        &mut text,
+        text,
         "scope: {}",
         output.lane.as_deref().unwrap_or("all lanes")
-    )
-    .expect("write to string cannot fail");
-    writeln!(&mut text, "repo: {}", output.repo_root).expect("write to string cannot fail");
-    writeln!(&mut text, "storage: {}", output.storage_path).expect("write to string cannot fail");
+    )?;
+    writeln!(text, "repo: {}", output.repo_root)?;
+    writeln!(text, "storage: {}", output.storage_path)?;
     writeln!(
-        &mut text,
+        text,
         "summary: {}, {}, {}, {}, {}",
         count_label(output.summary.lanes, "lane"),
         count_label(output.summary.changed_paths, "changed path"),
         count_label(output.summary.clean_ops, "clean op"),
         count_label(output.summary.conflicted_ops, "conflicted op"),
         count_label(output.summary.conflict_groups, "conflict group"),
-    )
-    .expect("write to string cannot fail");
+    )?;
 
     if output.paths.is_empty() {
-        writeln!(&mut text, "\nNo changed paths.").expect("write to string cannot fail");
+        writeln!(text, "\nNo changed paths.")?;
     } else {
         for path in &output.paths {
-            writeln!(&mut text, "\n{}", path.path).expect("write to string cannot fail");
-            write_path(&mut text, path);
+            writeln!(text, "\n{}", path.path)?;
+            write_path(text, path)?;
         }
     }
 
-    write_lane_actions(&mut text, &output.lanes);
-    text
+    write_lane_actions(text, &output.lanes)
 }
 
-fn write_path(text: &mut String, path: &ReviewPathOutput) {
-    writeln!(text, "  |- lanes").expect("write to string cannot fail");
+fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
+    writeln!(text, "  |- lanes")?;
     if path.lanes.is_empty() {
-        writeln!(text, "  |  - none").expect("write to string cannot fail");
+        writeln!(text, "  |  - none")?;
     } else {
         for lane in &path.lanes {
             writeln!(
@@ -59,17 +61,16 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) {
                 lane.conflicted_ops,
                 optional_bytes_label(lane.base_size),
                 optional_bytes_label(lane.lane_size),
-            )
-            .expect("write to string cannot fail");
+            )?;
         }
     }
 
-    writeln!(text, "  |- clean ops").expect("write to string cannot fail");
+    writeln!(text, "  |- clean ops")?;
     if path.clean_ops.is_empty() {
-        writeln!(text, "  |  - none").expect("write to string cannot fail");
+        writeln!(text, "  |  - none")?;
     } else {
         for op in &path.clean_ops {
-            writeln!(text, "  |  - {}", op_label(&op.op)).expect("write to string cannot fail");
+            writeln!(text, "  |  - {}", op_label(&op.op))?;
             writeln!(
                 text,
                 "  |    promote: {}",
@@ -79,20 +80,18 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) {
                     op.op.path.as_str(),
                     op.op.op_id.as_str(),
                 ])
-            )
-            .expect("write to string cannot fail");
+            )?;
             writeln!(
                 text,
                 "  |    inspect: {}",
                 format_action_command(&show_op_action(op))
-            )
-            .expect("write to string cannot fail");
+            )?;
         }
     }
 
-    writeln!(text, "  `- conflict groups").expect("write to string cannot fail");
+    writeln!(text, "  `- conflict groups")?;
     if path.conflicts.is_empty() {
-        writeln!(text, "     - none").expect("write to string cannot fail");
+        writeln!(text, "     - none")?;
     } else {
         for (index, conflict) in path.conflicts.iter().enumerate() {
             writeln!(
@@ -102,38 +101,35 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) {
                 conflict.range_start,
                 conflict.range_end,
                 conflict.lanes.join(", "),
-            )
-            .expect("write to string cannot fail");
+            )?;
             for op in &conflict.ops {
-                writeln!(text, "       - {}", op_label(&op.op))
-                    .expect("write to string cannot fail");
+                writeln!(text, "       - {}", op_label(&op.op))?;
                 writeln!(
                     text,
                     "         inspect: {}",
                     format_action_command(&show_op_action(op))
-                )
-                .expect("write to string cannot fail");
+                )?;
                 writeln!(
                     text,
                     "         resolve: {}",
                     format_action_command(&resolve_op_action(op))
-                )
-                .expect("write to string cannot fail");
+                )?;
             }
         }
     }
+    Ok(())
 }
 
-fn write_lane_actions(text: &mut String, lanes: &[ReviewLaneSummary]) {
+fn write_lane_actions(text: &mut String, lanes: &[ReviewLaneSummary]) -> fmt::Result {
     if lanes.is_empty() {
-        return;
+        return Ok(());
     }
 
-    writeln!(text, "\nLane actions").expect("write to string cannot fail");
+    writeln!(text, "\nLane actions")?;
     for lane in lanes {
-        writeln!(text, "  {}:", lane.lane).expect("write to string cannot fail");
+        writeln!(text, "  {}:", lane.lane)?;
         if lane.actions.is_empty() {
-            writeln!(text, "    - none").expect("write to string cannot fail");
+            writeln!(text, "    - none")?;
         } else {
             for action in &lane.actions {
                 writeln!(
@@ -141,11 +137,11 @@ fn write_lane_actions(text: &mut String, lanes: &[ReviewLaneSummary]) {
                     "    - {}: {}",
                     action_label(action.kind),
                     format_action_command(action),
-                )
-                .expect("write to string cannot fail");
+                )?;
             }
         }
     }
+    Ok(())
 }
 
 fn op_label(op: &LaneOpSummary) -> String {
@@ -159,8 +155,8 @@ fn op_label(op: &LaneOpSummary) -> String {
         bytes_label(op.inserted_len),
     );
     if !op.conflicts_with.is_empty() {
-        write!(label, ", conflicts with {}", op.conflicts_with.join(", "))
-            .expect("write to string cannot fail");
+        label.push_str(", conflicts with ");
+        label.push_str(&op.conflicts_with.join(", "));
     }
     label
 }

@@ -24,7 +24,9 @@ use winfsp_wrs::{
     SecurityDescriptor, U16CStr, U16CString, VolumeInfo, WriteMode, filetime_now, u16cstr,
 };
 
-use crate::storage::{acquire_repo_lock, load_repo, persist_last_exec, persist_repo};
+use crate::storage::{
+    acquire_repo_lock, encode_path_component, load_repo, persist_last_exec, persist_repo,
+};
 use crate::vfs::{
     DirEntryKind, FileWorktree, LaneFileChange, LaneFileChangeStatus, LaneFs, LaneFsError,
 };
@@ -436,7 +438,7 @@ fn virtual_command<'a>(
     let cargo_target_dir = repo_root
         .join("target")
         .join("lane-exec")
-        .join(path_component(lane));
+        .join(encode_path_component(lane));
     let mut command = ProcessCommand::new(resolve_program(program));
     command
         .args(args)
@@ -475,19 +477,6 @@ fn command_label(program: &str, args: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn path_component(value: &str) -> String {
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push('~');
-            encoded.push_str(&format!("{byte:02x}"));
-        }
-    }
-    encoded
 }
 
 fn git_path_label(path: impl AsRef<Path>) -> String {

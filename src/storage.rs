@@ -484,7 +484,7 @@ fn last_exec_file_name(lane: &str) -> String {
     format!("{}.json", encode_path_component(lane))
 }
 
-fn encode_path_component(value: &str) -> String {
+pub(crate) fn encode_path_component(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
