@@ -3,10 +3,10 @@ use std::fmt::{self, Write as _};
 use crate::LaneOpSummary;
 use crate::vfs::LaneFileChangeStatus;
 
-use super::{
+use super::output::{
     ReviewActionKind, ReviewActionOutput, ReviewLaneSummary, ReviewOutput, ReviewPathOutput,
-    resolve_op_action, show_op_action,
 };
+use super::review::{resolve_op_action, show_op_action};
 
 pub(super) fn format(output: &ReviewOutput) -> String {
     let mut text = String::new();
