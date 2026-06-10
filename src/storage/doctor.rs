@@ -9,7 +9,7 @@ use crate::{LaneExecState, ensure_user_lane};
 
 use super::blobs::{read_blob, report_blob_inventory, sha256_hex, validate_blob_reference};
 use super::manifest::{
-    StoredBase, StoredLaneEntryState, StoredRepoManifest, parse_fingerprint, store_version,
+    STORE_VERSION, StoredBase, StoredLaneEntryState, StoredRepoManifest, parse_fingerprint,
 };
 use super::paths::{last_exec_file_name, legacy_storage_path, manifest_path};
 use super::serde_util::json_error;
@@ -17,10 +17,11 @@ use super::serde_util::json_error;
 pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorReport> {
     let mut report = StorageDoctorReport::default();
 
-    if legacy_storage_path(storage_root).exists() {
+    let legacy_path = legacy_storage_path(storage_root);
+    if legacy_path.exists() {
         report.errors.push(format!(
             "legacy storage file {} is unsupported by storage v2",
-            legacy_storage_path(storage_root).display()
+            legacy_path.display()
         ));
     }
 
@@ -50,11 +51,10 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
     };
 
     report.version = Some(manifest.version);
-    if manifest.version != store_version() {
+    if manifest.version != STORE_VERSION {
         report.errors.push(format!(
             "manifest version {} is unsupported; expected {}",
-            manifest.version,
-            store_version()
+            manifest.version, STORE_VERSION
         ));
     }
 

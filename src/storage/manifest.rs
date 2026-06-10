@@ -14,7 +14,7 @@ use super::blobs::{hex, persist_blob, read_blob, sha256_hex};
 use super::paths::legacy_storage_path;
 use super::serde_util::{invalid_storage, json_error};
 
-const STORE_VERSION: u32 = 2;
+pub(super) const STORE_VERSION: u32 = 2;
 
 pub(super) fn load_manifest_snapshot(
     storage_root: &Path,
@@ -232,10 +232,6 @@ fn hex_digit(byte: u8) -> io::Result<u8> {
             "hex value contains a non-hex digit",
         )),
     }
-}
-
-pub(super) const fn store_version() -> u32 {
-    STORE_VERSION
 }
 
 #[derive(Serialize, Deserialize)]
