@@ -363,12 +363,23 @@ fn preview_label(preview: &BytePreview) -> String {
 }
 
 fn escaped_text_preview(text: &str) -> (String, bool) {
-    let escaped = text
-        .chars()
-        .take(HUMAN_PREVIEW_CHAR_LIMIT)
-        .flat_map(char::escape_default)
-        .collect();
-    (escaped, text.chars().count() > HUMAN_PREVIEW_CHAR_LIMIT)
+    let mut escaped = String::new();
+    for character in text.chars() {
+        let sequence = escaped_character(character);
+        if escaped.len() + sequence.len() > HUMAN_PREVIEW_CHAR_LIMIT {
+            return (escaped, true);
+        }
+        escaped.push_str(&sequence);
+    }
+    (escaped, false)
+}
+
+fn escaped_character(character: char) -> String {
+    if character == '"' {
+        "\\\"".to_owned()
+    } else {
+        character.escape_default().collect()
+    }
 }
 
 fn one_line_preview(text: &str) -> String {

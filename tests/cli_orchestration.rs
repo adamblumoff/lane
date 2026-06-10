@@ -417,7 +417,7 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
         "pwsh",
         "-NoProfile",
         "-Command",
-        "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Force -Path src | Out-Null; Set-Content -Path \"src/owner's.txt\" -Value \"owned\" -NoNewline",
+        "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Force -Path src | Out-Null; Set-Content -Path \"src/owner's.txt\" -Value 'owned \"quote\"' -NoNewline",
     ]);
 
     let json_default = repo.run_json(["review"]);
@@ -445,6 +445,7 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
     assert!(human.contains("  |    base: \"1\"\n  |    inserted: \"A\""));
     assert!(human.contains("  |    promote: lane promote-ops agent-a src/vars.txt agent-a:1"));
     assert!(human.contains("lane promote-ops agent-c 'src/owner'\\''s.txt' agent-c:1"));
+    assert!(human.contains("  |    inserted: \"owned \\\"quote\\\"\""));
     assert!(human.contains("  `- conflict groups\n     - group 1 [6..7), lanes: agent-a, agent-b"));
     assert!(human.contains("         base: \"2\"\n         inserted: \"B\""));
     assert!(human.contains("         inserted: \"X\""));
@@ -460,6 +461,26 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
     assert!(agent_a_human.contains("scope: agent-a"));
     assert!(agent_a_human.contains("agent-a agent-a:1"));
     assert!(!agent_a_human.contains("agent-b agent-b:2"));
+}
+
+#[test]
+fn cli_review_human_escapes_and_bounds_inline_previews() {
+    let repo = TempRepo::new();
+
+    repo.run_json([
+        "exec",
+        "preview-agent",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Force -Path src | Out-Null; Set-Content -Path src/quoted.txt -Value 'say \"hi\"' -NoNewline; [IO.File]::WriteAllText('src/tabs.txt', \"`t\" * 200)",
+    ]);
+
+    let human = repo.run_text(["review", "--human"]);
+    assert!(human.contains("inserted: \"say \\\"hi\\\"\""));
+    assert!(human.contains("inserted: \"\\t\\t\\t"));
+    assert!(human.contains("...\" (200 B, sha256 "));
 }
 
 #[test]
