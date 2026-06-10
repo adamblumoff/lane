@@ -4,9 +4,12 @@ use crate::LaneOpSummary;
 use crate::vfs::LaneFileChangeStatus;
 
 use super::output::{
-    ReviewActionKind, ReviewActionOutput, ReviewLaneSummary, ReviewOutput, ReviewPathOutput,
+    BytePreview, ReviewActionKind, ReviewActionOutput, ReviewLaneSummary, ReviewOpOutput,
+    ReviewOutput, ReviewPathOutput,
 };
-use super::review::{resolve_op_action, show_op_action};
+use super::review::resolve_op_action;
+
+const HUMAN_PREVIEW_CHAR_LIMIT: usize = 160;
 
 pub(super) fn format(output: &ReviewOutput) -> String {
     let mut text = String::new();
@@ -33,6 +36,10 @@ fn write_review(text: &mut String, output: &ReviewOutput) -> fmt::Result {
         count_label(output.summary.conflict_groups, "conflict group"),
     )?;
 
+    write_lane_status(text, &output.lanes)?;
+    write_promotable_now(text, &output.lanes, &output.paths)?;
+    write_decision_queue(text, &output.paths)?;
+
     if output.paths.is_empty() {
         writeln!(text, "\nNo changed paths.")?;
     } else {
@@ -42,7 +49,7 @@ fn write_review(text: &mut String, output: &ReviewOutput) -> fmt::Result {
         }
     }
 
-    write_lane_actions(text, &output.lanes)
+    write_discard_actions(text, &output.lanes)
 }
 
 fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
@@ -71,6 +78,7 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
     } else {
         for op in &path.clean_ops {
             writeln!(text, "  |  - {}", op_label(&op.op))?;
+            write_op_previews(text, "  |    ", op)?;
             writeln!(
                 text,
                 "  |    promote: {}",
@@ -80,11 +88,6 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
                     op.op.path.as_str(),
                     op.op.op_id.as_str(),
                 ])
-            )?;
-            writeln!(
-                text,
-                "  |    inspect: {}",
-                format_action_command(&show_op_action(op))
             )?;
         }
     }
@@ -104,11 +107,7 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
             )?;
             for op in &conflict.ops {
                 writeln!(text, "       - {}", op_label(&op.op))?;
-                writeln!(
-                    text,
-                    "         inspect: {}",
-                    format_action_command(&show_op_action(op))
-                )?;
+                write_op_previews(text, "         ", op)?;
                 writeln!(
                     text,
                     "         resolve: {}",
@@ -120,28 +119,116 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
     Ok(())
 }
 
-fn write_lane_actions(text: &mut String, lanes: &[ReviewLaneSummary]) -> fmt::Result {
+fn write_lane_status(text: &mut String, lanes: &[ReviewLaneSummary]) -> fmt::Result {
+    writeln!(text, "\nLane status")?;
+    if lanes.is_empty() {
+        writeln!(text, "  - none")?;
+        return Ok(());
+    }
+
+    for lane in lanes {
+        writeln!(
+            text,
+            "  - {}: {}, {}, {}, {}",
+            lane.lane,
+            count_label(lane.changed_paths, "changed path"),
+            count_label(lane.clean_ops, "clean op"),
+            count_label(lane.conflicted_ops, "conflicted op"),
+            last_exec_label(lane.last_exec.as_ref()),
+        )?;
+        if let Some(detail) = last_exec_detail(lane.last_exec.as_ref()) {
+            writeln!(text, "    {detail}")?;
+        }
+    }
+    Ok(())
+}
+
+fn write_promotable_now(
+    text: &mut String,
+    lanes: &[ReviewLaneSummary],
+    paths: &[ReviewPathOutput],
+) -> fmt::Result {
+    writeln!(text, "\nPromotable now")?;
+    let mut wrote_lane = false;
+    for lane in lanes.iter().filter(|lane| lane.clean_ops > 0) {
+        wrote_lane = true;
+        writeln!(
+            text,
+            "  - {}: {} across {}, {} total, {}",
+            lane.lane,
+            count_label(lane.clean_ops, "clean op"),
+            count_label(promotable_path_count(paths, &lane.lane), "path"),
+            count_label(lane.changed_paths, "changed path"),
+            last_exec_label(lane.last_exec.as_ref()),
+        )?;
+        if let Some(action) = lane
+            .actions
+            .iter()
+            .find(|action| matches!(action.kind, ReviewActionKind::PromoteClean))
+        {
+            writeln!(text, "    command: {}", format_action_command(action))?;
+        }
+    }
+
+    if !wrote_lane {
+        writeln!(text, "  - none")?;
+    }
+    Ok(())
+}
+
+fn promotable_path_count(paths: &[ReviewPathOutput], lane: &str) -> usize {
+    paths
+        .iter()
+        .filter(|path| path.clean_ops.iter().any(|op| op.op.lane == lane))
+        .count()
+}
+
+fn write_decision_queue(text: &mut String, paths: &[ReviewPathOutput]) -> fmt::Result {
+    writeln!(text, "\nNeeds decision")?;
+    let mut wrote_conflict = false;
+    for path in paths {
+        for (index, conflict) in path.conflicts.iter().enumerate() {
+            wrote_conflict = true;
+            writeln!(
+                text,
+                "  - {} group {} [{}..{}), {}, lanes: {}",
+                path.path,
+                index + 1,
+                conflict.range_start,
+                conflict.range_end,
+                count_label(conflict.ops.len(), "op"),
+                conflict.lanes.join(", "),
+            )?;
+        }
+    }
+
+    if !wrote_conflict {
+        writeln!(text, "  - none")?;
+    }
+    Ok(())
+}
+
+fn write_discard_actions(text: &mut String, lanes: &[ReviewLaneSummary]) -> fmt::Result {
     if lanes.is_empty() {
         return Ok(());
     }
 
-    writeln!(text, "\nLane actions")?;
+    writeln!(text, "\nDiscard lanes")?;
     for lane in lanes {
-        writeln!(text, "  {}:", lane.lane)?;
-        if lane.actions.is_empty() {
-            writeln!(text, "    - none")?;
-        } else {
-            for action in &lane.actions {
-                writeln!(
-                    text,
-                    "    - {}: {}",
-                    action_label(action.kind),
-                    format_action_command(action),
-                )?;
-            }
+        if let Some(action) = lane
+            .actions
+            .iter()
+            .find(|action| matches!(action.kind, ReviewActionKind::Discard))
+        {
+            writeln!(text, "  - {}: {}", lane.lane, format_action_command(action),)?;
         }
     }
     Ok(())
+}
+
+fn write_op_previews(text: &mut String, indent: &str, op: &ReviewOpOutput) -> fmt::Result {
+    writeln!(text, "{indent}base: {}", preview_label(&op.base))?;
+    writeln!(text, "{indent}inserted: {}", preview_label(&op.inserted))
 }
 
 fn op_label(op: &LaneOpSummary) -> String {
@@ -192,13 +279,125 @@ fn is_plain_command_arg(arg: &str) -> bool {
         })
 }
 
-fn action_label(kind: ReviewActionKind) -> &'static str {
-    match kind {
-        ReviewActionKind::PromoteClean => "promote clean ops",
-        ReviewActionKind::ShowOp => "inspect op",
-        ReviewActionKind::ResolveOp => "resolve op",
-        ReviewActionKind::Discard => "discard lane",
+fn last_exec_label(last_exec: Option<&crate::LaneExecState>) -> String {
+    let Some(last_exec) = last_exec else {
+        return "last exec unavailable".to_owned();
+    };
+
+    let status = if last_exec.worker_error.is_some() {
+        "last exec worker error".to_owned()
+    } else {
+        match last_exec.exit_code {
+            Some(0) => "last exec ok".to_owned(),
+            Some(code) => format!("last exec exit {code}"),
+            None => "last exec no exit code".to_owned(),
+        }
+    };
+
+    format!(
+        "{status}, exec touched {}",
+        count_label(last_exec.changed_paths.len(), "path")
+    )
+}
+
+fn last_exec_detail(last_exec: Option<&crate::LaneExecState>) -> Option<String> {
+    let last_exec = last_exec?;
+    if let Some(error) = &last_exec.worker_error {
+        return Some(format!("worker error: {}", one_line_preview(error)));
     }
+
+    if last_exec.exit_code == Some(0) {
+        return None;
+    }
+
+    if !last_exec.stderr.text.trim().is_empty() {
+        let truncated = if last_exec.stderr.truncated {
+            " (truncated)"
+        } else {
+            ""
+        };
+        return Some(format!(
+            "stderr: {}{truncated}",
+            one_line_preview(&last_exec.stderr.text),
+        ));
+    }
+
+    if !last_exec.stdout.text.trim().is_empty() {
+        let truncated = if last_exec.stdout.truncated {
+            " (truncated)"
+        } else {
+            ""
+        };
+        return Some(format!(
+            "stdout: {}{truncated}",
+            one_line_preview(&last_exec.stdout.text),
+        ));
+    }
+
+    None
+}
+
+fn preview_label(preview: &BytePreview) -> String {
+    if preview.len == 0 {
+        return "<empty>".to_owned();
+    }
+
+    let Some(text) = &preview.utf8 else {
+        return format!(
+            "<binary {}, sha256 {}>",
+            bytes_label(preview.len as u64),
+            short_sha(&preview.sha256)
+        );
+    };
+
+    let (escaped, shortened) = escaped_text_preview(text);
+    if shortened || preview.truncated {
+        format!(
+            "\"{escaped}...\" ({}, sha256 {})",
+            bytes_label(preview.len as u64),
+            short_sha(&preview.sha256)
+        )
+    } else {
+        format!("\"{escaped}\"")
+    }
+}
+
+fn escaped_text_preview(text: &str) -> (String, bool) {
+    let mut escaped = String::new();
+    for character in text.chars() {
+        let sequence = escaped_character(character);
+        if escaped.len() + sequence.len() > HUMAN_PREVIEW_CHAR_LIMIT {
+            return (escaped, true);
+        }
+        escaped.push_str(&sequence);
+    }
+    (escaped, false)
+}
+
+fn escaped_character(character: char) -> String {
+    if character == '"' {
+        "\\\"".to_owned()
+    } else {
+        character.escape_default().collect()
+    }
+}
+
+fn one_line_preview(text: &str) -> String {
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    let (escaped, shortened) = escaped_text_preview(line);
+    if shortened {
+        format!("\"{escaped}...\"")
+    } else {
+        format!("\"{escaped}\"")
+    }
+}
+
+fn short_sha(sha256: &str) -> &str {
+    sha256.get(..12).unwrap_or(sha256)
 }
 
 fn op_kind_label(kind: crate::LaneOpKind) -> &'static str {
