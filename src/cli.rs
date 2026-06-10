@@ -15,6 +15,8 @@ use crate::storage::{RepoLock, acquire_repo_lock, doctor_storage, load_repo, per
 use crate::vfs::{FileWorktree, LaneFileChange, LaneFileChangeStatus, LaneFs, LaneFsError};
 use crate::{FilePath, LaneOpSummary, LaneRepo};
 
+mod human_review;
+
 const STORAGE_PATH: &str = ".lane";
 
 type CliResult<T> = Result<T, CliError>;
@@ -43,7 +45,11 @@ enum Command {
         command: Vec<String>,
     },
     #[command(about = "Review lane work across every lane or one lane")]
-    Review { lane: Option<String> },
+    Review {
+        #[arg(long)]
+        human: bool,
+        lane: Option<String>,
+    },
     #[command(about = "Show one lane operation with base and inserted byte previews")]
     ShowOp {
         lane: String,
@@ -84,7 +90,9 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
     match cli.command {
         Command::Create { lane } => create(&repo_root, &lane).map(|()| ExitCode::SUCCESS),
         Command::Exec { lane, command } => exec(&repo_root, &lane, &command),
-        Command::Review { lane } => review(&repo_root, lane.as_deref()).map(|()| ExitCode::SUCCESS),
+        Command::Review { human, lane } => {
+            review(&repo_root, lane.as_deref(), human).map(|()| ExitCode::SUCCESS)
+        }
         Command::ShowOp { lane, path, op_id } => {
             show_op(&repo_root, &lane, &path, &op_id).map(|()| ExitCode::SUCCESS)
         }
@@ -143,7 +151,7 @@ fn exec(_repo_root: &Path, _lane: &str, _command: &[String]) -> CliResult<ExitCo
     ))
 }
 
-fn review(repo_root: &Path, lane: Option<&str>) -> CliResult<()> {
+fn review(repo_root: &Path, lane: Option<&str>, human: bool) -> CliResult<()> {
     let locked = open_locked_lane_fs(repo_root)?;
     let lanes = review_lanes(&locked.fs, lane)?;
     let (summary, lane_summaries, paths) = collect_review(&locked.fs, &lanes)?;
@@ -155,7 +163,11 @@ fn review(repo_root: &Path, lane: Option<&str>) -> CliResult<()> {
         lanes: lane_summaries,
         paths,
     };
-    print_json(&output)?;
+    if human {
+        print!("{}", human_review::format(&output));
+    } else {
+        print_json(&output)?;
+    }
     Ok(())
 }
 

@@ -388,6 +388,63 @@ fn cli_review_groups_clean_ops_and_conflict_decisions_json_first() {
 }
 
 #[test]
+fn cli_review_human_groups_by_path_with_copyable_commands() {
+    let repo = TempRepo::new();
+    repo.write("src/vars.txt", b"a=1\nb=2\nc=3\nd=4\n");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=A`nb=B`nc=3`nd=4`n\")",
+    ]);
+    repo.run_json([
+        "exec",
+        "agent-b",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=1`nb=X`nc=C`nd=4`n\")",
+    ]);
+
+    let json_default = repo.run_json(["review"]);
+    assert_eq!(json_default["summary"]["clean_ops"], 2);
+    assert_eq!(json_default["summary"]["conflicted_ops"], 2);
+
+    let human = repo.run_text(["review", "--human"]);
+    assert!(human.starts_with("Lane review\nscope: all lanes\n"));
+    assert!(human.contains(
+        "summary: 2 lanes, 1 changed path, 2 clean ops, 2 conflicted ops, 1 conflict group"
+    ));
+    assert!(human.contains(
+        "src/vars.txt\n  |- lanes\n  |  - agent-a modified, 2 ops (1 clean, 1 conflicted)"
+    ));
+    assert!(human.contains("  |- clean ops\n  |  - agent-a agent-a:1 replace [2..3), inserts 1 B"));
+    assert!(human.contains("  |    promote: lane promote-ops agent-a src/vars.txt agent-a:1"));
+    assert!(human.contains("  |    inspect: lane show-op agent-a src/vars.txt agent-a:1"));
+    assert!(human.contains("  `- conflict groups\n     - group 1 [6..7), lanes: agent-a, agent-b"));
+    assert!(human.contains("         inspect: lane show-op agent-a src/vars.txt agent-a:2"));
+    assert!(human.contains(
+        "         resolve: lane resolve-op agent-a src/vars.txt agent-a:2 --with-file <replacement-file>"
+    ));
+    assert!(
+        human.contains(
+            "Lane actions\n  agent-a:\n    - promote clean ops: lane promote-clean agent-a"
+        )
+    );
+    assert!(human.contains("    - discard lane: lane discard agent-b"));
+
+    let agent_a_human = repo.run_text(["review", "--human", "agent-a"]);
+    assert!(agent_a_human.contains("scope: agent-a"));
+    assert!(agent_a_human.contains("agent-a agent-a:1"));
+    assert!(!agent_a_human.contains("agent-b agent-b:2"));
+}
+
+#[test]
 fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
     let repo = TempRepo::new();
     repo.write("src/vars.txt", b"a=1\nb=2\nc=3\n");
