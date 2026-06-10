@@ -51,6 +51,30 @@ fn storage_v2_persists_manifest_blobs_and_last_exec() {
 }
 
 #[test]
+fn storage_v2_deduplicates_repeated_inserted_blobs() {
+    let temp = TempStorage::new();
+    let mut repo = LaneRepo::new();
+    repo.create_lane("agent-a").unwrap();
+    for index in 0..64 {
+        repo.replace_path(
+            &format!("generated/{index:02}.txt"),
+            "agent-a",
+            None,
+            Some(b"same bytes\n".to_vec()),
+        )
+        .unwrap();
+    }
+
+    persist_repo(temp.path(), &repo).unwrap();
+
+    let report = doctor_storage(temp.path()).unwrap();
+    assert!(report.is_healthy());
+    assert_eq!(report.ops, 64);
+    assert_eq!(report.blobs_referenced, 64);
+    assert_eq!(report.blobs_present, 1);
+}
+
+#[test]
 fn corrupt_last_exec_is_advisory_but_doctor_reports_it() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();

@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -22,6 +24,10 @@ const SHA256_HEX_LEN: usize = 64;
 
 const LOCK_RETRY_ATTEMPTS: usize = 1200;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
+const REPLACE_RETRY_ATTEMPTS: usize = 40;
+const REPLACE_RETRY_DELAY: Duration = Duration::from_millis(25);
+
+static NEXT_TEMP_PATH_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
     reject_legacy_storage(storage_root)?;
@@ -318,6 +324,7 @@ fn manifest_from_snapshot(
     snapshot: &LaneRepoStorageSnapshot,
 ) -> io::Result<StoredRepoManifest> {
     let mut files = Vec::new();
+    let mut persisted_blobs = BTreeSet::new();
     for (path, file) in &snapshot.files {
         files.push(StoredFile {
             path: path.clone(),
@@ -331,12 +338,12 @@ fn manifest_from_snapshot(
                 .lanes
                 .iter()
                 .map(|(lane, entry)| {
-                    stored_entry_from_snapshot(storage_root, lane, entry).map(|entry| {
-                        StoredLaneEntry {
+                    stored_entry_from_snapshot(storage_root, entry, &mut persisted_blobs).map(
+                        |entry| StoredLaneEntry {
                             lane: lane.clone(),
                             entry,
-                        }
-                    })
+                        },
+                    )
                 })
                 .collect::<io::Result<_>>()?,
         });
@@ -351,8 +358,8 @@ fn manifest_from_snapshot(
 
 fn stored_entry_from_snapshot(
     storage_root: &Path,
-    _lane: &str,
     entry: &LaneEntryStorageSnapshot,
+    persisted_blobs: &mut BTreeSet<String>,
 ) -> io::Result<StoredLaneEntryState> {
     match entry {
         LaneEntryStorageSnapshot::Deleted => Ok(StoredLaneEntryState::Deleted),
@@ -362,7 +369,9 @@ fn stored_entry_from_snapshot(
                 .map(|op| {
                     let hash = sha256_hex(&op.inserted);
                     let inserted_blob = format!("sha256/{hash}");
-                    persist_blob(storage_root, &inserted_blob, &op.inserted)?;
+                    if persisted_blobs.insert(inserted_blob.clone()) {
+                        persist_blob(storage_root, &inserted_blob, &op.inserted)?;
+                    }
                     Ok(StoredOp {
                         id: op.id,
                         base_start: op.base_start,
@@ -432,7 +441,11 @@ fn manifest_path(storage_root: &Path) -> PathBuf {
 }
 
 fn persist_blob(storage_root: &Path, reference: &str, bytes: &[u8]) -> io::Result<()> {
-    persist_bytes(&blob_path(storage_root, reference)?, bytes)
+    let path = blob_path(storage_root, reference)?;
+    if path.exists() {
+        return Ok(());
+    }
+    persist_bytes(&path, bytes)
 }
 
 fn read_blob(storage_root: &Path, reference: &str) -> io::Result<Vec<u8>> {
@@ -471,7 +484,7 @@ fn last_exec_file_name(lane: &str) -> String {
     format!("{}.json", encode_path_component(lane))
 }
 
-fn encode_path_component(value: &str) -> String {
+pub(crate) fn encode_path_component(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
@@ -666,11 +679,17 @@ pub(crate) fn persist_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     }
     let temp_path = temp_path_for(path)?;
     let result = (|| {
-        let mut temp_file = fs::File::create(&temp_path)?;
-        temp_file.write_all(bytes)?;
-        temp_file.sync_all()?;
+        let mut temp_file = fs::File::create(&temp_path)
+            .map_err(|error| path_error("create temp file", &temp_path, error))?;
+        temp_file
+            .write_all(bytes)
+            .map_err(|error| path_error("write temp file", &temp_path, error))?;
+        temp_file
+            .sync_all()
+            .map_err(|error| path_error("sync temp file", &temp_path, error))?;
         drop(temp_file);
-        replace_file(&temp_path, path)
+        replace_file_with_retry(&temp_path, path)
+            .map_err(|error| path_error("replace file", path, error))
     })();
 
     if let Err(error) = result {
@@ -684,9 +703,42 @@ fn temp_path_for(path: &Path) -> io::Result<PathBuf> {
     let file_name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?;
-    let mut temp_name = file_name.to_os_string();
-    temp_name.push(".tmp");
+    let mut temp_name = OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT_TEMP_PATH_ID.fetch_add(1, Ordering::Relaxed)
+    ));
     Ok(path.with_file_name(temp_name))
+}
+
+fn replace_file_with_retry(from: &Path, to: &Path) -> io::Result<()> {
+    for attempt in 1..=REPLACE_RETRY_ATTEMPTS {
+        match replace_file(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt < REPLACE_RETRY_ATTEMPTS && is_transient_replace_error(&error) =>
+            {
+                thread::sleep(REPLACE_RETRY_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("replace retry loop always returns");
+}
+
+fn is_transient_replace_error(error: &io::Error) -> bool {
+    cfg!(windows)
+        && (error.kind() == io::ErrorKind::PermissionDenied
+            || matches!(error.raw_os_error(), Some(5 | 32)))
+}
+
+fn path_error(operation: &str, path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("{operation} {}: {error}", path.display()),
+    )
 }
 
 #[cfg(not(windows))]

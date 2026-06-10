@@ -15,6 +15,8 @@ use crate::storage::{RepoLock, acquire_repo_lock, doctor_storage, load_repo, per
 use crate::vfs::{FileWorktree, LaneFileChange, LaneFileChangeStatus, LaneFs, LaneFsError};
 use crate::{FilePath, LaneOpSummary, LaneRepo};
 
+mod human_review;
+
 const STORAGE_PATH: &str = ".lane";
 
 type CliResult<T> = Result<T, CliError>;
@@ -39,11 +41,17 @@ enum Command {
     #[command(about = "Run a command in a lane through a virtual mounted lane view")]
     Exec {
         lane: String,
+        #[arg(long)]
+        observe: bool,
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
     #[command(about = "Review lane work across every lane or one lane")]
-    Review { lane: Option<String> },
+    Review {
+        #[arg(long)]
+        human: bool,
+        lane: Option<String>,
+    },
     #[command(about = "Show one lane operation with base and inserted byte previews")]
     ShowOp {
         lane: String,
@@ -83,8 +91,14 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
     let repo_root = repo_root(cli.repo_root)?;
     match cli.command {
         Command::Create { lane } => create(&repo_root, &lane).map(|()| ExitCode::SUCCESS),
-        Command::Exec { lane, command } => exec(&repo_root, &lane, &command),
-        Command::Review { lane } => review(&repo_root, lane.as_deref()).map(|()| ExitCode::SUCCESS),
+        Command::Exec {
+            lane,
+            observe,
+            command,
+        } => exec(&repo_root, &lane, observe, &command),
+        Command::Review { human, lane } => {
+            review(&repo_root, lane.as_deref(), human).map(|()| ExitCode::SUCCESS)
+        }
         Command::ShowOp { lane, path, op_id } => {
             show_op(&repo_root, &lane, &path, &op_id).map(|()| ExitCode::SUCCESS)
         }
@@ -124,9 +138,14 @@ fn create(repo_root: &Path, lane: &str) -> CliResult<()> {
 }
 
 #[cfg(windows)]
-fn exec(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExitCode> {
-    let run = crate::virtual_exec::run_virtual_lane(repo_root, lane, command)
-        .map_err(CliError::message)?;
+fn exec(repo_root: &Path, lane: &str, observe: bool, command: &[String]) -> CliResult<ExitCode> {
+    let run = crate::virtual_exec::run_virtual_lane(
+        repo_root,
+        lane,
+        command,
+        crate::virtual_exec::VirtualExecOptions { observe },
+    )
+    .map_err(CliError::message)?;
     let failed = run.failed;
     print_json(&run.output)?;
     if failed {
@@ -137,13 +156,18 @@ fn exec(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExitCode>
 }
 
 #[cfg(not(windows))]
-fn exec(_repo_root: &Path, _lane: &str, _command: &[String]) -> CliResult<ExitCode> {
+fn exec(
+    _repo_root: &Path,
+    _lane: &str,
+    _observe: bool,
+    _command: &[String],
+) -> CliResult<ExitCode> {
     Err(CliError::message(
         "lane exec requires the WinFsp virtual filesystem on Windows".to_owned(),
     ))
 }
 
-fn review(repo_root: &Path, lane: Option<&str>) -> CliResult<()> {
+fn review(repo_root: &Path, lane: Option<&str>, human: bool) -> CliResult<()> {
     let locked = open_locked_lane_fs(repo_root)?;
     let lanes = review_lanes(&locked.fs, lane)?;
     let (summary, lane_summaries, paths) = collect_review(&locked.fs, &lanes)?;
@@ -155,7 +179,11 @@ fn review(repo_root: &Path, lane: Option<&str>) -> CliResult<()> {
         lanes: lane_summaries,
         paths,
     };
-    print_json(&output)?;
+    if human {
+        print!("{}", human_review::format(&output));
+    } else {
+        print_json(&output)?;
+    }
     Ok(())
 }
 
