@@ -18,7 +18,7 @@ use git::prepare_git_view;
 use mount::start_mount;
 use observer::ExecObserver;
 use support::{elapsed_ms, path_label};
-pub(crate) use types::{VirtualExecError, VirtualExecOptions, VirtualLaneRun};
+pub(crate) use types::{VirtualExecError, VirtualExecOptions, VirtualExecRecord, VirtualLaneRun};
 use types::{VirtualExecOutput, VirtualExecTimings, VirtualExecWarning, VirtualFsMetrics};
 use worker::{command_label, run_virtual_worker};
 
@@ -84,7 +84,9 @@ pub(crate) fn run_virtual_lane(
         "persisting {} changed path entries",
         changed_paths.len()
     ));
-    state.flush()?;
+    if options.persist_changes {
+        state.flush()?;
+    }
     let changes = state.collect_changes()?;
     let exec_state = LaneExecState::new(
         worker.exit_code,
@@ -93,7 +95,11 @@ pub(crate) fn run_virtual_lane(
         &worker.stderr,
         changed_paths.clone(),
     );
-    let warnings = last_exec_warnings(state.record_last_exec(exec_state));
+    let warnings = if options.persist_changes {
+        last_exec_warnings(state.record_last_exec(exec_state))
+    } else {
+        Vec::new()
+    };
     let post_worker_lock_ms = elapsed_ms(collect_start);
     let snapshot = metrics.snapshot();
     observer.event(format_args!(

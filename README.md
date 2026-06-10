@@ -55,12 +55,34 @@ If the lane is not worth keeping:
 lane discard agent-a
 ```
 
+## N-Attempt Flow
+
+```powershell
+lane try --name login --attempts 5 -- codex exec --prompt "Implement the login page."
+lane check login --name test -- pnpm test
+lane compare login --human
+```
+
+`lane try` reserves fresh attempt lanes named `<run>-1`, `<run>-2`, and so on,
+runs the same command in each lane, and stores attempt output under `.lane/runs`.
+
+`lane check` runs a verification command inside every attempt lane and records
+the check output without keeping check-generated file changes as attempt edits.
+
+`lane compare` combines attempt output, check results, and the normal operation
+review into one neutral evidence surface. It does not rank attempts or choose a
+winner. Promotion is still explicit through the copyable `promote-clean`,
+`promote-ops`, and `resolve-op` commands it reports.
+
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
 | `create <lane>` | Create an isolated lane. |
 | `exec <lane> -- <command>` | Run a command inside a mounted lane view. |
+| `try --name <run> --attempts <N> -- <command>` | Run N isolated attempts for the same command. |
+| `check <run> -- <command>` | Run a verification command across every attempt without keeping check artifacts as attempt edits. |
+| `compare <run> [--human]` | Compare attempts, checks, and review state for a run. |
 | `diff <lane> [paths...]` | Show a text diff for lane changes. |
 | `review [lane]` | Emit the structured review graph as JSON. |
 | `review --human [lane]` | Show a human-readable review. |

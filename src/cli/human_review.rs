@@ -252,7 +252,7 @@ fn format_action_command(action: &ReviewActionOutput) -> String {
     format_command(action.command.iter().map(String::as_str))
 }
 
-fn format_command<'a>(args: impl IntoIterator<Item = &'a str>) -> String {
+pub(super) fn format_command<'a>(args: impl IntoIterator<Item = &'a str>) -> String {
     std::iter::once("lane")
         .chain(args)
         .map(quote_command_arg)

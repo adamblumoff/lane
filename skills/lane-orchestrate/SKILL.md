@@ -1,30 +1,30 @@
 ---
 name: lane-orchestrate
-description: Run multiple isolated implementation attempts in Lane and promote the best result. Use when the user asks Codex to try several approaches, variants, designs, fixes, prototypes, experiments, or agent attempts in parallel inside one repo without worktrees; especially for prompts like "use lane", "try 5 designs", "compare approaches", "pick the best lane", or "run subagents in lanes".
+description: Run multiple isolated implementation attempts in Lane and compare their evidence and operations. Use when the user asks Codex to try several approaches, variants, designs, fixes, prototypes, experiments, or agent attempts in parallel inside one repo without worktrees; especially for prompts like "use lane", "try 5 designs", "compare approaches", "judge the lanes", or "run subagents in lanes".
 ---
 
 # Lane Orchestrate
 
-Use Lane as the file-versioning layer, not as a planning-file format. The user-facing flow is prompt -> `lane exec` attempts -> virtual mounted repo view -> deterministic file capture -> `lane review` comparison -> promote or resolve selected ops.
+Use Lane as the file-versioning layer, not as a planning-file format. The user-facing flow is prompt -> `lane try` attempts -> `lane check` verification -> `lane compare` decision surface -> promote or resolve selected ops.
 
 ## Workflow
 
 1. Confirm the repo has `lane` available with `lane --help`. If needed, use the workspace binary at `target\debug\lane.exe`.
-2. Choose short lane ids that name the attempted approach, such as `login-minimal`, `login-enterprise`, or `fix-parser-a`.
-3. Launch each attempt through `lane exec <lane> -- <agent-or-command>`.
-4. `lane exec` mounts a lane-specific virtual repo view, runs the worker with its current directory set to that mount, captures changed bytes back into the lane, leaves the base repo untouched, and prints JSON.
+2. Choose a short run id that names the experiment, such as `login`, `fix-parser`, or `pricing-page`.
+3. Launch attempts through `lane try --name <run> --attempts <N> -- <agent-or-command>`.
+4. `lane try` reserves fresh `<run>-1`, `<run>-2`, etc. lanes, mounts lane-specific virtual repo views, captures changed bytes back into each lane, leaves the base repo untouched, stores `.lane/runs/<run>.json`, and prints JSON.
 5. Do not ask the user to write or approve a JSON plan file.
-6. Parse the JSON emitted by `lane exec`. It reports `mode: virtual_mount`, `workspace_root`/`mount_path`, `projected_paths`, worker-touched `changed_paths`, timings, and effective lane `changes`.
-7. For promising lanes, inspect `lane review [lane]` for the JSON decision graph, use `lane diff <lane>` for human-readable patch review, and run verification commands through `lane exec`.
-8. Pick the winner from evidence: tests, build output, screenshots, diffs, and fit to the user request.
-9. Use `lane review` as the executable decision graph: run `promote-clean` from `review.lanes[].actions` for clean ops, `show-op` and `resolve-op --with-file <replacement-file>` from `review.paths[].conflicts[].actions` for conflicted ops, and `promote-ops <lane> <path> <op-id>...` only when deliberately selecting exact clean ops.
-10. Discard losing lanes by running their `discard` action from `review.lanes[].actions` once their useful evidence has been reported.
+6. Run important verification through `lane check <run> -- <check-command>`. It records check outputs without keeping check-generated files as attempt edits.
+7. Use `lane compare <run>` for the JSON evidence graph or `lane compare <run> --human` for the human-readable review.
+8. Judge the attempts from evidence: checks, build output, screenshots, diffs, conflicts, operation previews, and fit to the user request. Do not blindly choose by displayed order or metrics.
+9. Use the commands emitted by `lane compare` and `lane review` to apply the judgment: run `promote-clean` for clean ops, `show-op` and `resolve-op --with-file <replacement-file>` for conflicted ops, and `promote-ops <lane> <path> <op-id>...` only when deliberately selecting exact clean ops.
+10. Discard losing lanes by running their `discard` action once their useful evidence has been reported.
 
 ## Guardrails
 
 - Do not create an intermediate plan artifact or ask the worker to output a write-set. Lane should interpret real file changes deterministically.
-- Treat `lane exec` as the normal capture path. It is Codex-compatible and gives each worker its own mounted file view.
-- If `lane exec` returns a non-zero `exit_code` or `worker_error`, inspect its JSON output before comparing or promoting that lane.
+- Treat `lane try` as the normal multi-attempt capture path. It is Codex-compatible and gives each worker its own mounted file view.
+- If an attempt returns a non-zero `exit_code` or `worker_error`, inspect its JSON output before comparing or promoting that lane.
 - Structured commands are JSON by default; `lane diff` is the text review command.
 - Use `lane review` to compare clean ops and conflict groups before choosing `promote-clean`, `promote-ops`, or `resolve-op`. Prefer executing the command arrays emitted by `review` so the parent workflow dogfoods the same contract it presents to agents.
 - Keep the parent agent responsible for comparison and promotion. Subagents should implement their assigned variant, run local checks when asked, and summarize what changed.
@@ -33,34 +33,29 @@ Use Lane as the file-versioning layer, not as a planning-file format. The user-f
 
 ## Example Shape
 
-For "try 5 login page designs and choose the best one":
+For "try 5 login page designs and judge them":
 
 ```powershell
-lane exec login-minimal -- codex exec --prompt "Implement a minimal login page."
-lane exec login-enterprise -- codex exec --prompt "Implement an enterprise SaaS login page."
-lane exec login-playful -- codex exec --prompt "Implement a more playful login page."
-lane exec login-split -- codex exec --prompt "Implement a split-panel login page."
-lane exec login-focused -- codex exec --prompt "Implement a focused conversion login page."
+lane try --name login --attempts 5 -- codex exec --prompt "Implement a strong login page."
 ```
 
 Then compare:
 
 ```powershell
-lane diff login-enterprise
-lane exec login-enterprise -- pnpm test
-lane exec login-enterprise -- pnpm build
+lane check login --name test -- pnpm test
+lane check login --name build -- pnpm build
+lane compare login --human
 ```
 
 Finally:
 
 ```powershell
-lane review
-lane promote-clean login-enterprise
+lane promote-clean login-3
 # For remaining conflicts, inspect the emitted actions and resolve only the selected op:
-lane show-op login-enterprise src/login.tsx login-enterprise:1
-lane resolve-op login-enterprise src/login.tsx login-enterprise:1 --with-file .\resolution.txt
-lane discard login-minimal
-lane discard login-playful
-lane discard login-split
-lane discard login-focused
+lane show-op login-3 src/login.tsx login-3:1
+lane resolve-op login-3 src/login.tsx login-3:1 --with-file .\resolution.txt
+lane discard login-1
+lane discard login-2
+lane discard login-4
+lane discard login-5
 ```

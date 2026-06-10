@@ -546,123 +546,119 @@ fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
 }
 
 #[test]
-fn cli_parent_can_orchestrate_five_parallel_lane_execs_directly() {
+fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';");
 
-    let variants = [
-        ("login-minimal", "minimal"),
-        ("login-enterprise", "enterprise"),
-        ("login-playful", "playful"),
-        ("login-split", "split"),
-        ("login-focused", "focused"),
-    ];
-    let jobs = variants
-        .iter()
-        .map(|(lane, design)| {
-            let root = repo.path().to_path_buf();
-            let lane = (*lane).to_owned();
-            let design = (*design).to_owned();
-            thread::spawn(move || {
-                let script = format!(
-                    "$ErrorActionPreference = \"Stop\"; Start-Sleep -Milliseconds 250; Set-Content -Path src/login.tsx -Value \"export const design = '{}';\" -NoNewline; Set-Content -Path src/{}.tsx -Value \"export const marker = '{}';\" -NoNewline",
-                    design, design, design
-                );
-                run_lane_exec(&root, &lane, &script)
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let exec_outputs = jobs
-        .into_iter()
-        .map(|job| output_json(&assert_success(job.join().unwrap())))
-        .collect::<Vec<_>>();
-    assert_eq!(exec_outputs.len(), 5);
-    let mount_roots = exec_outputs
-        .iter()
-        .map(|output| output["workspace_root"].as_str().unwrap().to_owned())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        mount_roots.len(),
-        exec_outputs.len(),
-        "parallel lane execs must use distinct virtual mount roots"
-    );
-    for output in &exec_outputs {
-        assert_exec_contract(output);
-        assert_eq!(output["exit_code"], 0);
-        assert_eq!(output["worker_error"], Value::Null);
-        assert_eq!(output["changes"].as_array().unwrap().len(), 2);
-    }
-
+    let attempted = repo.run_json([
+        "try",
+        "--name",
+        "login",
+        "--attempts",
+        "3",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; if ($env:LANE_ID -eq \"login-2\") { Set-Content -Path src/login.tsx -Value \"export const design = 'preferred';\" -NoNewline; Set-Content -Path src/preferred.ts -Value \"export const preferred = true;\" -NoNewline } else { Set-Content -Path src/login.tsx -Value \"export const design = '$env:LANE_ID';\" -NoNewline }",
+    ]);
+    assert_eq!(attempted["run"]["name"], "login");
+    assert_eq!(attempted["run"]["attempts"].as_array().unwrap().len(), 3);
+    assert!(repo.path().join(".lane/runs/login.json").exists());
     assert_eq!(
         fs::read(repo.path().join("src/login.tsx")).unwrap(),
         b"export const design = 'base';"
     );
 
-    for (lane, design) in variants {
-        assert_eq!(
-            review_change_statuses(&repo.run_json(["review", lane]), lane),
-            {
-                let mut expected = BTreeMap::new();
-                expected.insert(format!("src/{design}.tsx"), "created".to_owned());
-                expected.insert("src/login.tsx".to_owned(), "modified".to_owned());
-                expected
-            }
-        );
-    }
+    let checked = repo.run_json([
+        "check",
+        "login",
+        "--name",
+        "pick-second",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Continue\"; Set-Content -Path check-artifact.txt -Value artifact -NoNewline; if ($env:LANE_ID -ne \"login-2\") { Write-Error \"not selected\"; exit 9 }",
+    ]);
+    assert_eq!(checked["check"]["name"], "pick-second");
+    assert_eq!(checked["check"]["attempts"].as_array().unwrap().len(), 3);
+    assert_eq!(checked["check"]["attempts"][0]["exec"]["exit_code"], 9);
+    assert_eq!(checked["check"]["attempts"][1]["exec"]["exit_code"], 0);
 
-    let enterprise_review = repo.run_json(["review", "login-enterprise"]);
-    let promoted_clean = run_review_action_json(
-        &repo,
-        review_action(
-            &review_lane(&enterprise_review, "login-enterprise")["actions"],
-            "promote_clean",
-            "login-enterprise",
-        ),
-    );
-    assert_eq!(change_statuses_from_key(&promoted_clean, "promoted"), {
-        let mut expected = BTreeMap::new();
-        expected.insert("src/enterprise.tsx".to_owned(), "created".to_owned());
-        expected
-    });
+    let preferred_review = repo.run_json(["review", "login-2"]);
+    let preferred_paths = review_paths(&preferred_review);
+    assert_eq!(preferred_paths, vec!["src/login.tsx", "src/preferred.ts"]);
+    assert!(!preferred_paths.contains(&"check-artifact.txt"));
 
-    let conflict_review = repo.run_json(["review"]);
-    let conflict_actions =
-        &review_path(&conflict_review, "src/login.tsx")["conflicts"][0]["actions"];
-    let shown = run_review_action_json(
-        &repo,
-        review_action(conflict_actions, "show_op", "login-enterprise"),
+    let compared = repo.run_json(["compare", "login"]);
+    assert_eq!(compared["run"]["checks"].as_array().unwrap().len(), 1);
+    assert_eq!(compared["attempts"][0]["lane"], "login-1");
+    assert_eq!(compared["attempts"][1]["lane"], "login-2");
+    assert_eq!(compared["attempts"][2]["lane"], "login-3");
+    assert_eq!(compared["attempts"][1]["checks_passed"], 1);
+    assert_eq!(compared["attempts"][1]["checks_failed"], 0);
+    assert!(
+        compared["attempts"][1]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["kind"] == "promote_clean")
     );
-    let resolution = repo.path().join("login-enterprise-resolution.txt");
-    fs::write(
-        &resolution,
-        shown["inserted"]["utf8"].as_str().unwrap().as_bytes(),
-    )
-    .unwrap();
-    let resolved = run_review_action_with_replacement_json(
-        &repo,
-        review_action(conflict_actions, "resolve_op", "login-enterprise"),
-        &resolution,
-    );
-    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    assert_eq!(compared["review"]["summary"]["lanes"], 3);
+    assert_eq!(compared["review"]["summary"]["changed_paths"], 2);
 
-    assert_eq!(
-        fs::read(repo.path().join("src/login.tsx")).unwrap(),
-        b"export const design = 'enterprise';"
-    );
-    assert_eq!(
-        fs::read(repo.path().join("src/enterprise.tsx")).unwrap(),
-        b"export const marker = 'enterprise';"
-    );
-    assert!(!repo.path().join("src/minimal.tsx").exists());
-    assert!(!repo.path().join("src/playful.tsx").exists());
-    assert!(!repo.path().join("src/split.tsx").exists());
-    assert!(!repo.path().join("src/focused.tsx").exists());
+    let human = repo.run_text(["compare", "login", "--human"]);
+    assert!(human.starts_with("Lane compare\nrun: login\n"));
+    assert!(human.contains("Attempts\n  - login-1: attempt ok, checks 0/1"));
+    assert!(human.contains("  - login-2: attempt ok, checks 1/1"));
+    assert!(human.contains("promote_clean: lane promote-clean login-2"));
+    assert!(human.contains("  - pick-second\n    login-1: exit 9\n    login-2: ok"));
+}
 
-    for (lane, _) in variants {
-        if lane != "login-enterprise" {
-            let discarded = repo.run_json(["discard", lane]);
-            assert_eq!(discarded["removed"], true);
-        }
-    }
+#[test]
+fn cli_try_rejects_existing_attempt_lanes() {
+    let repo = TempRepo::new();
+    repo.run_json(["create", "dupe-1"]);
+
+    let output = repo.run_unchecked(&[
+        "try",
+        "--name",
+        "dupe",
+        "--attempts",
+        "1",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"",
+    ]);
+
+    assert_command_fails_with(&output, "attempt lanes already exist: dupe-1");
+}
+
+#[test]
+fn cli_try_records_failed_attempts_as_comparison_evidence() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;");
+
+    let output = repo.run([
+        "try",
+        "--name",
+        "failure-evidence",
+        "--attempts",
+        "2",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Continue\"; if ($env:LANE_ID -eq \"failure-evidence-1\") { Write-Error \"attempt failed\"; exit 7 }; Set-Content -Path src/preferred.ts -Value \"export const preferred = true;\" -NoNewline",
+    ]);
+    assert_success(output);
+    let attempted = output_json(&repo.run(["compare", "failure-evidence"]));
+    assert_eq!(attempted["attempts"][0]["lane"], "failure-evidence-1");
+    assert_eq!(attempted["attempts"][0]["attempt_ok"], false);
+    assert_eq!(attempted["attempts"][0]["attempt_exit_code"], 7);
+    assert_eq!(attempted["attempts"][1]["lane"], "failure-evidence-2");
+    assert_eq!(attempted["attempts"][1]["attempt_ok"], true);
 }
