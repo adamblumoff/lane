@@ -87,6 +87,14 @@ fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
         ),
         (
             vec![
+                "diff".to_owned(),
+                "agent-a".to_owned(),
+                ".GIT/config".to_owned(),
+            ],
+            "cannot project git metadata files",
+        ),
+        (
+            vec![
                 "promote-ops".to_owned(),
                 "agent-a".to_owned(),
                 "..\\outside.ts".to_owned(),

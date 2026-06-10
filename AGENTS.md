@@ -10,6 +10,8 @@ Don't just patch stuff all willy nilly, take a long-term maintainable approach t
 
 After every code change, tell me what actually improved, make it quantitative if possible.
 
+Test code should be on different files then src code unless there is a really good justification.
+
 Automatic tests should copy flows of manual verification that are important enough to keep running in the future.
 
 Don't roll your own UI if you don't have to, use some other premade popular package that fits the spec.

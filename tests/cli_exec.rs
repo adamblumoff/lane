@@ -576,6 +576,75 @@ fn cli_exec_replaces_directory_tree_with_file() {
 }
 
 #[test]
+fn cli_exec_recursive_directory_delete_hides_descendants_immediately() {
+    let repo = TempRepo::new();
+    repo.write("src/tree/nested/original.txt", b"original");
+
+    let result = repo.run_json([
+        "exec",
+        "delete-tree",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Remove-Item -Recurse -LiteralPath src/tree; if (Test-Path -LiteralPath src/tree/nested) { throw \"deleted nested directory stayed visible\" }; if (Test-Path -LiteralPath src/tree/nested/original.txt) { throw \"deleted nested file stayed visible\" }",
+    ]);
+
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert(
+            "src/tree/nested/original.txt".to_owned(),
+            "deleted".to_owned(),
+        );
+        expected
+    });
+    assert!(repo.path().join("src/tree/nested/original.txt").exists());
+
+    repo.run_json(["promote-clean", "delete-tree"]);
+    assert!(!repo.path().join("src/tree/nested/original.txt").exists());
+}
+
+#[test]
+fn cli_exec_recursive_directory_delete_allows_recreated_subtree_in_same_session() {
+    let repo = TempRepo::new();
+    repo.write("src/tree/nested/original.txt", b"original");
+    repo.write("src/tree/other.txt", b"other");
+
+    let result = repo.run_json([
+        "exec",
+        "recreate-tree",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Remove-Item -Recurse -LiteralPath src/tree; if (Test-Path -LiteralPath src/tree/nested/original.txt) { throw \"deleted nested file stayed visible\" }; New-Item -ItemType Directory -Force -Path src/tree/reborn | Out-Null; Set-Content -LiteralPath src/tree/reborn/fresh.txt -Value fresh -NoNewline; if (Test-Path -LiteralPath src/tree/other.txt) { throw \"deleted sibling file stayed visible\" }; if (-not (Test-Path -LiteralPath src/tree/reborn/fresh.txt)) { throw \"recreated file was hidden by parent tombstone\" }",
+    ]);
+
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert(
+            "src/tree/nested/original.txt".to_owned(),
+            "deleted".to_owned(),
+        );
+        expected.insert("src/tree/other.txt".to_owned(), "deleted".to_owned());
+        expected.insert("src/tree/reborn/fresh.txt".to_owned(), "created".to_owned());
+        expected
+    });
+
+    repo.run_json(["promote-clean", "recreate-tree"]);
+    assert!(!repo.path().join("src/tree/nested/original.txt").exists());
+    assert!(!repo.path().join("src/tree/other.txt").exists());
+    assert_eq!(
+        fs::read(repo.path().join("src/tree/reborn/fresh.txt")).unwrap(),
+        b"fresh"
+    );
+}
+
+#[test]
 fn cli_exec_runs_agent_like_process_with_git_view_and_atomic_save() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';\n");
@@ -645,7 +714,7 @@ fn cli_exec_keeps_lane_and_git_metadata_private_for_agent_processes() {
         "pwsh",
         "-NoProfile",
         "-Command",
-        "$ErrorActionPreference = \"Stop\"; git status --short | Out-Null; foreach ($path in @('.lane/agent-owned.json', '.git/index.lock')) { $wrote = $false; try { Set-Content -LiteralPath $path -Value nope -NoNewline -ErrorAction Stop; $wrote = $true } catch { } if ($wrote) { throw \"metadata write unexpectedly succeeded: $path\" } }; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
+        "$ErrorActionPreference = \"Stop\"; git status --short | Out-Null; $rootNames = @(Get-ChildItem -Force -Name .); foreach ($metadataName in @('.lane', '.git')) { if ($rootNames -contains $metadataName) { throw \"metadata entry unexpectedly visible: $metadataName\" } }; foreach ($path in @('.lane/agent-owned.json', '.LANE/agent-owned.json', '.git/index.lock', '.GIT/index.lock')) { $wrote = $false; try { Set-Content -LiteralPath $path -Value nope -NoNewline -ErrorAction Stop; $wrote = $true } catch { } if ($wrote) { throw \"metadata write unexpectedly succeeded: $path\" } }; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
     ]);
 
     assert_exec_contract(&result);

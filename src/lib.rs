@@ -18,6 +18,20 @@ pub use cli::{CliError, run};
 pub type FilePath = String;
 pub type LaneId = String;
 
+pub(crate) fn is_lane_state_path(path: &str) -> bool {
+    has_repo_root_component(path, ".lane")
+}
+
+pub(crate) fn is_git_metadata_path(path: &str) -> bool {
+    has_repo_root_component(path, ".git")
+}
+
+fn has_repo_root_component(path: &str, component: &str) -> bool {
+    path.split('/')
+        .next()
+        .is_some_and(|first| first.eq_ignore_ascii_case(component))
+}
+
 const BASE_FINGERPRINT_LEN: usize = 32;
 const EXEC_OUTPUT_PREVIEW_LIMIT: usize = 4096;
 const ORDER_ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
