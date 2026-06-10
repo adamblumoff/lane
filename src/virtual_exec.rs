@@ -185,10 +185,11 @@ impl ExecObserver {
         }
     }
 
-    fn child_chunk(&self, stream: &str, bytes: &[u8]) {
+    fn mirror_child_stream_chunk(&self, stream: &str, bytes: &[u8]) {
         if !self.enabled || bytes.is_empty() {
             return;
         }
+        // Keep process stdout reserved for the final JSON payload.
         let text = String::from_utf8_lossy(bytes);
         let mut stderr = io::stderr().lock();
         for segment in text.split_inclusive('\n') {
@@ -333,27 +334,17 @@ fn run_virtual_worker(
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     match command.spawn() {
         Ok(mut child) => {
-            let stdout = child
-                .stdout
-                .take()
-                .map(|stream| capture_worker_stream(stream, "stdout", observer.clone()));
-            let stderr = child
-                .stderr
-                .take()
-                .map(|stream| capture_worker_stream(stream, "stderr", observer));
-            match child.wait() {
-                Ok(status) => WorkerOutput {
-                    exit_code: status.code(),
-                    stdout: join_worker_stream(stdout),
-                    stderr: join_worker_stream(stderr),
-                    worker_error: None,
-                },
-                Err(error) => WorkerOutput {
-                    exit_code: None,
-                    stdout: join_worker_stream(stdout),
-                    stderr: join_worker_stream(stderr),
-                    worker_error: Some(error.to_string()),
-                },
+            let streams = WorkerStreamCaptures::start(&mut child, observer);
+            let (exit_code, worker_error) = match child.wait() {
+                Ok(status) => (status.code(), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            let output = streams.finish();
+            WorkerOutput {
+                exit_code,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                worker_error,
             }
         }
         Err(error) => WorkerOutput {
@@ -363,6 +354,38 @@ fn run_virtual_worker(
             worker_error: Some(error.to_string()),
         },
     }
+}
+
+struct WorkerStreamCaptures {
+    stdout: Option<thread::JoinHandle<Vec<u8>>>,
+    stderr: Option<thread::JoinHandle<Vec<u8>>>,
+}
+
+impl WorkerStreamCaptures {
+    fn start(child: &mut std::process::Child, observer: ExecObserver) -> Self {
+        Self {
+            stdout: child
+                .stdout
+                .take()
+                .map(|stream| capture_worker_stream(stream, "stdout", observer.clone())),
+            stderr: child
+                .stderr
+                .take()
+                .map(|stream| capture_worker_stream(stream, "stderr", observer)),
+        }
+    }
+
+    fn finish(self) -> CapturedWorkerOutput {
+        CapturedWorkerOutput {
+            stdout: join_worker_stream(self.stdout),
+            stderr: join_worker_stream(self.stderr),
+        }
+    }
+}
+
+struct CapturedWorkerOutput {
+    stdout: String,
+    stderr: String,
 }
 
 fn capture_worker_stream<R: Read + Send + 'static>(
@@ -378,7 +401,7 @@ fn capture_worker_stream<R: Read + Send + 'static>(
                 Ok(0) => break,
                 Ok(len) => {
                     captured.extend_from_slice(&buffer[..len]);
-                    observer.child_chunk(stream_name, &buffer[..len]);
+                    observer.mirror_child_stream_chunk(stream_name, &buffer[..len]);
                 }
                 Err(error) => {
                     observer.event(format_args!("failed to read worker {stream_name}: {error}"));
