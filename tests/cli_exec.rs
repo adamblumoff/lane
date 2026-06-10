@@ -327,6 +327,78 @@ fn cli_exec_releases_storage_lock_while_worker_runs() {
 }
 
 #[test]
+fn cli_exec_observe_streams_worker_output_to_stderr_and_preserves_json_stdout() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;");
+
+    let output = repo.run([
+        "exec",
+        "observed",
+        "--observe",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [Console]::Out.WriteLine('child out'); [Console]::Error.WriteLine('child err'); Set-Content -Path src/observed.ts -Value \"export const observed = true;\" -NoNewline",
+    ]);
+
+    assert!(output.status.success());
+    let result = output_json(&output);
+    assert_exec_contract(&result);
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["stdout"], "child out\r\n");
+    assert_eq!(result["stderr"], "child err\r\n");
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert("src/observed.ts".to_owned(), "created".to_owned());
+        expected
+    });
+
+    let observed = String::from_utf8(output.stderr).unwrap();
+    assert!(observed.contains("[lane exec observed +"));
+    assert!(observed.contains("starting worker: pwsh"));
+    assert!(observed.contains("[lane exec observed stdout] child out"));
+    assert!(observed.contains("[lane exec observed stderr] child err"));
+    assert!(observed.contains("storage done"));
+}
+
+#[test]
+fn cli_exec_parallel_repeated_blob_writes_do_not_fail() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;");
+    let root = repo.path().to_path_buf();
+
+    let jobs = ["a", "b", "c"]
+        .into_iter()
+        .map(|name| {
+            let root = root.clone();
+            let lane = format!("parallel-{name}");
+            let byte = name.as_bytes()[0];
+            thread::spawn(move || {
+                let script = format!(
+                    "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Force -Path stress | Out-Null; $bytes = New-Object byte[] 4096; for ($j = 0; $j -lt $bytes.Length; $j++) {{ $bytes[$j] = {byte} }}; for ($i = 0; $i -lt 80; $i++) {{ [IO.File]::WriteAllBytes(('stress/{name}-{{0:D3}}.bin' -f $i), $bytes) }}"
+                );
+                run_lane_exec(&root, &lane, &script)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for job in jobs {
+        let output = assert_success(job.join().unwrap());
+        let result = output_json(&output);
+        assert_exec_contract(&result);
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["worker_error"], Value::Null);
+        assert_eq!(result["changes"].as_array().unwrap().len(), 80);
+    }
+
+    let review = repo.run_json(["review"]);
+    assert_eq!(review["summary"]["changed_paths"], 240);
+    assert_eq!(review["summary"]["clean_ops"], 240);
+    assert_eq!(review["summary"]["conflicted_ops"], 0);
+}
+
+#[test]
 fn cli_exec_returns_json_for_child_failure() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';");

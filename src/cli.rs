@@ -41,6 +41,8 @@ enum Command {
     #[command(about = "Run a command in a lane through a virtual mounted lane view")]
     Exec {
         lane: String,
+        #[arg(long)]
+        observe: bool,
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -89,7 +91,11 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
     let repo_root = repo_root(cli.repo_root)?;
     match cli.command {
         Command::Create { lane } => create(&repo_root, &lane).map(|()| ExitCode::SUCCESS),
-        Command::Exec { lane, command } => exec(&repo_root, &lane, &command),
+        Command::Exec {
+            lane,
+            observe,
+            command,
+        } => exec(&repo_root, &lane, observe, &command),
         Command::Review { human, lane } => {
             review(&repo_root, lane.as_deref(), human).map(|()| ExitCode::SUCCESS)
         }
@@ -132,9 +138,14 @@ fn create(repo_root: &Path, lane: &str) -> CliResult<()> {
 }
 
 #[cfg(windows)]
-fn exec(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExitCode> {
-    let run = crate::virtual_exec::run_virtual_lane(repo_root, lane, command)
-        .map_err(CliError::message)?;
+fn exec(repo_root: &Path, lane: &str, observe: bool, command: &[String]) -> CliResult<ExitCode> {
+    let run = crate::virtual_exec::run_virtual_lane(
+        repo_root,
+        lane,
+        command,
+        crate::virtual_exec::VirtualExecOptions { observe },
+    )
+    .map_err(CliError::message)?;
     let failed = run.failed;
     print_json(&run.output)?;
     if failed {
@@ -145,7 +156,12 @@ fn exec(repo_root: &Path, lane: &str, command: &[String]) -> CliResult<ExitCode>
 }
 
 #[cfg(not(windows))]
-fn exec(_repo_root: &Path, _lane: &str, _command: &[String]) -> CliResult<ExitCode> {
+fn exec(
+    _repo_root: &Path,
+    _lane: &str,
+    _observe: bool,
+    _command: &[String],
+) -> CliResult<ExitCode> {
     Err(CliError::message(
         "lane exec requires the WinFsp virtual filesystem on Windows".to_owned(),
     ))

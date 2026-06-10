@@ -3,11 +3,12 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Component as PathComponent, Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -36,6 +37,7 @@ pub(crate) fn run_virtual_lane(
     repo_root: &Path,
     lane: &str,
     command: &[String],
+    options: VirtualExecOptions,
 ) -> Result<VirtualLaneRun, VirtualExecError> {
     let total_start = Instant::now();
     let (program, args) = command
@@ -43,32 +45,54 @@ pub(crate) fn run_virtual_lane(
         .ok_or_else(|| VirtualExecError::message("missing command for lane exec"))?;
     let storage_path = repo_root.join(STORAGE_PATH);
     let metrics = Arc::new(VirtualFsMetrics::default());
+    let observer = ExecObserver::new(lane, options.observe);
 
     let setup_start = Instant::now();
+    observer.event("preparing git view");
     let git_view = prepare_git_view(repo_root)?;
     winfsp_wrs::init().map_err(|error| VirtualExecError::message(error.to_string()))?;
     let mount_start = Instant::now();
+    observer.event("mounting virtual lane view");
     let (mount_point, mount, state) = start_mount(repo_root, &storage_path, lane, metrics.clone())?;
     let mount_ms = elapsed_ms(mount_start);
     let pre_worker_lock_ms = elapsed_ms(setup_start);
+    observer.event(format_args!(
+        "mounted in {mount_ms}ms at {}",
+        mount_point.workspace_path.display()
+    ));
 
     let worker_start = Instant::now();
+    observer.event(format_args!(
+        "starting worker: {}",
+        command_label(program, args)
+    ));
     let worker = run_virtual_worker(
         program,
         args,
         lane,
         git_view.as_ref(),
+        repo_root,
         &mount_point.workspace_path,
+        observer.clone(),
     );
     let worker_ms = elapsed_ms(worker_start);
+    observer.event(format_args!(
+        "worker finished in {worker_ms}ms with exit {:?}",
+        worker.exit_code
+    ));
 
     let stop_start = Instant::now();
+    observer.event("unmounting virtual lane view");
     mount.stop();
     let unmount_ms = elapsed_ms(stop_start);
 
     let collect_start = Instant::now();
     let projected_paths = state.projected_paths()?;
     let changed_paths = state.worker_changed_paths()?;
+    observer.event(format_args!(
+        "persisting {} changed path entries",
+        changed_paths.len()
+    ));
     state.flush()?;
     let changes = state.collect_changes()?;
     let exec_state = LaneExecState::new(
@@ -81,6 +105,10 @@ pub(crate) fn run_virtual_lane(
     let warnings = last_exec_warnings(state.record_last_exec(exec_state));
     let post_worker_lock_ms = elapsed_ms(collect_start);
     let snapshot = metrics.snapshot();
+    observer.event(format_args!(
+        "storage done in {post_worker_lock_ms}ms; lock wait {}ms, lock held {}ms, writes {}",
+        snapshot.storage_lock_wait_ms, snapshot.storage_lock_held_ms, snapshot.storage_write_ops
+    ));
     let failed = worker.exit_code != Some(0) || worker.worker_error.is_some();
 
     let output = VirtualExecOutput {
@@ -116,6 +144,11 @@ pub(crate) fn run_virtual_lane(
     Ok(VirtualLaneRun { output, failed })
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct VirtualExecOptions {
+    pub(crate) observe: bool,
+}
+
 fn last_exec_warnings(result: Result<(), VirtualExecError>) -> Vec<VirtualExecWarning> {
     match result {
         Ok(()) => Vec::new(),
@@ -123,6 +156,48 @@ fn last_exec_warnings(result: Result<(), VirtualExecError>) -> Vec<VirtualExecWa
             kind: "last_exec_not_recorded",
             message: format!("failed to record advisory last_exec metadata: {error}"),
         }],
+    }
+}
+
+#[derive(Clone)]
+struct ExecObserver {
+    enabled: bool,
+    lane: String,
+    started: Instant,
+}
+
+impl ExecObserver {
+    fn new(lane: &str, enabled: bool) -> Self {
+        Self {
+            enabled,
+            lane: lane.to_owned(),
+            started: Instant::now(),
+        }
+    }
+
+    fn event(&self, message: impl fmt::Display) {
+        if self.enabled {
+            eprintln!(
+                "[lane exec {} +{}ms] {message}",
+                self.lane,
+                elapsed_ms(self.started)
+            );
+        }
+    }
+
+    fn child_chunk(&self, stream: &str, bytes: &[u8]) {
+        if !self.enabled || bytes.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(bytes);
+        let mut stderr = io::stderr().lock();
+        for segment in text.split_inclusive('\n') {
+            let _ = write!(stderr, "[lane exec {} {stream}] {segment}", self.lane);
+            if !segment.ends_with('\n') {
+                let _ = writeln!(stderr);
+            }
+        }
+        let _ = stderr.flush();
     }
 }
 
@@ -250,15 +325,37 @@ fn run_virtual_worker(
     args: &[String],
     lane: &str,
     git_view: Option<&GitView>,
+    repo_root: &Path,
     mount_path: &Path,
+    observer: ExecObserver,
 ) -> WorkerOutput {
-    match virtual_command(program, args, lane, git_view, mount_path).output() {
-        Ok(output) => WorkerOutput {
-            exit_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            worker_error: None,
-        },
+    let mut command = virtual_command(program, args, lane, git_view, repo_root, mount_path);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    match command.spawn() {
+        Ok(mut child) => {
+            let stdout = child
+                .stdout
+                .take()
+                .map(|stream| capture_worker_stream(stream, "stdout", observer.clone()));
+            let stderr = child
+                .stderr
+                .take()
+                .map(|stream| capture_worker_stream(stream, "stderr", observer));
+            match child.wait() {
+                Ok(status) => WorkerOutput {
+                    exit_code: status.code(),
+                    stdout: join_worker_stream(stdout),
+                    stderr: join_worker_stream(stderr),
+                    worker_error: None,
+                },
+                Err(error) => WorkerOutput {
+                    exit_code: None,
+                    stdout: join_worker_stream(stdout),
+                    stderr: join_worker_stream(stderr),
+                    worker_error: Some(error.to_string()),
+                },
+            }
+        }
         Err(error) => WorkerOutput {
             exit_code: None,
             stdout: String::new(),
@@ -268,15 +365,55 @@ fn run_virtual_worker(
     }
 }
 
+fn capture_worker_stream<R: Read + Send + 'static>(
+    mut stream: R,
+    stream_name: &'static str,
+    observer: ExecObserver,
+) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut buffer = [0; 8192];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(len) => {
+                    captured.extend_from_slice(&buffer[..len]);
+                    observer.child_chunk(stream_name, &buffer[..len]);
+                }
+                Err(error) => {
+                    observer.event(format_args!("failed to read worker {stream_name}: {error}"));
+                    break;
+                }
+            }
+        }
+        captured
+    })
+}
+
+fn join_worker_stream(handle: Option<thread::JoinHandle<Vec<u8>>>) -> String {
+    let Some(handle) = handle else {
+        return String::new();
+    };
+    match handle.join() {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+        Err(_) => String::new(),
+    }
+}
+
 fn virtual_command<'a>(
     program: &'a str,
     args: &'a [String],
     lane: &'a str,
     git_view: Option<&'a GitView>,
+    repo_root: &'a Path,
     mount_path: &'a Path,
 ) -> ProcessCommand {
     let mount_label = path_label(mount_path);
     let git_work_tree = git_path_label(mount_path);
+    let cargo_target_dir = repo_root
+        .join("target")
+        .join("lane-exec")
+        .join(path_component(lane));
     let mut command = ProcessCommand::new(resolve_program(program));
     command
         .args(args)
@@ -285,6 +422,7 @@ fn virtual_command<'a>(
         .env("LANE_REPO_ROOT", &mount_label)
         .env("LANE_VIEW_ROOT", &mount_label)
         .env("LANE_EXEC_MODE", "virtual_mount")
+        .env("CARGO_TARGET_DIR", cargo_target_dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_CONFIG_COUNT", "3")
         .env("GIT_CONFIG_KEY_0", "safe.directory")
@@ -300,6 +438,33 @@ fn virtual_command<'a>(
             .env("GIT_WORK_TREE", git_work_tree);
     }
     command
+}
+
+fn command_label(program: &str, args: &[String]) -> String {
+    std::iter::once(program.to_owned())
+        .chain(args.iter().cloned())
+        .map(|part| {
+            if part.contains(char::is_whitespace) {
+                format!("{part:?}")
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn path_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('~');
+            encoded.push_str(&format!("{byte:02x}"));
+        }
+    }
+    encoded
 }
 
 fn git_path_label(path: impl AsRef<Path>) -> String {
