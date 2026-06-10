@@ -410,15 +410,24 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
         "-Command",
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=1`nb=X`nc=C`nd=4`n\")",
     ]);
+    repo.run_json([
+        "exec",
+        "agent-c",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Force -Path src | Out-Null; Set-Content -Path \"src/owner's.txt\" -Value \"owned\" -NoNewline",
+    ]);
 
     let json_default = repo.run_json(["review"]);
-    assert_eq!(json_default["summary"]["clean_ops"], 2);
+    assert_eq!(json_default["summary"]["clean_ops"], 3);
     assert_eq!(json_default["summary"]["conflicted_ops"], 2);
 
     let human = repo.run_text(["review", "--human"]);
     assert!(human.starts_with("Lane review\nscope: all lanes\n"));
     assert!(human.contains(
-        "summary: 2 lanes, 1 changed path, 2 clean ops, 2 conflicted ops, 1 conflict group"
+        "summary: 3 lanes, 2 changed paths, 3 clean ops, 2 conflicted ops, 1 conflict group"
     ));
     assert!(human.contains(
         "src/vars.txt\n  |- lanes\n  |  - agent-a modified, 2 ops (1 clean, 1 conflicted)"
@@ -426,6 +435,7 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
     assert!(human.contains("  |- clean ops\n  |  - agent-a agent-a:1 replace [2..3), inserts 1 B"));
     assert!(human.contains("  |    promote: lane promote-ops agent-a src/vars.txt agent-a:1"));
     assert!(human.contains("  |    inspect: lane show-op agent-a src/vars.txt agent-a:1"));
+    assert!(human.contains("lane promote-ops agent-c 'src/owner'\\''s.txt' agent-c:1"));
     assert!(human.contains("  `- conflict groups\n     - group 1 [6..7), lanes: agent-a, agent-b"));
     assert!(human.contains("         inspect: lane show-op agent-a src/vars.txt agent-a:2"));
     assert!(human.contains(
