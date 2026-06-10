@@ -607,6 +607,33 @@ fn cli_exec_recursive_directory_delete_hides_descendants_immediately() {
 }
 
 #[test]
+fn cli_exec_recursive_directory_delete_hides_descendants_across_path_casing() {
+    let repo = TempRepo::new();
+    repo.write("src/tree/nested/original.txt", b"original");
+
+    let result = repo.run_json([
+        "exec",
+        "delete-tree-case",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Remove-Item -Recurse -LiteralPath SRC/TREE; if (Test-Path -LiteralPath src/tree/nested/original.txt) { throw \"deleted nested file stayed visible through lowercase query\" }; if (Test-Path -LiteralPath SRC/TREE/nested/original.txt) { throw \"deleted nested file stayed visible through uppercase query\" }",
+    ]);
+
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert_eq!(change_statuses(&result), {
+        let mut expected = BTreeMap::new();
+        expected.insert(
+            "src/tree/nested/original.txt".to_owned(),
+            "deleted".to_owned(),
+        );
+        expected
+    });
+}
+
+#[test]
 fn cli_exec_recursive_directory_delete_allows_recreated_subtree_in_same_session() {
     let repo = TempRepo::new();
     repo.write("src/tree/nested/original.txt", b"original");
@@ -642,6 +669,32 @@ fn cli_exec_recursive_directory_delete_allows_recreated_subtree_in_same_session(
         fs::read(repo.path().join("src/tree/reborn/fresh.txt")).unwrap(),
         b"fresh"
     );
+}
+
+#[test]
+fn cli_exec_case_only_rename_does_not_promote_as_delete() {
+    let repo = TempRepo::new();
+    repo.write("src/case.txt", b"case");
+
+    let result = repo.run_json([
+        "exec",
+        "case-rename",
+        "--",
+        "cmd",
+        "/C",
+        "ren src\\case.txt CASE.txt && if not exist src\\CASE.txt exit /b 2",
+    ]);
+
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["worker_error"], Value::Null);
+    assert!(
+        !change_statuses(&result)
+            .values()
+            .any(|status| status == "deleted")
+    );
+
+    repo.run_json(["promote-clean", "case-rename"]);
+    assert_eq!(fs::read(repo.path().join("src/case.txt")).unwrap(), b"case");
 }
 
 #[test]

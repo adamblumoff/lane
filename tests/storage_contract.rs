@@ -222,7 +222,7 @@ fn lock_contention_includes_windows_permission_denied_errors() {
     )));
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn stale_pid_lock_is_reaped_on_acquire() {
     let temp = TempStorage::new();

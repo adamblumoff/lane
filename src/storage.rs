@@ -695,8 +695,10 @@ fn lock_is_stale(lock_path: &Path) -> io::Result<bool> {
 
     match fs::read_to_string(lock_path) {
         Ok(contents) => {
-            if let Some(pid) = parse_lock_owner_pid(&contents) {
-                return Ok(!process_is_running(pid));
+            if let Some(pid) = parse_lock_owner_pid(&contents)
+                && let Some(running) = process_is_running(pid)
+            {
+                return Ok(!running);
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
@@ -704,11 +706,15 @@ fn lock_is_stale(lock_path: &Path) -> io::Result<bool> {
         Err(error) => return Err(error),
     }
 
-    Ok(metadata
+    Ok(lock_age_exceeds(&metadata))
+}
+
+fn lock_age_exceeds(metadata: &fs::Metadata) -> bool {
+    metadata
         .modified()
         .ok()
         .and_then(|modified| modified.elapsed().ok())
-        .is_some_and(|age| age >= LOCK_STALE_AFTER))
+        .is_some_and(|age| age >= LOCK_STALE_AFTER)
 }
 
 fn parse_lock_owner_pid(contents: &str) -> Option<u32> {
@@ -718,9 +724,9 @@ fn parse_lock_owner_pid(contents: &str) -> Option<u32> {
 }
 
 #[cfg(windows)]
-fn process_is_running(pid: u32) -> bool {
+fn process_is_running(pid: u32) -> Option<bool> {
     if pid == 0 {
-        return false;
+        return Some(false);
     }
 
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -728,17 +734,25 @@ fn process_is_running(pid: u32) -> bool {
 
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if handle == 0 {
-        return false;
+        return Some(false);
     }
     unsafe {
         CloseHandle(handle);
     }
-    true
+    Some(true)
 }
 
-#[cfg(not(windows))]
-fn process_is_running(_pid: u32) -> bool {
-    true
+#[cfg(target_os = "linux")]
+fn process_is_running(pid: u32) -> Option<bool> {
+    if pid == 0 {
+        return Some(false);
+    }
+    Some(Path::new("/proc").join(pid.to_string()).exists())
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
+fn process_is_running(_pid: u32) -> Option<bool> {
+    None
 }
 
 pub(crate) fn is_lock_contention(error: &io::Error) -> bool {

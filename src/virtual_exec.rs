@@ -1240,6 +1240,10 @@ impl VirtualLaneState {
         if from == to {
             return self.path_version(from);
         }
+        if from.eq_ignore_ascii_case(to) {
+            let bytes = self.read_file(from)?;
+            return self.set_dirty_entry(to, DirtyEntry::File(bytes));
+        }
         if self.node_for_path(to)?.is_some() && !replace_if_exists {
             return Err(STATUS_OBJECT_NAME_COLLISION);
         }
@@ -1521,10 +1525,9 @@ impl VirtualLaneState {
     }
 
     fn dirty_entry(&self, path: &str) -> Result<Option<DirtyEntry>, i32> {
-        self.dirty
-            .lock()
-            .map_err(|_| STATUS_ACCESS_DENIED)
-            .map(|dirty| dirty.get(path).cloned())
+        let dirty = self.dirty.lock().map_err(|_| STATUS_ACCESS_DENIED)?;
+        let versions = self.versions.lock().map_err(|_| STATUS_ACCESS_DENIED)?;
+        Ok(newest_dirty_entry_for_path(&dirty, &versions, path).cloned())
     }
 
     fn dirty_entries(&self) -> Result<Vec<(FilePath, DirtyEntry)>, i32> {
@@ -1540,23 +1543,21 @@ impl VirtualLaneState {
     }
 
     fn dirty_has_visible_children(&self, path: &str) -> Result<bool, i32> {
-        let prefix = child_prefix(path);
         self.dirty
             .lock()
             .map_err(|_| STATUS_ACCESS_DENIED)
             .map(|dirty| {
                 dirty.iter().any(|(dirty_path, entry)| {
-                    dirty_path.starts_with(&prefix)
+                    is_descendant_path(dirty_path, path)
                         && matches!(entry, DirtyEntry::File(_) | DirtyEntry::Directory)
                 })
             })
     }
 
     fn dirty_ancestor_hides(&self, path: &str) -> Result<bool, i32> {
-        self.dirty
-            .lock()
-            .map_err(|_| STATUS_ACCESS_DENIED)
-            .map(|dirty| dirty_ancestor_hides(&dirty, path))
+        let dirty = self.dirty.lock().map_err(|_| STATUS_ACCESS_DENIED)?;
+        let versions = self.versions.lock().map_err(|_| STATUS_ACCESS_DENIED)?;
+        Ok(dirty_ancestor_hides(&dirty, &versions, path))
     }
 
     fn canonical_dirty_entries(&self) -> Result<Vec<(FilePath, DirtyEntry)>, i32> {
@@ -1692,7 +1693,7 @@ fn dir_entry_for_dirty_path(directory: &str, dirty_path: &str) -> Option<(String
     let tail = if directory.is_empty() {
         dirty_path
     } else {
-        dirty_path.strip_prefix(&format!("{directory}/"))?
+        dirty_path_descendant_tail(dirty_path, directory)?
     };
     if tail.is_empty() || tail == dirty_path && !directory.is_empty() {
         return None;
@@ -1703,15 +1704,47 @@ fn dir_entry_for_dirty_path(directory: &str, dirty_path: &str) -> Option<(String
     }
 }
 
-fn dirty_ancestor_hides(dirty: &BTreeMap<FilePath, DirtyEntry>, path: &str) -> bool {
+fn dirty_path_descendant_tail<'a>(dirty_path: &'a str, directory: &str) -> Option<&'a str> {
+    let separator = dirty_path.as_bytes().get(directory.len())?;
+    let prefix = dirty_path.get(..directory.len())?;
+    if *separator != b'/' || !prefix.eq_ignore_ascii_case(directory) {
+        return None;
+    }
+    dirty_path.get(directory.len() + 1..)
+}
+
+fn is_descendant_path(path: &str, directory: &str) -> bool {
+    if directory.is_empty() {
+        return !path.is_empty();
+    }
+    dirty_path_descendant_tail(path, directory).is_some()
+}
+
+fn dirty_ancestor_hides(
+    dirty: &BTreeMap<FilePath, DirtyEntry>,
+    versions: &BTreeMap<FilePath, u64>,
+    path: &str,
+) -> bool {
     let mut current = path;
     while let Some((parent, _)) = current.rsplit_once('/') {
-        if let Some(entry) = dirty.get(parent) {
+        if let Some(entry) = newest_dirty_entry_for_path(dirty, versions, parent) {
             return matches!(entry, DirtyEntry::Deleted | DirtyEntry::File(_));
         }
         current = parent;
     }
     false
+}
+
+fn newest_dirty_entry_for_path<'a>(
+    dirty: &'a BTreeMap<FilePath, DirtyEntry>,
+    versions: &BTreeMap<FilePath, u64>,
+    path: &str,
+) -> Option<&'a DirtyEntry> {
+    dirty
+        .iter()
+        .filter(|(dirty_path, _)| dirty_path.eq_ignore_ascii_case(path))
+        .max_by_key(|(dirty_path, _)| versions.get(*dirty_path).copied().unwrap_or(0))
+        .map(|(_, entry)| entry)
 }
 
 fn prepare_session_fs(
