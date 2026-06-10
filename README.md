@@ -1,0 +1,94 @@
+# lane
+
+Lane lets multiple agents work on the same repo files at the same time without
+copying the repo or creating git worktrees.
+
+It is a file-level isolation layer for agent work. Each agent writes into its own
+lane, Lane records the file operations, and the base repo stays untouched until
+you explicitly promote selected work.
+
+## Status
+
+Pre-alpha. Expect breaking changes.
+
+Development currently targets Windows. `lane exec` requires the WinFsp virtual
+filesystem so agents can run inside a mounted lane view.
+
+## Why
+
+Git worktrees isolate whole repos. That is too coarse when several agents are
+trying different edits against the same files.
+
+Lane moves the isolation boundary down to the file operation level:
+
+- run agents asynchronously in separate lanes
+- compare their edits against the same base files
+- promote clean operations directly
+- resolve conflicts per operation instead of per copied repo
+
+## Build
+
+```powershell
+cargo build
+cargo test
+```
+
+To put the `lane` binary on your path while developing:
+
+```powershell
+cargo install --path .
+```
+
+## Basic AX Flow
+
+```powershell
+lane create agent-a
+lane exec agent-a -- codex exec --prompt "Implement the change."
+lane diff agent-a
+lane review --human
+lane promote-clean agent-a
+```
+
+If the lane is not worth keeping:
+
+```powershell
+lane discard agent-a
+```
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `create <lane>` | Create an isolated lane. |
+| `exec <lane> -- <command>` | Run a command inside a mounted lane view. |
+| `diff <lane> [paths...]` | Show a text diff for lane changes. |
+| `review [lane]` | Emit the structured review graph as JSON. |
+| `review --human [lane]` | Show a human-readable review. |
+| `promote-clean <lane>` | Promote every non-conflicting operation. |
+| `promote-ops <lane> <path> <ops...>` | Promote specific operations. |
+| `show-op <lane> <path> <op-id>` | Inspect one operation with byte previews. |
+| `resolve-op <lane> <path> <op-id> --with-file <path>` | Replace one operation with resolved bytes. |
+| `discard <lane>` | Remove a lane and its private changes. |
+| `doctor` | Validate Lane storage. |
+
+## Mental Model
+
+The repo on disk is the base.
+
+A lane is a private overlay of file operations against that base.
+
+`lane exec` gives a worker a normal-looking mounted repo, captures what changed,
+and stores those changes in `.lane`.
+
+`lane review` is the decision point. Clean operations can be promoted
+automatically. Conflicting operations can be inspected, resolved, promoted
+selectively, or discarded.
+
+## Development
+
+```powershell
+cargo test
+```
+
+Tests live outside `src/` and should preserve real manual workflows that are
+important enough to keep running.
