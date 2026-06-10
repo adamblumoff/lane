@@ -105,6 +105,16 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
         ]
     );
 
+    let human = repo.run_text(["review", "--human"]);
+    assert!(human.contains(
+        "  - failed-worker: 2 changed paths, 2 clean ops, 0 conflicted ops, last exec exit 9, exec touched 3 paths"
+    ));
+    assert!(human.contains(
+        "  - failed-worker: 2 clean ops across 2 paths, 2 changed paths total, last exec exit 9, exec touched 3 paths"
+    ));
+    assert!(human.contains("stderr: "));
+    assert!(human.contains("simulated dogfood failure"));
+
     let failed_lane = review_lane(&review, "failed-worker");
     assert_eq!(failed_lane["changed_paths"], 2);
     assert_eq!(failed_lane["clean_ops"], 2);

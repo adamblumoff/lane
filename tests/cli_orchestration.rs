@@ -430,23 +430,31 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
         "summary: 3 lanes, 2 changed paths, 3 clean ops, 2 conflicted ops, 1 conflict group"
     ));
     assert!(human.contains(
+        "Lane status\n  - agent-a: 1 changed path, 1 clean op, 1 conflicted op, last exec ok, exec touched 1 path"
+    ));
+    assert!(human.contains(
+        "Promotable now\n  - agent-a: 1 clean op across 1 path, 1 changed path total, last exec ok, exec touched 1 path\n    command: lane promote-clean agent-a"
+    ));
+    assert!(human.contains(
+        "Needs decision\n  - src/vars.txt group 1 [6..7), 2 ops, lanes: agent-a, agent-b"
+    ));
+    assert!(human.contains(
         "src/vars.txt\n  |- lanes\n  |  - agent-a modified, 2 ops (1 clean, 1 conflicted)"
     ));
     assert!(human.contains("  |- clean ops\n  |  - agent-a agent-a:1 replace [2..3), inserts 1 B"));
+    assert!(human.contains("  |    base: \"1\"\n  |    inserted: \"A\""));
     assert!(human.contains("  |    promote: lane promote-ops agent-a src/vars.txt agent-a:1"));
-    assert!(human.contains("  |    inspect: lane show-op agent-a src/vars.txt agent-a:1"));
     assert!(human.contains("lane promote-ops agent-c 'src/owner'\\''s.txt' agent-c:1"));
     assert!(human.contains("  `- conflict groups\n     - group 1 [6..7), lanes: agent-a, agent-b"));
-    assert!(human.contains("         inspect: lane show-op agent-a src/vars.txt agent-a:2"));
+    assert!(human.contains("         base: \"2\"\n         inserted: \"B\""));
+    assert!(human.contains("         inserted: \"X\""));
     assert!(human.contains(
         "         resolve: lane resolve-op agent-a src/vars.txt agent-a:2 --with-file <replacement-file>"
     ));
-    assert!(
-        human.contains(
-            "Lane actions\n  agent-a:\n    - promote clean ops: lane promote-clean agent-a"
-        )
-    );
-    assert!(human.contains("    - discard lane: lane discard agent-b"));
+    assert!(!human.contains("inspect:"));
+    assert!(human.contains(
+        "Discard lanes\n  - agent-a: lane discard agent-a\n  - agent-b: lane discard agent-b"
+    ));
 
     let agent_a_human = repo.run_text(["review", "--human", "agent-a"]);
     assert!(agent_a_human.contains("scope: agent-a"));
