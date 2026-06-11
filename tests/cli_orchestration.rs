@@ -617,6 +617,100 @@ fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
 }
 
 #[test]
+fn cli_try_and_check_spawn_all_workers_before_joining() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;");
+    let markers = std::env::temp_dir().join(format!("lane-parallel-{}", unique_suffix()));
+    let try_markers = markers.join("try");
+    let check_markers = markers.join("check");
+    fs::create_dir_all(&try_markers).unwrap();
+    fs::create_dir_all(&check_markers).unwrap();
+
+    let try_marker_arg = ps_single_quoted_path(&try_markers);
+    let try_script = format!(
+        "$ErrorActionPreference = \"Stop\"; $dir = {try_marker_arg}; $me = $env:LANE_ID; Set-Content -LiteralPath (Join-Path $dir ($me + '.started')) -Value started -NoNewline; $other = if ($me -eq 'parallel-1') {{ 'parallel-2' }} else {{ 'parallel-1' }}; $deadline = (Get-Date).AddSeconds(5); while (-not (Test-Path -LiteralPath (Join-Path $dir ($other + '.started')))) {{ if ((Get-Date) -gt $deadline) {{ throw 'other attempt did not start' }}; Start-Sleep -Milliseconds 50 }}; Set-Content -Path ($me + '.txt') -Value done -NoNewline"
+    );
+    let tried = repo.run_json([
+        "try",
+        "--name",
+        "parallel",
+        "--attempts",
+        "2",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        try_script.as_str(),
+    ]);
+    assert_eq!(tried["run"]["attempts"][0]["exec"]["exit_code"], 0);
+    assert_eq!(tried["run"]["attempts"][1]["exec"]["exit_code"], 0);
+
+    let check_marker_arg = ps_single_quoted_path(&check_markers);
+    let check_script = format!(
+        "$ErrorActionPreference = \"Stop\"; $dir = {check_marker_arg}; $me = $env:LANE_ID; Set-Content -LiteralPath (Join-Path $dir ($me + '.started')) -Value started -NoNewline; $other = if ($me -eq 'parallel-1') {{ 'parallel-2' }} else {{ 'parallel-1' }}; $deadline = (Get-Date).AddSeconds(5); while (-not (Test-Path -LiteralPath (Join-Path $dir ($other + '.started')))) {{ if ((Get-Date) -gt $deadline) {{ throw 'other check did not start' }}; Start-Sleep -Milliseconds 50 }}"
+    );
+    let checked = repo.run_json([
+        "check",
+        "parallel",
+        "--name",
+        "parallel-check",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        check_script.as_str(),
+    ]);
+    assert_eq!(checked["check"]["attempts"][0]["exec"]["exit_code"], 0);
+    assert_eq!(checked["check"]["attempts"][1]["exec"]["exit_code"], 0);
+
+    let _ = fs::remove_dir_all(markers);
+}
+
+#[test]
+fn cli_check_merges_concurrent_check_results() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;");
+    repo.run_json([
+        "try",
+        "--name",
+        "merge-checks",
+        "--attempts",
+        "1",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/attempt.ts -Value \"export const attempt = true;\" -NoNewline",
+    ]);
+
+    let markers = std::env::temp_dir().join(format!("lane-check-merge-{}", unique_suffix()));
+    fs::create_dir_all(&markers).unwrap();
+    let marker_arg = ps_single_quoted_path(&markers);
+    let script_a = concurrent_check_script(&marker_arg, "a", "b");
+    let script_b = concurrent_check_script(&marker_arg, "b", "a");
+    let root_a = repo.path().to_path_buf();
+    let root_b = repo.path().to_path_buf();
+    let job_a = thread::spawn(move || run_named_check(&root_a, "a", &script_a));
+    let job_b = thread::spawn(move || run_named_check(&root_b, "b", &script_b));
+    assert_success(job_a.join().unwrap());
+    assert_success(job_b.join().unwrap());
+
+    let compare = repo.run_json(["compare", "merge-checks"]);
+    let check_names = compare["run"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| check["name"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        check_names,
+        ["a".to_owned(), "b".to_owned()].into_iter().collect()
+    );
+
+    let _ = fs::remove_dir_all(markers);
+}
+
+#[test]
 fn cli_try_rejects_existing_attempt_lanes() {
     let repo = TempRepo::new();
     repo.run_json(["create", "dupe-1"]);
@@ -661,4 +755,29 @@ fn cli_try_records_failed_attempts_as_comparison_evidence() {
     assert_eq!(attempted["attempts"][0]["attempt_exit_code"], 7);
     assert_eq!(attempted["attempts"][1]["lane"], "failure-evidence-2");
     assert_eq!(attempted["attempts"][1]["attempt_ok"], true);
+}
+
+fn concurrent_check_script(marker_arg: &str, name: &str, other: &str) -> String {
+    format!(
+        "$ErrorActionPreference = \"Stop\"; $dir = {marker_arg}; $name = '{name}'; $other = '{other}'; Set-Content -LiteralPath (Join-Path $dir ($name + '.started')) -Value started -NoNewline; $deadline = (Get-Date).AddSeconds(5); while (-not (Test-Path -LiteralPath (Join-Path $dir ($other + '.started')))) {{ if ((Get-Date) -gt $deadline) {{ throw 'other check command did not start' }}; Start-Sleep -Milliseconds 50 }}"
+    )
+}
+
+fn run_named_check(repo_root: &std::path::Path, name: &str, script: &str) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_lane"))
+        .arg("--repo-root")
+        .arg(repo_root)
+        .args([
+            "check",
+            "merge-checks",
+            "--name",
+            name,
+            "--",
+            "pwsh",
+            "-NoProfile",
+            "-Command",
+            script,
+        ])
+        .output()
+        .unwrap()
 }

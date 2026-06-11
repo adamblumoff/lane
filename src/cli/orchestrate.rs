@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::thread;
+use std::thread::{self, JoinHandle};
 
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +28,7 @@ pub(super) fn try_run(
     let lanes = attempt_lanes(name, attempts)?;
     reserve_attempt_lanes(repo_root, name, &lanes)?;
 
-    let mut attempt_records = lanes
+    let jobs = lanes
         .into_iter()
         .enumerate()
         .map(|(index, lane)| {
@@ -43,12 +43,8 @@ pub(super) fn try_run(
                 }),
             )
         })
-        .map(|(index, lane, job)| match job.join() {
-            Ok(record) => record,
-            Err(_) => AttemptRecord::thread_panic("attempt", index, lane),
-        })
         .collect::<Vec<_>>();
-    attempt_records.sort_by_key(|attempt| attempt.index);
+    let attempt_records = join_attempt_jobs("attempt", jobs);
 
     let run = RunRecord {
         version: RUN_VERSION,
@@ -83,8 +79,8 @@ pub(super) fn check(
     check_name: Option<&str>,
     command: &[String],
 ) -> CliResult<ExitCode> {
-    let mut run = load_run(repo_root, run_name)?;
-    let mut check_attempts = run
+    let run = load_run(repo_root, run_name)?;
+    let jobs = run
         .attempts
         .iter()
         .map(|attempt| {
@@ -98,12 +94,8 @@ pub(super) fn check(
                 thread::spawn(move || run_check_command(repo_root, lane, index, command)),
             )
         })
-        .map(|(index, lane, job)| match job.join() {
-            Ok(record) => record,
-            Err(_) => AttemptRecord::thread_panic("check", index, lane),
-        })
         .collect::<Vec<_>>();
-    check_attempts.sort_by_key(|attempt| attempt.index);
+    let check_attempts = join_attempt_jobs("check", jobs);
 
     let check = CheckRecord {
         name: check_name
@@ -116,8 +108,7 @@ pub(super) fn check(
         .attempts
         .iter()
         .any(|attempt| attempt.orchestration_error.is_some());
-    run.checks.push(check.clone());
-    persist_run(repo_root, &run)?;
+    let run = append_check(repo_root, run_name, check.clone())?;
 
     let output = CheckOutput {
         repo_root: path_label(repo_root),
@@ -131,6 +122,21 @@ pub(super) fn check(
     } else {
         ExitCode::SUCCESS
     })
+}
+
+fn join_attempt_jobs(
+    kind: &str,
+    jobs: Vec<(usize, LaneId, JoinHandle<AttemptRecord>)>,
+) -> Vec<AttemptRecord> {
+    let mut records = jobs
+        .into_iter()
+        .map(|(index, lane, job)| match job.join() {
+            Ok(record) => record,
+            Err(_) => AttemptRecord::thread_panic(kind, index, lane),
+        })
+        .collect::<Vec<_>>();
+    records.sort_by_key(|attempt| attempt.index);
+    records
 }
 
 pub(super) fn compare(repo_root: &Path, run_name: &str, human: bool) -> CliResult<()> {
@@ -260,7 +266,8 @@ fn run_lane_command(
         lane,
         exec: None,
         orchestration_error: Some(
-            "lane try requires the WinFsp virtual filesystem on Windows".to_owned(),
+            "lane try is only supported on Windows (requires the WinFsp virtual filesystem)"
+                .to_owned(),
         ),
     }
 }
@@ -308,7 +315,8 @@ fn run_check_command(
         lane,
         exec: None,
         orchestration_error: Some(
-            "lane check requires the WinFsp virtual filesystem on Windows".to_owned(),
+            "lane check is only supported on Windows (requires the WinFsp virtual filesystem)"
+                .to_owned(),
         ),
     }
 }
@@ -345,6 +353,15 @@ fn persist_run(repo_root: &Path, run: &RunRecord) -> CliResult<()> {
     let bytes = serde_json::to_vec_pretty(run)?;
     persist_bytes(&path, &bytes)?;
     Ok(())
+}
+
+fn append_check(repo_root: &Path, run_name: &str, check: CheckRecord) -> CliResult<RunRecord> {
+    let storage_path = storage_path(repo_root);
+    let _lock = acquire_repo_lock(&storage_path)?;
+    let mut run = load_run(repo_root, run_name)?;
+    run.checks.push(check);
+    persist_run(repo_root, &run)?;
+    Ok(run)
 }
 
 fn compare_attempts(run: &RunRecord, review: &ReviewOutput) -> Vec<CompareAttempt> {
