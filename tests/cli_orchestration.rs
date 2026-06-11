@@ -546,123 +546,243 @@ fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
 }
 
 #[test]
-fn cli_parent_can_orchestrate_five_parallel_lane_execs_directly() {
+fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';");
 
-    let variants = [
-        ("login-minimal", "minimal"),
-        ("login-enterprise", "enterprise"),
-        ("login-playful", "playful"),
-        ("login-split", "split"),
-        ("login-focused", "focused"),
-    ];
-    let jobs = variants
-        .iter()
-        .map(|(lane, design)| {
-            let root = repo.path().to_path_buf();
-            let lane = (*lane).to_owned();
-            let design = (*design).to_owned();
-            thread::spawn(move || {
-                let script = format!(
-                    "$ErrorActionPreference = \"Stop\"; Start-Sleep -Milliseconds 250; Set-Content -Path src/login.tsx -Value \"export const design = '{}';\" -NoNewline; Set-Content -Path src/{}.tsx -Value \"export const marker = '{}';\" -NoNewline",
-                    design, design, design
-                );
-                run_lane_exec(&root, &lane, &script)
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let exec_outputs = jobs
-        .into_iter()
-        .map(|job| output_json(&assert_success(job.join().unwrap())))
-        .collect::<Vec<_>>();
-    assert_eq!(exec_outputs.len(), 5);
-    let mount_roots = exec_outputs
-        .iter()
-        .map(|output| output["workspace_root"].as_str().unwrap().to_owned())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        mount_roots.len(),
-        exec_outputs.len(),
-        "parallel lane execs must use distinct virtual mount roots"
-    );
-    for output in &exec_outputs {
-        assert_exec_contract(output);
-        assert_eq!(output["exit_code"], 0);
-        assert_eq!(output["worker_error"], Value::Null);
-        assert_eq!(output["changes"].as_array().unwrap().len(), 2);
-    }
-
+    let attempted = repo.run_json([
+        "try",
+        "--name",
+        "login",
+        "--attempts",
+        "3",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; if ($env:LANE_ID -eq \"login-2\") { Set-Content -Path src/login.tsx -Value \"export const design = 'preferred';\" -NoNewline; Set-Content -Path src/preferred.ts -Value \"export const preferred = true;\" -NoNewline } else { Set-Content -Path src/login.tsx -Value \"export const design = '$env:LANE_ID';\" -NoNewline }",
+    ]);
+    assert_eq!(attempted["run"]["name"], "login");
+    assert_eq!(attempted["run"]["attempts"].as_array().unwrap().len(), 3);
+    assert!(repo.path().join(".lane/runs/login.json").exists());
     assert_eq!(
         fs::read(repo.path().join("src/login.tsx")).unwrap(),
         b"export const design = 'base';"
     );
 
-    for (lane, design) in variants {
-        assert_eq!(
-            review_change_statuses(&repo.run_json(["review", lane]), lane),
-            {
-                let mut expected = BTreeMap::new();
-                expected.insert(format!("src/{design}.tsx"), "created".to_owned());
-                expected.insert("src/login.tsx".to_owned(), "modified".to_owned());
-                expected
-            }
-        );
-    }
-
-    let enterprise_review = repo.run_json(["review", "login-enterprise"]);
-    let promoted_clean = run_review_action_json(
-        &repo,
-        review_action(
-            &review_lane(&enterprise_review, "login-enterprise")["actions"],
-            "promote_clean",
-            "login-enterprise",
-        ),
+    let checked_output = repo.run_unchecked(&[
+        "check",
+        "login",
+        "--name",
+        "pick-second",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Continue\"; Set-Content -Path check-artifact.txt -Value artifact -NoNewline; if ($env:LANE_ID -ne \"login-2\") { Write-Error \"not selected\"; exit 9 }",
+    ]);
+    assert!(
+        !checked_output.status.success(),
+        "lane check should fail when any check attempt fails"
     );
-    assert_eq!(change_statuses_from_key(&promoted_clean, "promoted"), {
-        let mut expected = BTreeMap::new();
-        expected.insert("src/enterprise.tsx".to_owned(), "created".to_owned());
-        expected
-    });
+    let checked = output_json(&checked_output);
+    assert_eq!(checked["check"]["name"], "pick-second");
+    assert_eq!(checked["check"]["attempts"].as_array().unwrap().len(), 3);
+    assert_eq!(checked["check"]["attempts"][0]["exec"]["exit_code"], 9);
+    assert_eq!(checked["check"]["attempts"][1]["exec"]["exit_code"], 0);
 
-    let conflict_review = repo.run_json(["review"]);
-    let conflict_actions =
-        &review_path(&conflict_review, "src/login.tsx")["conflicts"][0]["actions"];
-    let shown = run_review_action_json(
-        &repo,
-        review_action(conflict_actions, "show_op", "login-enterprise"),
+    let preferred_review = repo.run_json(["review", "login-2"]);
+    let preferred_paths = review_paths(&preferred_review);
+    assert_eq!(preferred_paths, vec!["src/login.tsx", "src/preferred.ts"]);
+    assert!(!preferred_paths.contains(&"check-artifact.txt"));
+
+    let compared = repo.run_json(["compare", "login"]);
+    assert_eq!(compared["run"]["checks"].as_array().unwrap().len(), 1);
+    assert_eq!(compared["attempts"][0]["lane"], "login-1");
+    assert_eq!(compared["attempts"][1]["lane"], "login-2");
+    assert_eq!(compared["attempts"][2]["lane"], "login-3");
+    assert_eq!(compared["attempts"][1]["checks_passed"], 1);
+    assert_eq!(compared["attempts"][1]["checks_failed"], 0);
+    assert!(
+        compared["attempts"][1]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["kind"] == "promote_clean")
     );
-    let resolution = repo.path().join("login-enterprise-resolution.txt");
-    fs::write(
-        &resolution,
-        shown["inserted"]["utf8"].as_str().unwrap().as_bytes(),
+    assert_eq!(compared["review"]["summary"]["lanes"], 3);
+    assert_eq!(compared["review"]["summary"]["changed_paths"], 2);
+
+    let human = repo.run_text(["compare", "login", "--human"]);
+    assert!(human.starts_with("Lane compare\nrun: login\n"));
+    assert!(human.contains("Attempts\n  - login-1: attempt ok, checks 0/1"));
+    assert!(human.contains("  - login-2: attempt ok, checks 1/1"));
+    assert!(human.contains("promote_clean: lane promote-clean login-2"));
+    assert!(human.contains("  - pick-second\n    login-1: exit 9\n    login-2: ok"));
+}
+
+#[test]
+fn cli_try_and_check_spawn_all_workers_before_joining() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;");
+    let markers = std::env::temp_dir().join(format!("lane-parallel-{}", unique_suffix()));
+    let try_markers = markers.join("try");
+    let check_markers = markers.join("check");
+    fs::create_dir_all(&try_markers).unwrap();
+    fs::create_dir_all(&check_markers).unwrap();
+
+    let try_marker_arg = ps_single_quoted_path(&try_markers);
+    let try_script = format!(
+        "$ErrorActionPreference = \"Stop\"; $dir = {try_marker_arg}; $me = $env:LANE_ID; Set-Content -LiteralPath (Join-Path $dir ($me + '.started')) -Value started -NoNewline; $other = if ($me -eq 'parallel-1') {{ 'parallel-2' }} else {{ 'parallel-1' }}; $deadline = (Get-Date).AddSeconds(5); while (-not (Test-Path -LiteralPath (Join-Path $dir ($other + '.started')))) {{ if ((Get-Date) -gt $deadline) {{ throw 'other attempt did not start' }}; Start-Sleep -Milliseconds 50 }}; Set-Content -Path ($me + '.txt') -Value done -NoNewline"
+    );
+    let tried = repo.run_json([
+        "try",
+        "--name",
+        "parallel",
+        "--attempts",
+        "2",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        try_script.as_str(),
+    ]);
+    assert_eq!(tried["run"]["attempts"][0]["exec"]["exit_code"], 0);
+    assert_eq!(tried["run"]["attempts"][1]["exec"]["exit_code"], 0);
+
+    let check_marker_arg = ps_single_quoted_path(&check_markers);
+    let check_script = format!(
+        "$ErrorActionPreference = \"Stop\"; $dir = {check_marker_arg}; $me = $env:LANE_ID; Set-Content -LiteralPath (Join-Path $dir ($me + '.started')) -Value started -NoNewline; $other = if ($me -eq 'parallel-1') {{ 'parallel-2' }} else {{ 'parallel-1' }}; $deadline = (Get-Date).AddSeconds(5); while (-not (Test-Path -LiteralPath (Join-Path $dir ($other + '.started')))) {{ if ((Get-Date) -gt $deadline) {{ throw 'other check did not start' }}; Start-Sleep -Milliseconds 50 }}"
+    );
+    let checked = repo.run_json([
+        "check",
+        "parallel",
+        "--name",
+        "parallel-check",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        check_script.as_str(),
+    ]);
+    assert_eq!(checked["check"]["attempts"][0]["exec"]["exit_code"], 0);
+    assert_eq!(checked["check"]["attempts"][1]["exec"]["exit_code"], 0);
+
+    let _ = fs::remove_dir_all(markers);
+}
+
+#[test]
+fn cli_check_merges_concurrent_check_results() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;");
+    repo.run_json([
+        "try",
+        "--name",
+        "merge-checks",
+        "--attempts",
+        "1",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/attempt.ts -Value \"export const attempt = true;\" -NoNewline",
+    ]);
+
+    let markers = std::env::temp_dir().join(format!("lane-check-merge-{}", unique_suffix()));
+    fs::create_dir_all(&markers).unwrap();
+    let marker_arg = ps_single_quoted_path(&markers);
+    let script_a = concurrent_check_script(&marker_arg, "a", "b");
+    let script_b = concurrent_check_script(&marker_arg, "b", "a");
+    let root_a = repo.path().to_path_buf();
+    let root_b = repo.path().to_path_buf();
+    let job_a = thread::spawn(move || run_named_check(&root_a, "a", &script_a));
+    let job_b = thread::spawn(move || run_named_check(&root_b, "b", &script_b));
+    assert_success(job_a.join().unwrap());
+    assert_success(job_b.join().unwrap());
+
+    let compare = repo.run_json(["compare", "merge-checks"]);
+    let check_names = compare["run"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| check["name"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        check_names,
+        ["a".to_owned(), "b".to_owned()].into_iter().collect()
+    );
+
+    let _ = fs::remove_dir_all(markers);
+}
+
+#[test]
+fn cli_try_rejects_existing_attempt_lanes() {
+    let repo = TempRepo::new();
+    repo.run_json(["create", "dupe-1"]);
+
+    let output = repo.run_unchecked(&[
+        "try",
+        "--name",
+        "dupe",
+        "--attempts",
+        "1",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"",
+    ]);
+
+    assert_command_fails_with(&output, "attempt lanes already exist: dupe-1");
+}
+
+#[test]
+fn cli_try_records_failed_attempts_as_comparison_evidence() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = true;");
+
+    let output = repo.run([
+        "try",
+        "--name",
+        "failure-evidence",
+        "--attempts",
+        "2",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Continue\"; if ($env:LANE_ID -eq \"failure-evidence-1\") { Write-Error \"attempt failed\"; exit 7 }; Set-Content -Path src/preferred.ts -Value \"export const preferred = true;\" -NoNewline",
+    ]);
+    assert_success(output);
+    let attempted = output_json(&repo.run(["compare", "failure-evidence"]));
+    assert_eq!(attempted["attempts"][0]["lane"], "failure-evidence-1");
+    assert_eq!(attempted["attempts"][0]["attempt_ok"], false);
+    assert_eq!(attempted["attempts"][0]["attempt_exit_code"], 7);
+    assert_eq!(attempted["attempts"][1]["lane"], "failure-evidence-2");
+    assert_eq!(attempted["attempts"][1]["attempt_ok"], true);
+}
+
+fn concurrent_check_script(marker_arg: &str, name: &str, other: &str) -> String {
+    format!(
+        "$ErrorActionPreference = \"Stop\"; $dir = {marker_arg}; $name = '{name}'; $other = '{other}'; Set-Content -LiteralPath (Join-Path $dir ($name + '.started')) -Value started -NoNewline; $deadline = (Get-Date).AddSeconds(5); while (-not (Test-Path -LiteralPath (Join-Path $dir ($other + '.started')))) {{ if ((Get-Date) -gt $deadline) {{ throw 'other check command did not start' }}; Start-Sleep -Milliseconds 50 }}"
     )
-    .unwrap();
-    let resolved = run_review_action_with_replacement_json(
-        &repo,
-        review_action(conflict_actions, "resolve_op", "login-enterprise"),
-        &resolution,
-    );
-    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+}
 
-    assert_eq!(
-        fs::read(repo.path().join("src/login.tsx")).unwrap(),
-        b"export const design = 'enterprise';"
-    );
-    assert_eq!(
-        fs::read(repo.path().join("src/enterprise.tsx")).unwrap(),
-        b"export const marker = 'enterprise';"
-    );
-    assert!(!repo.path().join("src/minimal.tsx").exists());
-    assert!(!repo.path().join("src/playful.tsx").exists());
-    assert!(!repo.path().join("src/split.tsx").exists());
-    assert!(!repo.path().join("src/focused.tsx").exists());
-
-    for (lane, _) in variants {
-        if lane != "login-enterprise" {
-            let discarded = repo.run_json(["discard", lane]);
-            assert_eq!(discarded["removed"], true);
-        }
-    }
+fn run_named_check(repo_root: &std::path::Path, name: &str, script: &str) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_lane"))
+        .arg("--repo-root")
+        .arg(repo_root)
+        .args([
+            "check",
+            "merge-checks",
+            "--name",
+            name,
+            "--",
+            "pwsh",
+            "-NoProfile",
+            "-Command",
+            script,
+        ])
+        .output()
+        .unwrap()
 }

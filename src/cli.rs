@@ -1,6 +1,7 @@
 mod commands;
 mod error;
 mod human_review;
+mod orchestrate;
 mod output;
 mod preview;
 mod repo;
@@ -42,6 +43,31 @@ enum Command {
         #[arg(long)]
         human: bool,
         lane: Option<String>,
+    },
+    #[command(about = "Run N isolated attempts for the same command")]
+    Try {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value_t = 5)]
+        attempts: usize,
+        #[arg(long)]
+        observe: bool,
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    #[command(about = "Run a verification command across every attempt in a run")]
+    Check {
+        run: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    #[command(about = "Compare attempts, checks, and lane review state for a run")]
+    Compare {
+        run: String,
+        #[arg(long)]
+        human: bool,
     },
     #[command(about = "Show one lane operation with base and inserted byte previews")]
     ShowOp {
@@ -89,6 +115,18 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
         } => commands::exec(&repo_root, &lane, observe, &command),
         Command::Review { human, lane } => {
             commands::review(&repo_root, lane.as_deref(), human).map(|()| ExitCode::SUCCESS)
+        }
+        Command::Try {
+            name,
+            attempts,
+            observe,
+            command,
+        } => orchestrate::try_run(&repo_root, &name, attempts, observe, &command),
+        Command::Check { run, name, command } => {
+            orchestrate::check(&repo_root, &run, name.as_deref(), &command)
+        }
+        Command::Compare { run, human } => {
+            orchestrate::compare(&repo_root, &run, human).map(|()| ExitCode::SUCCESS)
         }
         Command::ShowOp { lane, path, op_id } => {
             commands::show_op(&repo_root, &lane, &path, &op_id).map(|()| ExitCode::SUCCESS)

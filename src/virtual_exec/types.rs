@@ -6,11 +6,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
 
 use crate::vfs::{LaneFileChange, LaneFileChangeStatus};
-use crate::{FilePath, LaneOpSummary};
+use crate::{FilePath, LaneExecState, LaneOpSummary};
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct VirtualExecOptions {
     pub(crate) observe: bool,
+    pub(crate) persist_changes: bool,
+}
+
+impl Default for VirtualExecOptions {
+    fn default() -> Self {
+        Self {
+            observe: false,
+            persist_changes: true,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -49,6 +59,12 @@ pub(crate) struct VirtualLaneRun {
     pub(crate) failed: bool,
 }
 
+impl VirtualLaneRun {
+    pub(crate) fn into_record(self) -> VirtualExecRecord {
+        self.output.into_record()
+    }
+}
+
 #[derive(Serialize)]
 pub(crate) struct VirtualExecOutput {
     pub(super) lane: String,
@@ -66,6 +82,35 @@ pub(crate) struct VirtualExecOutput {
     pub(super) timings: VirtualExecTimings,
     pub(super) changes: Vec<VirtualChangeOutput>,
     pub(super) warnings: Vec<VirtualExecWarning>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct VirtualExecRecord {
+    pub(crate) exec: LaneExecState,
+    pub(crate) total_ms: u64,
+    pub(crate) change_count: usize,
+    pub(crate) warnings: Vec<String>,
+}
+
+impl VirtualExecOutput {
+    fn into_record(self) -> VirtualExecRecord {
+        VirtualExecRecord {
+            exec: LaneExecState::new(
+                self.exit_code,
+                self.worker_error,
+                &self.stdout,
+                &self.stderr,
+                self.changed_paths,
+            ),
+            total_ms: self.timings.total_ms,
+            change_count: self.changes.len(),
+            warnings: self
+                .warnings
+                .into_iter()
+                .map(|warning| warning.message)
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]

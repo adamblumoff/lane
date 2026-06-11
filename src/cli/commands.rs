@@ -47,7 +47,10 @@ pub(super) fn exec(
         repo_root,
         lane,
         command,
-        crate::virtual_exec::VirtualExecOptions { observe },
+        crate::virtual_exec::VirtualExecOptions {
+            observe,
+            ..Default::default()
+        },
     )
     .map_err(CliError::message)?;
     let failed = run.failed;
