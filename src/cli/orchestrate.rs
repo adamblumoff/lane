@@ -104,10 +104,7 @@ pub(super) fn check(
         command: command.to_vec(),
         attempts: check_attempts,
     };
-    let failed = check
-        .attempts
-        .iter()
-        .any(|attempt| attempt.orchestration_error.is_some());
+    let failed = check.attempts.iter().any(|attempt| !attempt.ok());
     let run = append_check(repo_root, run_name, check.clone())?;
 
     let output = CheckOutput {

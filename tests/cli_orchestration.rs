@@ -570,7 +570,7 @@ fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
         b"export const design = 'base';"
     );
 
-    let checked = repo.run_json([
+    let checked_output = repo.run_unchecked(&[
         "check",
         "login",
         "--name",
@@ -581,6 +581,11 @@ fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
         "-Command",
         "$ErrorActionPreference = \"Continue\"; Set-Content -Path check-artifact.txt -Value artifact -NoNewline; if ($env:LANE_ID -ne \"login-2\") { Write-Error \"not selected\"; exit 9 }",
     ]);
+    assert!(
+        !checked_output.status.success(),
+        "lane check should fail when any check attempt fails"
+    );
+    let checked = output_json(&checked_output);
     assert_eq!(checked["check"]["name"], "pick-second");
     assert_eq!(checked["check"]["attempts"].as_array().unwrap().len(), 3);
     assert_eq!(checked["check"]["attempts"][0]["exec"]["exit_code"], 9);
