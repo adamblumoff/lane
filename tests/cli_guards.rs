@@ -32,7 +32,15 @@ fn cli_rejects_reserved_lane_names_at_entry_points() {
     let repo = TempRepo::new();
 
     for lane in ["base", "   "] {
-        let output = repo.run_unchecked(&["create", lane]);
+        let output = repo.run_unchecked(&[
+            "exec",
+            lane,
+            "--",
+            "pwsh",
+            "-NoProfile",
+            "-Command",
+            "exit 0",
+        ]);
         assert_command_fails_with(&output, "ReservedLane");
     }
     assert!(!repo.path().join(".lane/repo.json").exists());
@@ -42,7 +50,15 @@ fn cli_rejects_reserved_lane_names_at_entry_points() {
 fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
     let repo = TempRepo::new();
     repo.write("src/example.ts", b"base");
-    repo.run_json(["create", "agent-a"]);
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "exit 0",
+    ]);
     let replacement = repo.path().join("replacement.txt");
     fs::write(&replacement, b"replacement").unwrap();
     let absolute_path = repo.path().join("src/example.ts").display().to_string();
@@ -118,29 +134,4 @@ fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
 
     assert_eq!(repo.run_json(["doctor"])["healthy"], true);
     assert!(!repo.path().join("outside.ts").exists());
-}
-
-#[test]
-fn cli_exec_rejects_incompatible_pre_alpha_lane_storage_without_reset() {
-    let repo = TempRepo::new();
-    repo.write("src/base.ts", b"export const base = true;\n");
-    repo.write(".lane/repo.lane", b"old pre-alpha format");
-
-    let output = run_lane_exec(
-        repo.path(),
-        "fresh-vfs",
-        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/fresh.ts -Value \"export const fresh = true;\" -NoNewline",
-    );
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("legacy lane storage"),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        fs::read(repo.path().join(".lane/repo.lane")).unwrap(),
-        b"old pre-alpha format"
-    );
-    assert!(!repo.path().join("src/fresh.ts").exists());
 }

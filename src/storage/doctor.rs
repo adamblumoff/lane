@@ -11,19 +11,11 @@ use super::blobs::{read_blob, report_blob_inventory, sha256_hex, validate_blob_r
 use super::manifest::{
     STORE_VERSION, StoredBase, StoredLaneEntryState, StoredRepoManifest, parse_fingerprint,
 };
-use super::paths::{last_exec_file_name, legacy_storage_path, manifest_path};
+use super::paths::{last_exec_file_name, manifest_path};
 use super::serde_util::json_error;
 
 pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorReport> {
     let mut report = StorageDoctorReport::default();
-
-    let legacy_path = legacy_storage_path(storage_root);
-    if legacy_path.exists() {
-        report.errors.push(format!(
-            "legacy storage file {} is unsupported by storage v2",
-            legacy_path.display()
-        ));
-    }
 
     let manifest_path = manifest_path(storage_root);
     let bytes = match fs::read(&manifest_path) {

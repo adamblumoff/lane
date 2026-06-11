@@ -48,7 +48,6 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
     );
     assert!(!repo.path().join("src/created.ts").exists());
     assert!(repo.path().join(".lane/repo.json").exists());
-    assert!(!repo.path().join(".lane/repo.lane").exists());
     assert!(repo.path().join(".lane/last_exec/agent-a.json").exists());
     assert!(
         fs::read_dir(repo.path().join(".lane/blobs/sha256"))
@@ -308,8 +307,8 @@ fn cli_exec_releases_storage_lock_while_worker_runs() {
 
     wait_for_path(&marker);
     let storage_command_start = Instant::now();
-    let created = repo.run_json(["create", "observer"]);
-    assert_eq!(created["created"], true);
+    let review = repo.run_json(["review"]);
+    assert!(review["summary"]["lanes"].as_u64().unwrap() <= 1);
     assert!(
         storage_command_start.elapsed() < Duration::from_millis(1000),
         "storage command waited for the virtual worker"
@@ -321,8 +320,6 @@ fn cli_exec_releases_storage_lock_while_worker_runs() {
     assert_eq!(result["worker_error"], Value::Null);
     assert!(result["timings"]["storage_lock_held_ms"].as_u64().unwrap() < 1000);
 
-    let existing = repo.run_json(["create", "observer"]);
-    assert_eq!(existing["created"], false);
     let _ = fs::remove_file(marker);
 }
 

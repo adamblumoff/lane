@@ -1,12 +1,10 @@
-mod common;
-
-use common::fs;
 pub use lane::{
     BaseFingerprint, BaseStorageSnapshot, FileOpStorageSnapshot, FilePath,
     LaneEntryStorageSnapshot, LaneExecState, LaneFileStorageSnapshot, LaneId, LaneRepo,
     LaneRepoStorageSnapshot, ensure_user_lane,
 };
 use serde_json::Value;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,7 +36,6 @@ fn storage_v2_persists_manifest_blobs_and_last_exec() {
     .unwrap();
 
     assert!(temp.path().join("repo.json").exists());
-    assert!(!temp.path().join("repo.lane").exists());
     assert_eq!(doctor_storage(temp.path()).unwrap().blobs_present, 1);
     assert!(temp.path().join("last_exec/agent-a.json").exists());
 

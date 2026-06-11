@@ -28,8 +28,6 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    #[command(about = "Create an isolated lane")]
-    Create { lane: String },
     #[command(about = "Run a command in a lane through a virtual mounted lane view")]
     Exec {
         lane: String,
@@ -107,7 +105,6 @@ pub fn run() -> CliResult<ExitCode> {
 fn run_cli(cli: Cli) -> CliResult<ExitCode> {
     let repo_root = repo::repo_root(cli.repo_root)?;
     match cli.command {
-        Command::Create { lane } => commands::create(&repo_root, &lane).map(|()| ExitCode::SUCCESS),
         Command::Exec {
             lane,
             observe,

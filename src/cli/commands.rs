@@ -3,38 +3,21 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::storage::{acquire_repo_lock, doctor_storage, persist_repo};
+use crate::storage::doctor_storage;
 
 use super::error::{CliError, CliResult};
 use super::output::{
-    CreateOutput, DiscardOutput, DoctorOutput, PromoteCleanOutput, PromoteOpsOutput,
-    ResolveOpOutput, ReviewOutput, ShowOpOutput,
+    DiscardOutput, DoctorOutput, PromoteCleanOutput, PromoteOpsOutput, ResolveOpOutput,
+    ReviewOutput, ShowOpOutput,
 };
 use super::preview::byte_preview;
 use super::repo::{
-    load_lane_repo, open_locked_lane_fs, path_label, persist_lane_repo, print_json, storage_path,
+    open_locked_lane_fs, path_label, persist_lane_repo, print_json, storage_path,
 };
 use super::review::{
     change_for_path, collect_changes, collect_review, filter_change_ops, grouped_ops, print_diff,
     review_lanes,
 };
-
-pub(super) fn create(repo_root: &Path, lane: &str) -> CliResult<()> {
-    let storage_path = storage_path(repo_root);
-    let _lock = acquire_repo_lock(&storage_path)?;
-    let mut repo = load_lane_repo(&storage_path)?;
-    let created = repo.create_lane(lane)?;
-    persist_repo(&storage_path, &repo)?;
-
-    let output = CreateOutput {
-        lane,
-        created,
-        repo_root: path_label(repo_root),
-        storage_path: path_label(&storage_path),
-    };
-    print_json(&output)?;
-    Ok(())
-}
 
 #[cfg(windows)]
 pub(super) fn exec(
@@ -53,7 +36,7 @@ pub(super) fn exec(
         },
     )
     .map_err(CliError::message)?;
-    let failed = run.failed;
+    let failed = run.failed();
     print_json(&run.output)?;
     if failed {
         Ok(ExitCode::FAILURE)

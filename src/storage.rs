@@ -31,12 +31,11 @@ pub(crate) use lock::{RepoLock, acquire_repo_lock, is_lock_contention};
 #[allow(unused_imports)]
 pub(crate) use paths::encode_path_component;
 
-use manifest::{load_manifest_snapshot, persist_manifest_snapshot, reject_legacy_storage};
+use manifest::{load_manifest_snapshot, persist_manifest_snapshot};
 use paths::{last_exec_file_name, last_exec_path, manifest_path};
 use serde_util::{invalid_storage, json_error};
 
 pub(crate) fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
-    reject_legacy_storage(storage_root)?;
     let manifest_path = manifest_path(storage_root);
     let snapshot = load_manifest_snapshot(storage_root, &manifest_path)?;
     LaneRepo::from_storage_snapshot(match snapshot {
@@ -53,7 +52,6 @@ pub(crate) fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
 pub(crate) fn persist_repo(storage_root: &Path, repo: &LaneRepo) -> io::Result<()> {
     let snapshot = repo.storage_snapshot();
     fs::create_dir_all(storage_root)?;
-    reject_legacy_storage(storage_root)?;
 
     persist_manifest_snapshot(storage_root, &manifest_path(storage_root), &snapshot)?;
     prune_stale_last_exec_files(storage_root, &snapshot.lanes);

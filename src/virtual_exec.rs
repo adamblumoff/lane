@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::LaneExecState;
+use crate::{LaneExecState, ensure_user_lane};
 
 use git::prepare_git_view;
 use mount::start_mount;
@@ -31,6 +31,7 @@ pub(crate) fn run_virtual_lane(
     options: VirtualExecOptions,
 ) -> Result<VirtualLaneRun, VirtualExecError> {
     let total_start = Instant::now();
+    ensure_user_lane(lane).map_err(|error| VirtualExecError::message(format!("{error:?}")))?;
     let (program, args) = command
         .split_first()
         .ok_or_else(|| VirtualExecError::message("missing command for lane exec"))?;
@@ -106,8 +107,6 @@ pub(crate) fn run_virtual_lane(
         "storage done in {post_worker_lock_ms}ms; lock wait {}ms, lock held {}ms, writes {}",
         snapshot.storage_lock_wait_ms, snapshot.storage_lock_held_ms, snapshot.storage_write_ops
     ));
-    let failed = worker.exit_code != Some(0) || worker.worker_error.is_some();
-
     let output = VirtualExecOutput {
         lane: lane.to_owned(),
         repo_root: path_label(repo_root),
@@ -138,7 +137,7 @@ pub(crate) fn run_virtual_lane(
         warnings,
     };
 
-    Ok(VirtualLaneRun { output, failed })
+    Ok(VirtualLaneRun { output })
 }
 
 fn last_exec_warnings(result: Result<(), VirtualExecError>) -> Vec<VirtualExecWarning> {

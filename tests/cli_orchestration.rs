@@ -3,6 +3,7 @@
 mod common;
 
 use common::*;
+use std::collections::BTreeSet;
 
 #[test]
 fn cli_exec_preserves_parallel_lane_outputs() {
@@ -718,7 +719,15 @@ fn cli_check_merges_concurrent_check_results() {
 #[test]
 fn cli_try_rejects_existing_attempt_lanes() {
     let repo = TempRepo::new();
-    repo.run_json(["create", "dupe-1"]);
+    repo.run_json([
+        "exec",
+        "dupe-1",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "exit 0",
+    ]);
 
     let output = repo.run_unchecked(&[
         "try",

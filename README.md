@@ -42,7 +42,6 @@ cargo install --path .
 ## Basic AX Flow
 
 ```powershell
-lane create agent-a
 lane exec agent-a -- codex exec --prompt "Implement the change."
 lane diff agent-a
 lane review --human
@@ -78,7 +77,6 @@ winner. Promotion is still explicit through the copyable `promote-clean`,
 
 | Command | Purpose |
 | --- | --- |
-| `create <lane>` | Create an isolated lane. |
 | `exec <lane> -- <command>` | Run a command inside a mounted lane view. |
 | `try --name <run> --attempts <N> -- <command>` | Run N isolated attempts for the same command. |
 | `check <run> -- <command>` | Run a verification command across every attempt without keeping check artifacts as attempt edits. |

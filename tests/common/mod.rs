@@ -1,25 +1,23 @@
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) use serde_json::Value;
-#[allow(unused_imports)]
-pub(crate) use std::collections::{BTreeMap, BTreeSet};
+pub(crate) use std::collections::BTreeMap;
 pub(crate) use std::fs;
-#[allow(unused_imports)]
 pub(crate) use std::thread;
-#[allow(unused_imports)]
 pub(crate) use std::time::{Duration, Instant};
 
+#[allow(dead_code)]
 static NEXT_UNIQUE_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
+#[allow(dead_code)]
 pub(crate) struct TempRepo {
     root: PathBuf,
 }
 
+#[allow(dead_code)]
 impl TempRepo {
     pub(crate) fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
@@ -138,12 +136,14 @@ impl TempRepo {
     }
 }
 
+#[allow(dead_code)]
 impl Drop for TempRepo {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn repo_with_agent_exec() -> TempRepo {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;\n");
@@ -159,6 +159,7 @@ pub(crate) fn repo_with_agent_exec() -> TempRepo {
     repo
 }
 
+#[allow(dead_code)]
 pub(crate) fn first_blob_path(repo: &TempRepo) -> PathBuf {
     fs::read_dir(repo.path().join(".lane/blobs/sha256"))
         .unwrap()
@@ -168,6 +169,7 @@ pub(crate) fn first_blob_path(repo: &TempRepo) -> PathBuf {
         .path()
 }
 
+#[allow(dead_code)]
 pub(crate) fn run_lane_exec(repo_root: &Path, lane: &str, script: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_lane"))
         .arg("--repo-root")
@@ -177,10 +179,12 @@ pub(crate) fn run_lane_exec(repo_root: &Path, lane: &str, script: &str) -> Outpu
         .unwrap()
 }
 
+#[allow(dead_code)]
 pub(crate) fn ps_single_quoted_path(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "''"))
 }
 
+#[allow(dead_code)]
 pub(crate) fn wait_for_path(path: &Path) {
     let start = Instant::now();
     while !path.exists() {
@@ -193,6 +197,7 @@ pub(crate) fn wait_for_path(path: &Path) {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn assert_success(output: Output) -> Output {
     if !output.status.success() {
         panic!(
@@ -205,10 +210,12 @@ pub(crate) fn assert_success(output: Output) -> Output {
     output
 }
 
+#[allow(dead_code)]
 pub(crate) fn output_json(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+#[allow(dead_code)]
 pub(crate) fn assert_command_fails_with(output: &Output, message: &str) {
     assert!(
         !output.status.success(),
@@ -228,6 +235,7 @@ pub(crate) fn assert_command_fails_with(output: &Output, message: &str) {
     );
 }
 
+#[allow(dead_code)]
 pub(crate) fn assert_exec_contract(output: &Value) {
     assert!(
         output["lane"].is_string(),
@@ -306,6 +314,7 @@ pub(crate) fn assert_exec_contract(output: &Value) {
     }
 }
 
+#[allow(dead_code)]
 fn run_checked(command: &mut Command) -> Vec<u8> {
     let output = command.output().unwrap();
     if !output.status.success() {
@@ -319,6 +328,7 @@ fn run_checked(command: &mut Command) -> Vec<u8> {
     output.stdout
 }
 
+#[allow(dead_code)]
 pub(crate) fn string_array(value: &Value) -> Vec<String> {
     value
         .as_array()
@@ -328,6 +338,7 @@ pub(crate) fn string_array(value: &Value) -> Vec<String> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn review_op_ids(value: &Value) -> Vec<String> {
     value
         .as_array()
@@ -337,6 +348,7 @@ pub(crate) fn review_op_ids(value: &Value) -> Vec<String> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn review_paths(review: &Value) -> Vec<&str> {
     review["paths"]
         .as_array()
@@ -346,6 +358,7 @@ pub(crate) fn review_paths(review: &Value) -> Vec<&str> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn review_path<'a>(review: &'a Value, path: &str) -> &'a Value {
     review["paths"]
         .as_array()
@@ -355,6 +368,7 @@ pub(crate) fn review_path<'a>(review: &'a Value, path: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing review path {path}"))
 }
 
+#[allow(dead_code)]
 pub(crate) fn review_change_statuses(review: &Value, lane: &str) -> BTreeMap<String, String> {
     review["paths"]
         .as_array()
@@ -374,6 +388,7 @@ pub(crate) fn review_change_statuses(review: &Value, lane: &str) -> BTreeMap<Str
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn review_clean_op_ids(path: &Value) -> Vec<String> {
     path["clean_ops"]
         .as_array()
@@ -383,6 +398,7 @@ pub(crate) fn review_clean_op_ids(path: &Value) -> Vec<String> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn review_lane<'a>(review: &'a Value, lane: &str) -> &'a Value {
     review["lanes"]
         .as_array()
@@ -392,6 +408,7 @@ pub(crate) fn review_lane<'a>(review: &'a Value, lane: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing review lane {lane}"))
 }
 
+#[allow(dead_code)]
 pub(crate) fn review_action<'a>(actions: &'a Value, kind: &str, lane: &str) -> &'a Value {
     actions
         .as_array()
@@ -401,6 +418,7 @@ pub(crate) fn review_action<'a>(actions: &'a Value, kind: &str, lane: &str) -> &
         .unwrap_or_else(|| panic!("missing review action {kind} for lane {lane}"))
 }
 
+#[allow(dead_code)]
 pub(crate) fn run_review_action_json(repo: &TempRepo, action: &Value) -> Value {
     assert!(
         action["required_inputs"]
@@ -411,6 +429,7 @@ pub(crate) fn run_review_action_json(repo: &TempRepo, action: &Value) -> Value {
     output_json(&repo.run_vec(review_action_command(action)))
 }
 
+#[allow(dead_code)]
 pub(crate) fn run_promote_ops_json(
     repo: &TempRepo,
     lane: &str,
@@ -422,6 +441,7 @@ pub(crate) fn run_promote_ops_json(
     output_json(&repo.run_vec(command))
 }
 
+#[allow(dead_code)]
 pub(crate) fn run_review_action_with_replacement_json(
     repo: &TempRepo,
     action: &Value,
@@ -441,10 +461,12 @@ pub(crate) fn run_review_action_with_replacement_json(
     output_json(&repo.run_vec(command))
 }
 
+#[allow(dead_code)]
 pub(crate) fn review_action_command(action: &Value) -> Vec<String> {
     string_array(&action["command"])
 }
 
+#[allow(dead_code)]
 pub(crate) fn review_action_kinds(value: &Value) -> Vec<String> {
     value
         .as_array()
@@ -454,6 +476,7 @@ pub(crate) fn review_action_kinds(value: &Value) -> Vec<String> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn review_action_commands(value: &Value) -> Vec<Vec<String>> {
     value
         .as_array()
@@ -463,10 +486,12 @@ pub(crate) fn review_action_commands(value: &Value) -> Vec<Vec<String>> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn change_statuses(value: &Value) -> BTreeMap<String, String> {
     change_statuses_from_key(value, "changes")
 }
 
+#[allow(dead_code)]
 pub(crate) fn change_statuses_from_key(value: &Value, key: &str) -> BTreeMap<String, String> {
     value[key]
         .as_array()
@@ -481,6 +506,7 @@ pub(crate) fn change_statuses_from_key(value: &Value, key: &str) -> BTreeMap<Str
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn unique_suffix() -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
