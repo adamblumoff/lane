@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 
 use crate::LaneOpSummary;
@@ -10,6 +11,9 @@ use super::output::{
 use super::review::resolve_op_action;
 
 const HUMAN_PREVIEW_CHAR_LIMIT: usize = 160;
+const CLEAN_ONLY_PATH_DETAIL_LIMIT: usize = 20;
+const CLEAN_OP_DETAIL_LIMIT_PER_PATH: usize = 12;
+const CLEAN_ONLY_PATH_SAMPLE_LIMIT: usize = 8;
 
 pub(super) fn format(output: &ReviewOutput) -> String {
     let mut text = String::new();
@@ -43,9 +47,16 @@ fn write_review(text: &mut String, output: &ReviewOutput) -> fmt::Result {
     if output.paths.is_empty() {
         writeln!(text, "\nNo changed paths.")?;
     } else {
+        let compact_clean_only_paths = should_compact_clean_only_paths(&output.paths);
         for path in &output.paths {
+            if compact_clean_only_paths && is_clean_only_path(path) {
+                continue;
+            }
             writeln!(text, "\n{}", path.path)?;
             write_path(text, path)?;
+        }
+        if compact_clean_only_paths {
+            write_clean_only_paths(text, output)?;
         }
     }
 
@@ -76,7 +87,8 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
     if path.clean_ops.is_empty() {
         writeln!(text, "  |  - none")?;
     } else {
-        for op in &path.clean_ops {
+        let detailed_count = path.clean_ops.len().min(CLEAN_OP_DETAIL_LIMIT_PER_PATH);
+        for op in path.clean_ops.iter().take(detailed_count) {
             writeln!(text, "  |  - {}", op_label(&op.op))?;
             write_op_previews(text, "  |    ", op)?;
             writeln!(
@@ -89,6 +101,9 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
                     op.op.op_id.as_str(),
                 ])
             )?;
+        }
+        if path.clean_ops.len() > detailed_count {
+            write_omitted_clean_ops(text, path, &path.clean_ops[detailed_count..])?;
         }
     }
 
@@ -116,6 +131,114 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
             }
         }
     }
+    Ok(())
+}
+
+fn should_compact_clean_only_paths(paths: &[ReviewPathOutput]) -> bool {
+    paths.iter().filter(|path| is_clean_only_path(path)).count() > CLEAN_ONLY_PATH_DETAIL_LIMIT
+}
+
+fn is_clean_only_path(path: &ReviewPathOutput) -> bool {
+    !path.clean_ops.is_empty() && path.conflicts.is_empty()
+}
+
+fn write_clean_only_paths(text: &mut String, output: &ReviewOutput) -> fmt::Result {
+    let clean_only_paths = output
+        .paths
+        .iter()
+        .filter(|path| is_clean_only_path(path))
+        .collect::<Vec<_>>();
+    if clean_only_paths.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(text, "\nClean-only paths")?;
+    writeln!(
+        text,
+        "  - {} omitted from detailed listing",
+        count_label(clean_only_paths.len(), "clean-only path")
+    )?;
+    for lane in &output.lanes {
+        let clean_ops = clean_only_paths
+            .iter()
+            .flat_map(|path| &path.clean_ops)
+            .filter(|op| op.op.lane == lane.lane)
+            .count();
+        if clean_ops == 0 {
+            continue;
+        }
+        let path_count = clean_only_paths
+            .iter()
+            .filter(|path| path.clean_ops.iter().any(|op| op.op.lane == lane.lane))
+            .count();
+        writeln!(
+            text,
+            "  - {}: {} across {}",
+            lane.lane,
+            count_label(clean_ops, "clean op"),
+            count_label(path_count, "path")
+        )?;
+        if let Some(action) = lane
+            .actions
+            .iter()
+            .find(|action| matches!(action.kind, ReviewActionKind::PromoteClean))
+        {
+            writeln!(text, "    command: {}", format_action_command(action))?;
+        }
+    }
+    writeln!(
+        text,
+        "  - full JSON details: {}",
+        format_review_command(output.lane.as_deref())
+    )?;
+    writeln!(text, "  - sample paths")?;
+    for path in clean_only_paths.iter().take(CLEAN_ONLY_PATH_SAMPLE_LIMIT) {
+        writeln!(text, "    - {}", path.path)?;
+    }
+    if clean_only_paths.len() > CLEAN_ONLY_PATH_SAMPLE_LIMIT {
+        writeln!(
+            text,
+            "    - ... {}",
+            count_label(
+                clean_only_paths.len() - CLEAN_ONLY_PATH_SAMPLE_LIMIT,
+                "more path"
+            )
+        )?;
+    }
+
+    Ok(())
+}
+
+fn write_omitted_clean_ops(
+    text: &mut String,
+    path: &ReviewPathOutput,
+    omitted: &[ReviewOpOutput],
+) -> fmt::Result {
+    writeln!(
+        text,
+        "  |  - ... {} omitted from this path",
+        count_label(omitted.len(), "clean op")
+    )?;
+
+    let mut omitted_by_lane = BTreeMap::<&str, Vec<&str>>::new();
+    for op in omitted {
+        omitted_by_lane
+            .entry(op.op.lane.as_str())
+            .or_default()
+            .push(op.op.op_id.as_str());
+    }
+    for (lane, op_ids) in omitted_by_lane {
+        let mut command = vec!["promote-ops", lane, path.path.as_str()];
+        command.extend(op_ids.iter().copied());
+        writeln!(
+            text,
+            "  |    {}: {} omitted; promote: {}",
+            lane,
+            count_label(op_ids.len(), "clean op"),
+            format_command(command)
+        )?;
+    }
+
     Ok(())
 }
 
@@ -250,6 +373,14 @@ fn op_label(op: &LaneOpSummary) -> String {
 
 fn format_action_command(action: &ReviewActionOutput) -> String {
     format_command(action.command.iter().map(String::as_str))
+}
+
+fn format_review_command(lane: Option<&str>) -> String {
+    if let Some(lane) = lane {
+        format_command(["review", lane])
+    } else {
+        format_command(["review"])
+    }
 }
 
 pub(super) fn format_command<'a>(args: impl IntoIterator<Item = &'a str>) -> String {
