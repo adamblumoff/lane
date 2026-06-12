@@ -11,9 +11,9 @@ use crate::{FilePath, LaneId, LaneTextPreview, ensure_user_lane};
 
 use super::error::{CliError, CliResult};
 use super::human_review::format_command;
-use super::output::{ReviewActionKind, ReviewOutput};
+use super::output::{ReviewActionKind, ReviewOutput, ReviewSummary};
 use super::repo::{load_lane_repo, open_locked_lane_fs, path_label, print_json, storage_path};
-use super::review::collect_review;
+use super::review::{collect_changes, collect_review};
 
 const RUN_VERSION: u32 = 1;
 
@@ -121,6 +121,20 @@ pub(super) fn check(
     })
 }
 
+pub(super) fn runs(repo_root: &Path) -> CliResult<()> {
+    let runs = load_runs(repo_root)?
+        .into_iter()
+        .map(|run| summarize_run(&run))
+        .collect::<Vec<_>>();
+    let output = RunsOutput {
+        repo_root: path_label(repo_root),
+        storage_path: path_label(storage_path(repo_root)),
+        runs,
+    };
+    print_json(&output)?;
+    Ok(())
+}
+
 fn join_attempt_jobs(
     kind: &str,
     jobs: Vec<(usize, LaneId, JoinHandle<AttemptRecord>)>,
@@ -144,19 +158,30 @@ pub(super) fn compare(repo_root: &Path, run_name: &str, human: bool) -> CliResul
         .map(|attempt| attempt.lane.clone())
         .collect::<Vec<_>>();
     let locked = open_locked_lane_fs(repo_root)?;
-    let (summary, lane_summaries, paths) = collect_review(&locked.fs, &lanes)?;
-    let review = ReviewOutput {
-        lane: None,
-        repo_root: path_label(repo_root),
-        storage_path: path_label(&locked.storage_path),
-        summary,
-        lanes: lane_summaries,
-        paths,
+    let review_result = collect_review(&locked.fs, &lanes);
+    let (review, review_error) = match review_result {
+        Ok((summary, lane_summaries, paths)) => (
+            ReviewOutput {
+                lane: None,
+                repo_root: path_label(repo_root),
+                storage_path: path_label(&locked.storage_path),
+                summary,
+                lanes: lane_summaries,
+                paths,
+            },
+            None,
+        ),
+        Err(error) => (
+            empty_review(repo_root, &locked.storage_path, lanes.len()),
+            Some(error.to_string()),
+        ),
     };
-    let attempts = compare_attempts(&run, &review);
+    let attempts = compare_attempts(&run, review_error.is_none().then_some(&review));
     let output = CompareOutput {
         repo_root: path_label(repo_root),
         storage_path: path_label(&locked.storage_path),
+        actions: detail_actions(&run.name),
+        review_error,
         run,
         attempts,
         review,
@@ -168,6 +193,66 @@ pub(super) fn compare(repo_root: &Path, run_name: &str, human: bool) -> CliResul
         print_json(&output)?;
     }
     Ok(())
+}
+
+pub(super) fn discard_run(repo_root: &Path, run_name: &str) -> CliResult<()> {
+    let run = load_run(repo_root, run_name)?;
+    let mut locked = open_locked_lane_fs(repo_root)?;
+    let mut attempts = Vec::new();
+
+    for attempt in &run.attempts {
+        let discarded_changes =
+            collect_changes(&locked.fs, &attempt.lane).map_or(0, |changes| changes.len());
+        let removed = locked.fs.discard_lane(&attempt.lane);
+        attempts.push(DiscardRunAttempt {
+            index: attempt.index,
+            lane: attempt.lane.clone(),
+            removed,
+            discarded_changes,
+        });
+    }
+    locked.persist()?;
+
+    let path = run_path(repo_root, &run.name);
+    fs::remove_file(&path).map_err(|error| {
+        CliError::message(format!(
+            "discarded attempt lanes for run {:?}, but could not remove {}: {error}",
+            run.name,
+            path.display()
+        ))
+    })?;
+
+    let output = DiscardRunOutput {
+        repo_root: path_label(repo_root),
+        storage_path: path_label(&locked.storage_path),
+        run: run.name,
+        removed_attempt_lanes: attempts.iter().filter(|attempt| attempt.removed).count(),
+        discarded_changes: attempts
+            .iter()
+            .map(|attempt| attempt.discarded_changes)
+            .sum(),
+        run_file_removed: true,
+        attempts,
+    };
+    print_json(&output)?;
+    Ok(())
+}
+
+fn empty_review(repo_root: &Path, storage_path: &Path, lanes: usize) -> ReviewOutput {
+    ReviewOutput {
+        lane: None,
+        repo_root: path_label(repo_root),
+        storage_path: path_label(storage_path),
+        summary: ReviewSummary {
+            lanes,
+            changed_paths: 0,
+            clean_ops: 0,
+            conflicted_ops: 0,
+            conflict_groups: 0,
+        },
+        lanes: Vec::new(),
+        paths: Vec::new(),
+    }
 }
 
 fn validate_run_request(name: &str, attempts: usize) -> CliResult<()> {
@@ -319,9 +404,11 @@ fn run_check_command(
 }
 
 fn run_path(repo_root: &Path, name: &str) -> PathBuf {
-    storage_path(repo_root)
-        .join("runs")
-        .join(format!("{}.json", encode_path_component(name)))
+    runs_dir(repo_root).join(format!("{}.json", encode_path_component(name)))
+}
+
+fn runs_dir(repo_root: &Path) -> PathBuf {
+    storage_path(repo_root).join("runs")
 }
 
 fn load_run(repo_root: &Path, name: &str) -> CliResult<RunRecord> {
@@ -333,13 +420,46 @@ fn load_run(repo_root: &Path, name: &str) -> CliResult<RunRecord> {
         ))
     })?;
     let run = serde_json::from_slice::<RunRecord>(&bytes)?;
+    validate_run_version(name, &run)?;
+    Ok(run)
+}
+
+fn load_runs(repo_root: &Path) -> CliResult<Vec<RunRecord>> {
+    let entries = match fs::read_dir(runs_dir(repo_root)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(CliError::from(error)),
+    };
+    let mut runs = Vec::new();
+
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = fs::read(&path)?;
+        let run = serde_json::from_slice::<RunRecord>(&bytes).map_err(|error| {
+            CliError::message(format!(
+                "run file {} is not valid JSON: {error}",
+                path.display()
+            ))
+        })?;
+        validate_run_version(&run.name, &run)?;
+        runs.push(run);
+    }
+
+    runs.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(runs)
+}
+
+fn validate_run_version(name: &str, run: &RunRecord) -> CliResult<()> {
     if run.version != RUN_VERSION {
         return Err(CliError::message(format!(
             "run {name:?} has version {}; expected {RUN_VERSION}",
             run.version
         )));
     }
-    Ok(run)
+    Ok(())
 }
 
 fn persist_run(repo_root: &Path, run: &RunRecord) -> CliResult<()> {
@@ -361,12 +481,17 @@ fn append_check(repo_root: &Path, run_name: &str, check: CheckRecord) -> CliResu
     Ok(run)
 }
 
-fn compare_attempts(run: &RunRecord, review: &ReviewOutput) -> Vec<CompareAttempt> {
+fn compare_attempts(run: &RunRecord, review: Option<&ReviewOutput>) -> Vec<CompareAttempt> {
     let review_by_lane = review
-        .lanes
-        .iter()
-        .map(|lane| (lane.lane.clone(), lane))
-        .collect::<BTreeMap<_, _>>();
+        .map(|review| {
+            review
+                .lanes
+                .iter()
+                .map(|lane| (lane.lane.clone(), lane))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let review_available = review.is_some();
     run.attempts
         .iter()
         .map(|attempt| {
@@ -413,19 +538,65 @@ fn compare_attempts(run: &RunRecord, review: &ReviewOutput) -> Vec<CompareAttemp
                 changed_paths,
                 clean_ops,
                 conflicted_ops,
-                actions: compare_actions(&attempt.lane, clean_ops),
+                actions: compare_actions(&attempt.lane, clean_ops, review_available),
             }
         })
         .collect()
 }
 
-fn compare_actions(lane: &str, clean_ops: usize) -> Vec<CompareAction> {
-    let mut actions = vec![
-        CompareAction::new("review_human", ["review", "--human", lane]),
-        CompareAction::new("diff", ["diff", lane]),
-    ];
-    if clean_ops > 0 {
-        actions.push(CompareAction::new("promote_clean", ["promote-clean", lane]));
+fn summarize_run(run: &RunRecord) -> RunSummary {
+    let attempts_ok = run.attempts.iter().filter(|attempt| attempt.ok()).count();
+    let check_attempts = run
+        .checks
+        .iter()
+        .flat_map(|check| check.attempts.iter())
+        .collect::<Vec<_>>();
+    let checks_passed = check_attempts.iter().filter(|attempt| attempt.ok()).count();
+
+    RunSummary {
+        name: run.name.clone(),
+        command: run.command.clone(),
+        attempts: run.attempts.len(),
+        attempt_lanes: run
+            .attempts
+            .iter()
+            .map(|attempt| attempt.lane.clone())
+            .collect(),
+        attempts_ok,
+        attempts_failed: run.attempts.len() - attempts_ok,
+        checks: run.checks.len(),
+        checks_passed,
+        checks_failed: check_attempts.len() - checks_passed,
+        actions: summary_actions(&run.name),
+    }
+}
+
+fn summary_actions(run_name: &str) -> Vec<CompareAction> {
+    vec![
+        CompareAction::new("run", ["run", run_name]),
+        CompareAction::new("run_human", ["run", run_name, "--human"]),
+        CompareAction::new("discard_run", ["discard-run", run_name]),
+    ]
+}
+
+fn detail_actions(run_name: &str) -> Vec<CompareAction> {
+    vec![
+        CompareAction::new("runs", ["runs"]),
+        CompareAction::new("discard_run", ["discard-run", run_name]),
+    ]
+}
+
+fn compare_actions(lane: &str, clean_ops: usize, review_available: bool) -> Vec<CompareAction> {
+    let mut actions = Vec::new();
+    if review_available {
+        actions.push(CompareAction::new(
+            "review_human",
+            ["review", "--human", lane],
+        ));
+        actions.push(CompareAction::new("diff", ["diff", lane]));
+        if clean_ops > 0 {
+            actions.push(CompareAction::new("promote_clean", ["promote-clean", lane]));
+        }
     }
     actions.push(CompareAction::new("discard", ["discard", lane]));
     actions
@@ -437,30 +608,58 @@ fn format_compare(output: &CompareOutput) -> String {
     text.push_str(&format!("run: {}\n", output.run.name));
     text.push_str(&format!("repo: {}\n", output.repo_root));
     text.push_str(&format!("storage: {}\n", output.storage_path));
-    text.push_str(&format!(
-        "summary: {}, {}, {}, {}, {}\n",
-        count_label(output.run.attempts.len(), "attempt"),
-        count_label(output.run.checks.len(), "check"),
-        count_label(output.review.summary.changed_paths, "changed path"),
-        count_label(output.review.summary.clean_ops, "clean op"),
-        count_label(output.review.summary.conflict_groups, "conflict group"),
-    ));
+    if let Some(error) = &output.review_error {
+        text.push_str(&format!(
+            "summary: {}, {}, review unavailable\n",
+            count_label(output.run.attempts.len(), "attempt"),
+            count_label(output.run.checks.len(), "check"),
+        ));
+        text.push_str(&format!("review_error: {error}\n"));
+    } else {
+        text.push_str(&format!(
+            "summary: {}, {}, {}, {}, {}\n",
+            count_label(output.run.attempts.len(), "attempt"),
+            count_label(output.run.checks.len(), "check"),
+            count_label(output.review.summary.changed_paths, "changed path"),
+            count_label(output.review.summary.clean_ops, "clean op"),
+            count_label(output.review.summary.conflict_groups, "conflict group"),
+        ));
+    }
+    text.push('\n');
+    text.push_str("Run actions\n");
+    for action in &output.actions {
+        text.push_str(&format!(
+            "  - {}: {}\n",
+            action.kind,
+            format_command(action.command.iter().map(String::as_str))
+        ));
+    }
     text.push('\n');
     text.push_str("Attempts\n");
     if output.attempts.is_empty() {
         text.push_str("  - none\n");
     } else {
         for attempt in &output.attempts {
-            text.push_str(&format!(
-                "  - {}: attempt {}, checks {}/{}, {}, {}, {}\n",
-                attempt.lane,
-                if attempt.attempt_ok { "ok" } else { "failed" },
-                attempt.checks_passed,
-                attempt.checks_passed + attempt.checks_failed,
-                count_label(attempt.changed_paths, "changed path"),
-                count_label(attempt.clean_ops, "clean op"),
-                count_label(attempt.conflicted_ops, "conflicted op"),
-            ));
+            if output.review_error.is_some() {
+                text.push_str(&format!(
+                    "  - {}: attempt {}, checks {}/{}, review unavailable\n",
+                    attempt.lane,
+                    if attempt.attempt_ok { "ok" } else { "failed" },
+                    attempt.checks_passed,
+                    attempt.checks_passed + attempt.checks_failed,
+                ));
+            } else {
+                text.push_str(&format!(
+                    "  - {}: attempt {}, checks {}/{}, {}, {}, {}\n",
+                    attempt.lane,
+                    if attempt.attempt_ok { "ok" } else { "failed" },
+                    attempt.checks_passed,
+                    attempt.checks_passed + attempt.checks_failed,
+                    count_label(attempt.changed_paths, "changed path"),
+                    count_label(attempt.clean_ops, "clean op"),
+                    count_label(attempt.conflicted_ops, "conflicted op"),
+                ));
+            }
             for action in &attempt.actions {
                 text.push_str(&format!(
                     "    {}: {}\n",
@@ -490,7 +689,9 @@ fn format_compare(output: &CompareOutput) -> String {
     }
 
     text.push_str("\nNeeds decision\n");
-    if output.review.summary.conflict_groups == 0 {
+    if let Some(error) = &output.review_error {
+        text.push_str(&format!("  - review unavailable: {error}\n"));
+    } else if output.review.summary.conflict_groups == 0 {
         text.push_str("  - none\n");
     } else {
         for path in &output.review.paths {
@@ -635,12 +836,55 @@ struct CheckOutput {
 }
 
 #[derive(Serialize)]
+struct RunsOutput {
+    repo_root: String,
+    storage_path: String,
+    runs: Vec<RunSummary>,
+}
+
+#[derive(Serialize)]
+struct RunSummary {
+    name: String,
+    command: Vec<String>,
+    attempts: usize,
+    attempt_lanes: Vec<LaneId>,
+    attempts_ok: usize,
+    attempts_failed: usize,
+    checks: usize,
+    checks_passed: usize,
+    checks_failed: usize,
+    actions: Vec<CompareAction>,
+}
+
+#[derive(Serialize)]
 struct CompareOutput {
     repo_root: String,
     storage_path: String,
+    actions: Vec<CompareAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_error: Option<String>,
     run: RunRecord,
     attempts: Vec<CompareAttempt>,
     review: ReviewOutput,
+}
+
+#[derive(Serialize)]
+struct DiscardRunOutput {
+    repo_root: String,
+    storage_path: String,
+    run: String,
+    removed_attempt_lanes: usize,
+    discarded_changes: usize,
+    run_file_removed: bool,
+    attempts: Vec<DiscardRunAttempt>,
+}
+
+#[derive(Serialize)]
+struct DiscardRunAttempt {
+    index: usize,
+    lane: LaneId,
+    removed: bool,
+    discarded_changes: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]

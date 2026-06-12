@@ -61,12 +61,22 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+    #[command(about = "List stored attempt runs")]
+    Runs,
+    #[command(about = "Show detailed attempt, check, and review evidence for a run")]
+    Run {
+        name: String,
+        #[arg(long)]
+        human: bool,
+    },
     #[command(about = "Compare attempts, checks, and lane review state for a run")]
     Compare {
         run: String,
         #[arg(long)]
         human: bool,
     },
+    #[command(about = "Remove a run and every recorded attempt lane")]
+    DiscardRun { run: String },
     #[command(about = "Show one lane operation with base and inserted byte previews")]
     ShowOp {
         lane: String,
@@ -122,8 +132,15 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
         Command::Check { run, name, command } => {
             orchestrate::check(&repo_root, &run, name.as_deref(), &command)
         }
+        Command::Runs => orchestrate::runs(&repo_root).map(|()| ExitCode::SUCCESS),
+        Command::Run { name, human } => {
+            orchestrate::compare(&repo_root, &name, human).map(|()| ExitCode::SUCCESS)
+        }
         Command::Compare { run, human } => {
             orchestrate::compare(&repo_root, &run, human).map(|()| ExitCode::SUCCESS)
+        }
+        Command::DiscardRun { run } => {
+            orchestrate::discard_run(&repo_root, &run).map(|()| ExitCode::SUCCESS)
         }
         Command::ShowOp { lane, path, op_id } => {
             commands::show_op(&repo_root, &lane, &path, &op_id).map(|()| ExitCode::SUCCESS)

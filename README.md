@@ -60,6 +60,9 @@ lane discard agent-a
 lane try --name login --attempts 5 -- codex exec --prompt "Implement the login page."
 lane check login --name test -- pnpm test
 lane compare login --human
+lane runs
+lane run login --human
+lane discard-run login
 ```
 
 `lane try` reserves fresh attempt lanes named `<run>-1`, `<run>-2`, and so on,
@@ -73,6 +76,10 @@ review into one neutral evidence surface. It does not rank attempts or choose a
 winner. Promotion is still explicit through the copyable `promote-clean`,
 `promote-ops`, and `resolve-op` commands it reports.
 
+`lane runs` lists stored attempt runs, `lane run <name>` shows the same detailed
+evidence as `lane compare <name>`, and `lane discard-run <name>` removes every
+attempt lane recorded for that run plus `.lane/runs/<name>.json`.
+
 ## Commands
 
 | Command | Purpose |
@@ -80,7 +87,10 @@ winner. Promotion is still explicit through the copyable `promote-clean`,
 | `exec <lane> -- <command>` | Run a command inside a mounted lane view. |
 | `try --name <run> --attempts <N> -- <command>` | Run N isolated attempts for the same command. |
 | `check <run> -- <command>` | Run a verification command across every attempt without keeping check artifacts as attempt edits. |
+| `runs` | List stored attempt runs and their check counts. |
+| `run <name> [--human]` | Show detailed attempt, check, and review evidence for one run. |
 | `compare <run> [--human]` | Compare attempts, checks, and review state for a run. |
+| `discard-run <run>` | Remove a run and every recorded attempt lane. |
 | `diff <lane> [paths...]` | Show a text diff for lane changes. |
 | `review [lane]` | Emit the structured review graph as JSON. |
 | `review --human [lane]` | Show a human-readable review. |
