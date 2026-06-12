@@ -674,7 +674,6 @@ fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
     let discarded = repo.run_json(["discard-run", "login"]);
     assert_eq!(discarded["removed_attempt_lanes"], 3);
     assert_eq!(discarded["discarded_changes"], 4);
-    assert_eq!(discarded["run_file_removed"], true);
     assert!(!repo.path().join(".lane/runs/login.json").exists());
     assert!(
         repo.run_json(["runs"])["runs"]

@@ -231,7 +231,6 @@ pub(super) fn discard_run(repo_root: &Path, run_name: &str) -> CliResult<()> {
             .iter()
             .map(|attempt| attempt.discarded_changes)
             .sum(),
-        run_file_removed: true,
         attempts,
     };
     print_json(&output)?;
@@ -875,7 +874,6 @@ struct DiscardRunOutput {
     run: String,
     removed_attempt_lanes: usize,
     discarded_changes: usize,
-    run_file_removed: bool,
     attempts: Vec<DiscardRunAttempt>,
 }
 
