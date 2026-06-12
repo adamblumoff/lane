@@ -11,9 +11,7 @@ use super::output::{
     ReviewOutput, ShowOpOutput,
 };
 use super::preview::byte_preview;
-use super::repo::{
-    open_locked_lane_fs, path_label, persist_lane_repo, print_json, storage_path,
-};
+use super::repo::{open_locked_lane_fs, path_label, persist_lane_repo, print_json, storage_path};
 use super::review::{
     change_for_path, collect_changes, collect_review, filter_change_ops, grouped_ops, print_diff,
     review_lanes,
