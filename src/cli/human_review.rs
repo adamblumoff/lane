@@ -171,13 +171,36 @@ fn write_clean_only_paths(text: &mut String, output: &ReviewOutput) -> fmt::Resu
             .iter()
             .filter(|path| path.clean_ops.iter().any(|op| op.op.lane == lane.lane))
             .count();
-        writeln!(
-            text,
-            "  - {}: {} across {}",
-            lane.lane,
-            count_label(clean_ops, "clean op"),
-            count_label(path_count, "path")
-        )?;
+        let total_clean_ops = output
+            .paths
+            .iter()
+            .flat_map(|path| &path.clean_ops)
+            .filter(|op| op.op.lane == lane.lane)
+            .count();
+        let total_path_count = output
+            .paths
+            .iter()
+            .filter(|path| path.clean_ops.iter().any(|op| op.op.lane == lane.lane))
+            .count();
+        if total_clean_ops == clean_ops {
+            writeln!(
+                text,
+                "  - {}: {} across {}",
+                lane.lane,
+                count_label(clean_ops, "clean op"),
+                count_label(path_count, "clean-only path")
+            )?;
+        } else {
+            writeln!(
+                text,
+                "  - {}: {} across {}; command promotes {} across {}",
+                lane.lane,
+                count_label(clean_ops, "clean op"),
+                count_label(path_count, "clean-only path"),
+                count_label(total_clean_ops, "clean op"),
+                count_label(total_path_count, "path")
+            )?;
+        }
         if let Some(action) = lane
             .actions
             .iter()

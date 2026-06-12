@@ -489,7 +489,7 @@ fn cli_review_human_compacts_many_clean_only_paths_and_keeps_conflict_commands()
         "pwsh",
         "-NoProfile",
         "-Command",
-        "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Force -Path generated | Out-Null; for ($i = 0; $i -lt 25; $i++) { Set-Content -Path ('generated/file-{0:D3}.txt' -f $i) -Value ('clean {0}' -f $i) -NoNewline }",
+        "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Force -Path generated | Out-Null; for ($i = 0; $i -lt 25; $i++) { Set-Content -Path ('generated/file-{0:D3}.txt' -f $i) -Value ('clean {0}' -f $i) -NoNewline }; [IO.File]::WriteAllText('src/shared.txt', \"a=A`nb=2`nc=3`n\")",
     ]);
     repo.run_json([
         "exec",
@@ -511,7 +511,7 @@ fn cli_review_human_compacts_many_clean_only_paths_and_keeps_conflict_commands()
     ]);
 
     let json_before = repo.run_json(["review"]);
-    assert_eq!(json_before["summary"]["clean_ops"], 25);
+    assert_eq!(json_before["summary"]["clean_ops"], 26);
     assert_eq!(json_before["summary"]["conflicted_ops"], 2);
     assert_eq!(
         review_path(&json_before, "generated/file-000.txt")["clean_ops"][0]["op"]["op_id"],
@@ -523,7 +523,7 @@ fn cli_review_human_compacts_many_clean_only_paths_and_keeps_conflict_commands()
         human.contains("Clean-only paths\n  - 25 clean-only paths omitted from detailed listing")
     );
     assert!(human.contains(
-        "  - clean-lane: 25 clean ops across 25 paths\n    command: lane promote-clean clean-lane"
+        "  - clean-lane: 25 clean ops across 25 clean-only paths; command promotes 26 clean ops across 26 paths\n    command: lane promote-clean clean-lane"
     ));
     assert!(human.contains("  - full JSON details: lane review"));
     assert!(human.contains("    - generated/file-000.txt"));
