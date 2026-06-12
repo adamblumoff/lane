@@ -264,7 +264,7 @@ fn quote_command_arg(arg: &str) -> String {
     if arg == "<replacement-file>" || is_plain_command_arg(arg) {
         arg.to_owned()
     } else {
-        format!("'{}'", arg.replace('\'', "'\\''"))
+        format!("'{}'", arg.replace('\'', "''"))
     }
 }
 

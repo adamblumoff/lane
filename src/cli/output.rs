@@ -4,14 +4,6 @@ use crate::vfs::{LaneFileChange, LaneFileChangeStatus};
 use crate::{FilePath, LaneOpSummary};
 
 #[derive(Serialize)]
-pub(super) struct CreateOutput<'a> {
-    pub(super) lane: &'a str,
-    pub(super) created: bool,
-    pub(super) repo_root: String,
-    pub(super) storage_path: String,
-}
-
-#[derive(Serialize)]
 pub(super) struct ReviewOutput {
     pub(super) lane: Option<String>,
     pub(super) repo_root: String,

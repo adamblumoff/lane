@@ -3,6 +3,7 @@
 mod common;
 
 use common::*;
+use std::collections::BTreeSet;
 
 #[test]
 fn cli_exec_preserves_parallel_lane_outputs() {
@@ -444,7 +445,20 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
     assert!(human.contains("  |- clean ops\n  |  - agent-a agent-a:1 replace [2..3), inserts 1 B"));
     assert!(human.contains("  |    base: \"1\"\n  |    inserted: \"A\""));
     assert!(human.contains("  |    promote: lane promote-ops agent-a src/vars.txt agent-a:1"));
-    assert!(human.contains("lane promote-ops agent-c 'src/owner'\\''s.txt' agent-c:1"));
+    let owner_promote = human
+        .lines()
+        .find_map(|line| line.strip_prefix("  |    promote: "))
+        .filter(|command| command.contains("owner''s.txt"))
+        .unwrap_or_else(|| panic!("missing quoted owner promote command:\n{human}"));
+    assert_eq!(
+        owner_promote,
+        "lane promote-ops agent-c 'src/owner''s.txt' agent-c:1"
+    );
+    assert_success(run_human_command(&repo, owner_promote));
+    assert_eq!(
+        fs::read(repo.path().join("src/owner's.txt")).unwrap(),
+        b"owned \"quote\""
+    );
     assert!(human.contains("  |    inserted: \"owned \\\"quote\\\"\""));
     assert!(human.contains("  `- conflict groups\n     - group 1 [6..7), lanes: agent-a, agent-b"));
     assert!(human.contains("         base: \"2\"\n         inserted: \"B\""));
@@ -610,15 +624,119 @@ fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
             .iter()
             .any(|action| action["kind"] == "promote_clean")
     );
+    assert!(
+        compared["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["command"] == serde_json::json!(["discard-run", "login"]))
+    );
     assert_eq!(compared["review"]["summary"]["lanes"], 3);
     assert_eq!(compared["review"]["summary"]["changed_paths"], 2);
 
+    let runs = repo.run_json(["runs"]);
+    assert_eq!(runs["runs"].as_array().unwrap().len(), 1);
+    let run_summary = &runs["runs"][0];
+    assert_eq!(run_summary["name"], "login");
+    assert_eq!(run_summary["attempts"], 3);
+    assert_eq!(
+        string_array(&run_summary["attempt_lanes"]),
+        vec!["login-1", "login-2", "login-3"]
+    );
+    assert_eq!(run_summary["attempts_ok"], 3);
+    assert_eq!(run_summary["attempts_failed"], 0);
+    assert_eq!(run_summary["checks"], 1);
+    assert_eq!(run_summary["checks_passed"], 1);
+    assert_eq!(run_summary["checks_failed"], 2);
+    assert!(
+        run_summary["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["command"] == serde_json::json!(["run", "login"]))
+    );
+
+    let run_detail = repo.run_json(["run", "login"]);
+    assert_eq!(run_detail["run"]["name"], "login");
+    assert_eq!(run_detail["attempts"][1]["lane"], "login-2");
+    assert_eq!(run_detail["attempts"][1]["checks_passed"], 1);
+
     let human = repo.run_text(["compare", "login", "--human"]);
     assert!(human.starts_with("Lane compare\nrun: login\n"));
+    assert!(
+        human.contains("Run actions\n  - runs: lane runs\n  - discard_run: lane discard-run login")
+    );
     assert!(human.contains("Attempts\n  - login-1: attempt ok, checks 0/1"));
     assert!(human.contains("  - login-2: attempt ok, checks 1/1"));
     assert!(human.contains("promote_clean: lane promote-clean login-2"));
     assert!(human.contains("  - pick-second\n    login-1: exit 9\n    login-2: ok"));
+
+    let discarded = repo.run_json(["discard-run", "login"]);
+    assert_eq!(discarded["removed_attempt_lanes"], 3);
+    assert_eq!(discarded["discarded_changes"], 4);
+    assert!(!repo.path().join(".lane/runs/login.json").exists());
+    assert!(
+        repo.run_json(["runs"])["runs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(repo.run_json(["review"])["summary"]["lanes"], 0);
+    assert_command_fails_with(
+        &repo.run_unchecked(&["run", "login"]),
+        "run \"login\" is not readable",
+    );
+}
+
+#[test]
+fn cli_run_detail_keeps_cleanup_available_when_base_changed() {
+    let repo = TempRepo::new();
+    repo.write("src/base.ts", b"export const base = 'original';");
+
+    repo.run_json([
+        "try",
+        "--name",
+        "stale",
+        "--attempts",
+        "1",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; Set-Content -Path src/base.ts -Value \"export const base = 'attempt';\" -NoNewline",
+    ]);
+    repo.write("src/base.ts", b"export const base = 'parent';");
+
+    let detail = repo.run_json(["run", "stale"]);
+    assert!(
+        detail["review_error"]
+            .as_str()
+            .unwrap()
+            .contains("BaseChanged")
+    );
+    assert_eq!(detail["run"]["name"], "stale");
+    assert_eq!(detail["attempts"][0]["lane"], "stale-1");
+    assert_eq!(
+        review_action_kinds(&detail["attempts"][0]["actions"]),
+        vec!["discard"]
+    );
+    assert!(
+        detail["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["command"] == serde_json::json!(["discard-run", "stale"]))
+    );
+
+    let human = repo.run_text(["run", "stale", "--human"]);
+    assert!(human.contains("summary: 1 attempt, 0 checks, review unavailable"));
+    assert!(human.contains("discard_run: lane discard-run stale"));
+    assert!(human.contains("Needs decision\n  - review unavailable:"));
+
+    let discarded = repo.run_json(["discard-run", "stale"]);
+    assert_eq!(discarded["removed_attempt_lanes"], 1);
+    assert_eq!(discarded["discarded_changes"], 0);
+    assert!(!repo.path().join(".lane/runs/stale.json").exists());
 }
 
 #[test]
@@ -718,7 +836,15 @@ fn cli_check_merges_concurrent_check_results() {
 #[test]
 fn cli_try_rejects_existing_attempt_lanes() {
     let repo = TempRepo::new();
-    repo.run_json(["create", "dupe-1"]);
+    repo.run_json([
+        "exec",
+        "dupe-1",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "exit 0",
+    ]);
 
     let output = repo.run_unchecked(&[
         "try",
@@ -783,6 +909,25 @@ fn run_named_check(repo_root: &std::path::Path, name: &str, script: &str) -> std
             "-Command",
             script,
         ])
+        .output()
+        .unwrap()
+}
+
+fn run_human_command(repo: &TempRepo, command: &str) -> std::process::Output {
+    let mut path_entries = vec![
+        std::path::Path::new(env!("CARGO_BIN_EXE_lane"))
+            .parent()
+            .unwrap()
+            .to_path_buf(),
+    ];
+    path_entries.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(path_entries).unwrap();
+    std::process::Command::new("pwsh")
+        .current_dir(repo.path())
+        .env("PATH", path)
+        .args(["-NoProfile", "-Command", command])
         .output()
         .unwrap()
 }

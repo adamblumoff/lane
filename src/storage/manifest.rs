@@ -11,7 +11,6 @@ use crate::{
 };
 
 use super::blobs::{hex, persist_blob, read_blob, sha256_hex};
-use super::paths::legacy_storage_path;
 use super::serde_util::{invalid_storage, json_error};
 
 pub(super) const STORE_VERSION: u32 = 2;
@@ -175,20 +174,6 @@ fn stored_entry_from_snapshot(
                 .collect::<io::Result<_>>()?,
         }),
     }
-}
-
-pub(super) fn reject_legacy_storage(storage_root: &Path) -> io::Result<()> {
-    let legacy = legacy_storage_path(storage_root);
-    if legacy.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "legacy lane storage {} is unsupported; remove .lane to reset",
-                legacy.display()
-            ),
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn parse_fingerprint(value: &str) -> io::Result<BaseFingerprint> {
