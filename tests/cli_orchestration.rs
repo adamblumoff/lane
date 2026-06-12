@@ -478,6 +478,127 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
 }
 
 #[test]
+fn cli_review_human_compacts_many_clean_only_paths_and_keeps_conflict_commands() {
+    let repo = TempRepo::new();
+    repo.write("src/shared.txt", b"a=1\nb=2\nc=3\n");
+
+    repo.run_json([
+        "exec",
+        "clean-lane",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Force -Path generated | Out-Null; for ($i = 0; $i -lt 25; $i++) { Set-Content -Path ('generated/file-{0:D3}.txt' -f $i) -Value ('clean {0}' -f $i) -NoNewline }; [IO.File]::WriteAllText('src/shared.txt', \"a=A`nb=2`nc=3`n\")",
+    ]);
+    repo.run_json([
+        "exec",
+        "conflict-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/shared.txt', \"a=1`nb=A`nc=3`n\")",
+    ]);
+    repo.run_json([
+        "exec",
+        "conflict-b",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/shared.txt', \"a=1`nb=B`nc=3`n\")",
+    ]);
+
+    let json_before = repo.run_json(["review"]);
+    assert_eq!(json_before["summary"]["clean_ops"], 26);
+    assert_eq!(json_before["summary"]["conflicted_ops"], 2);
+    assert_eq!(
+        review_path(&json_before, "generated/file-000.txt")["clean_ops"][0]["op"]["op_id"],
+        "clean-lane:1"
+    );
+
+    let human = repo.run_text(["review", "--human"]);
+    assert!(
+        human.contains("Clean-only paths\n  - 25 clean-only paths omitted from detailed listing")
+    );
+    assert!(human.contains(
+        "  - clean-lane: 25 clean ops across 25 clean-only paths; command promotes 26 clean ops across 26 paths\n    command: lane promote-clean clean-lane"
+    ));
+    assert!(human.contains("  - full JSON details: lane review"));
+    assert!(human.contains("    - generated/file-000.txt"));
+    assert!(human.contains("    - ... 17 more paths"));
+    assert!(
+        !human.contains("promote: lane promote-ops clean-lane generated/file-000.txt clean-lane:1")
+    );
+    assert!(human.contains("Needs decision\n  - src/shared.txt group 1"));
+    assert!(human.contains(
+        "resolve: lane resolve-op conflict-a src/shared.txt conflict-a:1 --with-file <replacement-file>"
+    ));
+    assert!(human.contains(
+        "resolve: lane resolve-op conflict-b src/shared.txt conflict-b:1 --with-file <replacement-file>"
+    ));
+
+    assert_eq!(repo.run_json(["review"]), json_before);
+}
+
+#[test]
+fn cli_review_human_compacts_many_clean_ops_on_one_conflicted_path() {
+    let repo = TempRepo::new();
+    let base = (1..=16)
+        .map(|index| format!("k{index:02}=base\nsep{index:02}\n"))
+        .collect::<String>();
+    repo.write("src/many.txt", base.as_bytes());
+
+    repo.run_json([
+        "exec",
+        "many-clean",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; $lines = [Collections.Generic.List[string]](Get-Content src/many.txt); for ($n = 1; $n -le 14; $n++) { $index = ($n - 1) * 2; if ($n -eq 14) { $lines[$index] = \"k14=left\" } else { $lines[$index] = (\"k{0:D2}=agent-a\" -f $n) } }; [IO.File]::WriteAllText(\"src/many.txt\", (($lines -join \"`n\") + \"`n\"))",
+    ]);
+    repo.run_json([
+        "exec",
+        "reviewer",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; $lines = [Collections.Generic.List[string]](Get-Content src/many.txt); $lines[26] = \"k14=right\"; [IO.File]::WriteAllText(\"src/many.txt\", (($lines -join \"`n\") + \"`n\"))",
+    ]);
+
+    let review = repo.run_json(["review"]);
+    let path = review_path(&review, "src/many.txt");
+    assert!(path["clean_ops"].as_array().unwrap().len() > 12);
+    assert_eq!(path["conflicts"].as_array().unwrap().len(), 1);
+
+    let human = repo.run_text(["review", "--human"]);
+    assert!(human.contains("\nsrc/many.txt\n  |- lanes"));
+    assert!(
+        human.lines().any(|line| line.starts_with("  |  - ... ")
+            && line.contains(" clean op")
+            && line.contains(" omitted from this path")),
+        "missing omitted clean-op summary:\n{human}"
+    );
+    assert!(
+        human.lines().any(|line| line.contains("many-clean: ")
+            && line.contains(" clean op")
+            && line.contains(
+                " omitted; promote: lane promote-ops many-clean src/many.txt many-clean:"
+            )),
+        "missing path-scoped promote command for omitted clean op:\n{human}"
+    );
+    assert!(
+        human.lines().any(|line| line
+            .contains("resolve: lane resolve-op many-clean src/many.txt many-clean:")
+            && line.contains("--with-file <replacement-file>")),
+        "missing many-clean resolve command:\n{human}"
+    );
+}
+
+#[test]
 fn cli_review_human_escapes_and_bounds_inline_previews() {
     let repo = TempRepo::new();
 
