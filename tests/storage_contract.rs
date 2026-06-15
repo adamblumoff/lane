@@ -4,14 +4,15 @@ pub use lane::{
     LaneRepoStorageSnapshot, ensure_user_lane,
 };
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::{
-    acquire_repo_lock, doctor_storage, is_lock_contention, load_repo, persist_last_exec,
-    persist_repo,
+    acquire_repo_lock, doctor_storage, is_lock_contention, load_last_exec, load_repo,
+    persist_last_exec, persist_repo,
 };
 
 // This recompiles the crate-private storage module inside the integration test.
@@ -44,10 +45,12 @@ fn storage_v2_persists_manifest_blobs_and_last_exec() {
         loaded.read_path("src/new.ts", "agent-a", None).unwrap(),
         Some(b"new\n".to_vec())
     );
-    assert_eq!(
-        loaded.last_exec("agent-a").unwrap().unwrap().changed_paths,
-        vec!["src/new.ts"]
-    );
+    let last_exec = load_last_exec(temp.path(), &lane_set(&loaded));
+    let last_exec = last_exec.get("agent-a").unwrap();
+    assert_eq!(last_exec.exit_code, Some(0));
+    assert_eq!(last_exec.stdout.text, "ok\n");
+    assert!(!last_exec.stdout.truncated);
+    assert_eq!(last_exec.changed_paths, vec!["src/new.ts"]);
 }
 
 #[test]
@@ -92,7 +95,7 @@ fn corrupt_last_exec_is_advisory_but_doctor_reports_it() {
         loaded.read_path("src/new.ts", "agent-a", None).unwrap(),
         Some(b"new\n".to_vec())
     );
-    assert!(loaded.last_exec("agent-a").unwrap().is_none());
+    assert!(load_last_exec(temp.path(), &lane_set(&loaded)).is_empty());
 
     let report = doctor_storage(temp.path()).unwrap();
     assert!(!report.is_healthy());
@@ -113,7 +116,7 @@ fn orphan_last_exec_is_warning_not_error() {
     fs::write(temp.path().join("last_exec/agent-b.json"), b"not json").unwrap();
 
     let loaded = load_repo(temp.path()).unwrap().unwrap();
-    assert!(loaded.last_exec("agent-a").unwrap().is_none());
+    assert!(load_last_exec(temp.path(), &lane_set(&loaded)).is_empty());
 
     let report = doctor_storage(temp.path()).unwrap();
     assert!(report.is_healthy());
@@ -174,7 +177,7 @@ fn unreferenced_blob_is_reported_as_warning_not_error() {
         report
             .warnings
             .iter()
-            .any(|warning| warning.contains("is not referenced by repo.json"))
+            .any(|warning| warning.contains("not referenced by repo.json"))
     );
 }
 
@@ -236,6 +239,10 @@ fn repo_with_agent_file() -> LaneRepo {
     repo.replace_path("src/new.ts", "agent-a", None, Some(b"new\n".to_vec()))
         .unwrap();
     repo
+}
+
+fn lane_set(repo: &LaneRepo) -> BTreeSet<LaneId> {
+    repo.lane_ids().map(str::to_owned).collect()
 }
 
 fn first_blob_path(storage_root: &Path) -> PathBuf {

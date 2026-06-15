@@ -9,14 +9,13 @@ use super::ops::{
 use super::types::base_fingerprint;
 use super::{
     BaseFingerprint, BaseStorageSnapshot, DecodeError, FilePath, LaneEntryStorageSnapshot,
-    LaneError, LaneExecState, LaneFileStorageSnapshot, LaneId, LaneOpDetail, LaneOpKind,
-    LaneOpSummary, LaneRepoStorageSnapshot, ensure_user_lane,
+    LaneError, LaneFileStorageSnapshot, LaneId, LaneOpDetail, LaneOpKind, LaneOpSummary,
+    LaneRepoStorageSnapshot, ensure_user_lane,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaneRepo {
     lanes: BTreeSet<LaneId>,
-    last_exec: BTreeMap<LaneId, LaneExecState>,
     files: BTreeMap<FilePath, LaneFile>,
 }
 
@@ -53,7 +52,6 @@ impl LaneRepo {
     pub fn new() -> Self {
         Self {
             lanes: BTreeSet::new(),
-            last_exec: BTreeMap::new(),
             files: BTreeMap::new(),
         }
     }
@@ -77,20 +75,8 @@ impl LaneRepo {
         Ok(self.lanes.insert(lane))
     }
 
-    pub fn record_last_exec(&mut self, lane: &str, state: LaneExecState) -> Result<(), LaneError> {
-        self.ensure_lane(lane)?;
-        self.last_exec.insert(lane.to_owned(), state);
-        Ok(())
-    }
-
-    pub fn last_exec(&self, lane: &str) -> Result<Option<&LaneExecState>, LaneError> {
-        self.ensure_lane(lane)?;
-        Ok(self.last_exec.get(lane))
-    }
-
     pub fn discard_lane(&mut self, lane: &str) -> bool {
         let removed = self.lanes.remove(lane);
-        self.last_exec.remove(lane);
         for file in self.files.values_mut() {
             file.discard_lane(lane);
         }
@@ -222,7 +208,6 @@ impl LaneRepo {
     pub fn storage_snapshot(&self) -> LaneRepoStorageSnapshot {
         LaneRepoStorageSnapshot {
             lanes: self.lanes.clone(),
-            last_exec: self.last_exec.clone(),
             files: self
                 .files
                 .iter()
@@ -238,7 +223,6 @@ impl LaneRepo {
 
         let repo = Self {
             lanes: snapshot.lanes,
-            last_exec: snapshot.last_exec,
             files: snapshot
                 .files
                 .into_iter()
@@ -258,11 +242,6 @@ impl LaneRepo {
     }
 
     fn validate(&self) -> Result<(), DecodeError> {
-        for lane in self.last_exec.keys() {
-            if !self.lanes.contains(lane) {
-                return Err(DecodeError::ExecStateLaneMissing(lane.clone()));
-            }
-        }
         for file in self.files.values() {
             for lane in file.lanes.keys() {
                 if !self.lanes.contains(lane) {

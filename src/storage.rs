@@ -39,10 +39,7 @@ pub(crate) fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
     let manifest_path = manifest_path(storage_root);
     let snapshot = load_manifest_snapshot(storage_root, &manifest_path)?;
     LaneRepo::from_storage_snapshot(match snapshot {
-        Some(mut snapshot) => {
-            snapshot.last_exec = load_last_exec(storage_root, &snapshot.lanes);
-            snapshot
-        }
+        Some(snapshot) => snapshot,
         None => return Ok(None),
     })
     .map(Some)
@@ -67,7 +64,7 @@ pub(crate) fn persist_last_exec(
     persist_bytes(&last_exec_path(storage_root, lane), &bytes)
 }
 
-fn load_last_exec(
+pub(crate) fn load_last_exec(
     storage_root: &Path,
     lanes: &BTreeSet<LaneId>,
 ) -> BTreeMap<LaneId, LaneExecState> {

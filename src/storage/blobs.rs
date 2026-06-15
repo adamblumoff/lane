@@ -50,11 +50,19 @@ pub(super) fn report_blob_inventory(
     report: &mut StorageDoctorReport,
 ) -> io::Result<()> {
     let present_blobs = present_blob_references(storage_root, report)?;
-    for blob in present_blobs.difference(referenced_blobs) {
+    let mut unreferenced = 0usize;
+    for _ in present_blobs.difference(referenced_blobs) {
         report.blobs_unreferenced += 1;
+        unreferenced += 1;
+    }
+    if unreferenced == 1 {
         report
             .warnings
-            .push(format!("blob {blob} is not referenced by repo.json"));
+            .push("1 blob is not referenced by repo.json".to_owned());
+    } else if unreferenced > 1 {
+        report.warnings.push(format!(
+            "{unreferenced} blobs are not referenced by repo.json"
+        ));
     }
     Ok(())
 }

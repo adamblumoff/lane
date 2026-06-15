@@ -4,11 +4,11 @@ use std::path::{Component as PathComponent, Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::thread;
 
+use crate::path_label;
 use crate::storage::encode_path_component;
 
 use super::git::{GitView, git_path_label};
 use super::observer::ExecObserver;
-use super::support::path_label;
 
 pub(super) struct WorkerOutput {
     pub(super) exit_code: Option<i32>,

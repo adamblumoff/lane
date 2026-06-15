@@ -10,7 +10,7 @@ use crate::storage::{acquire_repo_lock, encode_path_component, persist_bytes, pe
 use crate::{FilePath, LaneId, LaneTextPreview, ensure_user_lane};
 
 use super::error::{CliError, CliResult};
-use super::human_review::format_command;
+use super::human_review::{count_label, format_command};
 use super::output::{ReviewActionKind, ReviewOutput, ReviewSummary};
 use super::repo::{load_lane_repo, open_locked_lane_fs, path_label, print_json, storage_path};
 use super::review::{collect_changes, collect_review};
@@ -158,7 +158,7 @@ pub(super) fn compare(repo_root: &Path, run_name: &str, human: bool) -> CliResul
         .map(|attempt| attempt.lane.clone())
         .collect::<Vec<_>>();
     let locked = open_locked_lane_fs(repo_root)?;
-    let review_result = collect_review(&locked.fs, &lanes);
+    let review_result = collect_review(&locked.fs, &locked.last_exec, &lanes);
     let (review, review_error) = match review_result {
         Ok((summary, lane_summaries, paths)) => (
             ReviewOutput {
@@ -572,8 +572,8 @@ fn summarize_run(run: &RunRecord) -> RunSummary {
 
 fn summary_actions(run_name: &str) -> Vec<CompareAction> {
     vec![
-        CompareAction::new("run", ["run", run_name]),
-        CompareAction::new("run_human", ["run", run_name, "--human"]),
+        CompareAction::new("compare", ["compare", run_name]),
+        CompareAction::new("compare_human", ["compare", run_name, "--human"]),
         CompareAction::new("discard_run", ["discard-run", run_name]),
     ]
 }
@@ -737,14 +737,6 @@ fn attempt_status_label(ok: bool, exec: Option<&RecordedExec>, error: Option<&st
             exec.exit_code
                 .map_or_else(|| "none".to_owned(), |code| code.to_string())
         )
-    }
-}
-
-fn count_label(count: usize, singular: &str) -> String {
-    if count == 1 {
-        format!("1 {singular}")
-    } else {
-        format!("{count} {singular}s")
     }
 }
 

@@ -54,20 +54,6 @@ pub(super) struct VirtualFsMetricsSnapshot {
     pub(super) storage_write_ops: u64,
 }
 
-pub(crate) struct VirtualLaneRun {
-    pub(crate) output: VirtualExecOutput,
-}
-
-impl VirtualLaneRun {
-    pub(crate) fn failed(&self) -> bool {
-        self.output.failed()
-    }
-
-    pub(crate) fn into_record(self) -> VirtualExecRecord {
-        self.output.into_record()
-    }
-}
-
 #[derive(Serialize)]
 pub(crate) struct VirtualExecOutput {
     pub(super) lane: String,
@@ -96,11 +82,11 @@ pub(crate) struct VirtualExecRecord {
 }
 
 impl VirtualExecOutput {
-    fn failed(&self) -> bool {
+    pub(crate) fn failed(&self) -> bool {
         self.exit_code != Some(0) || self.worker_error.is_some()
     }
 
-    fn into_record(self) -> VirtualExecRecord {
+    pub(crate) fn into_record(self) -> VirtualExecRecord {
         VirtualExecRecord {
             exec: LaneExecState::new(
                 self.exit_code,
@@ -129,8 +115,6 @@ pub(super) struct VirtualExecWarning {
 #[derive(Serialize)]
 pub(super) struct VirtualExecTimings {
     pub(super) total_ms: u64,
-    pub(super) lock_wait_ms: u64,
-    pub(super) lock_held_ms: u64,
     pub(super) storage_lock_wait_ms: u64,
     pub(super) storage_lock_held_ms: u64,
     pub(super) pre_worker_lock_ms: u64,

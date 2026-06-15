@@ -1,5 +1,6 @@
 mod cli;
 mod core;
+mod path_label;
 mod storage;
 mod vfs;
 #[cfg(windows)]
@@ -13,3 +14,4 @@ pub use core::{
     ensure_user_lane,
 };
 pub(crate) use core::{is_git_metadata_path, is_lane_state_path};
+pub(crate) use path_label::path_label;

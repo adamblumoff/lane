@@ -571,7 +571,7 @@ fn change_status_label(status: LaneFileChangeStatus) -> &'static str {
     }
 }
 
-fn count_label(count: usize, singular: &str) -> String {
+pub(super) fn count_label(count: usize, singular: &str) -> String {
     if count == 1 {
         format!("1 {singular}")
     } else {

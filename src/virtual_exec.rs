@@ -12,14 +12,16 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::{LaneExecState, ensure_user_lane};
+use crate::{LaneExecState, ensure_user_lane, path_label};
 
 use git::prepare_git_view;
 use mount::start_mount;
 use observer::ExecObserver;
-use support::{elapsed_ms, path_label};
-pub(crate) use types::{VirtualExecError, VirtualExecOptions, VirtualExecRecord, VirtualLaneRun};
-use types::{VirtualExecOutput, VirtualExecTimings, VirtualExecWarning, VirtualFsMetrics};
+use support::elapsed_ms;
+pub(crate) use types::{
+    VirtualExecError, VirtualExecOptions, VirtualExecOutput, VirtualExecRecord,
+};
+use types::{VirtualExecTimings, VirtualExecWarning, VirtualFsMetrics};
 use worker::{command_label, run_virtual_worker};
 
 const STORAGE_PATH: &str = ".lane";
@@ -29,7 +31,7 @@ pub(crate) fn run_virtual_lane(
     lane: &str,
     command: &[String],
     options: VirtualExecOptions,
-) -> Result<VirtualLaneRun, VirtualExecError> {
+) -> Result<VirtualExecOutput, VirtualExecError> {
     let total_start = Instant::now();
     ensure_user_lane(lane).map_err(|error| VirtualExecError::message(format!("{error:?}")))?;
     let (program, args) = command
@@ -122,8 +124,6 @@ pub(crate) fn run_virtual_lane(
         changed_paths,
         timings: VirtualExecTimings {
             total_ms: elapsed_ms(total_start),
-            lock_wait_ms: snapshot.storage_lock_wait_ms,
-            lock_held_ms: snapshot.storage_lock_held_ms,
             storage_lock_wait_ms: snapshot.storage_lock_wait_ms,
             storage_lock_held_ms: snapshot.storage_lock_held_ms,
             pre_worker_lock_ms,
@@ -137,7 +137,7 @@ pub(crate) fn run_virtual_lane(
         warnings,
     };
 
-    Ok(VirtualLaneRun { output })
+    Ok(output)
 }
 
 fn last_exec_warnings(result: Result<(), VirtualExecError>) -> Vec<VirtualExecWarning> {
