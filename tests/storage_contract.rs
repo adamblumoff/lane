@@ -236,6 +236,26 @@ fn storage_gc_rejects_corrupt_manifest_without_deleting_blobs() {
 }
 
 #[test]
+fn storage_gc_rejects_invalid_blob_file_without_deleting_blobs() {
+    let temp = TempStorage::new();
+    let repo = repo_with_agent_file();
+    persist_repo(temp.path(), &repo).unwrap();
+    let referenced_blob = first_blob_path(temp.path());
+    let stale_blob = stale_blob_path(temp.path());
+    let invalid_blob = temp.path().join("blobs/sha256/not-a-sha");
+    fs::write(&stale_blob, b"stale").unwrap();
+    fs::write(&invalid_blob, b"invalid").unwrap();
+
+    let error = gc_storage(temp.path()).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("invalid blob files"));
+    assert!(referenced_blob.exists());
+    assert!(stale_blob.exists());
+    assert!(invalid_blob.exists());
+}
+
+#[test]
 fn reserved_manifest_lane_is_reported_by_doctor() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();

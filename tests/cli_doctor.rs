@@ -199,3 +199,19 @@ fn cli_gc_rejects_corrupt_manifest_without_deleting_blobs() {
     assert_command_fails_with(&output, "cannot gc unhealthy");
     assert!(repo.path().join(stale_blob).exists());
 }
+
+#[test]
+fn cli_gc_rejects_invalid_blob_file_without_deleting_blobs() {
+    let repo = repo_with_agent_exec();
+    let stale_blob =
+        ".lane/blobs/sha256/0000000000000000000000000000000000000000000000000000000000000000";
+    let invalid_blob = ".lane/blobs/sha256/not-a-sha";
+    repo.write(stale_blob, b"stale");
+    repo.write(invalid_blob, b"invalid");
+
+    let output = repo.run_unchecked(&["gc"]);
+
+    assert_command_fails_with(&output, "invalid blob files");
+    assert!(repo.path().join(stale_blob).exists());
+    assert!(repo.path().join(invalid_blob).exists());
+}

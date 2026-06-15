@@ -44,18 +44,18 @@ pub(super) fn validate_blob_reference(reference: &str) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn report_blob_inventory(
-    storage_root: &Path,
+pub(super) fn record_blob_inventory(
+    inventory: &BlobInventory,
     referenced_blobs: &BTreeSet<String>,
     report: &mut StorageDoctorReport,
-) -> io::Result<()> {
-    let inventory = blob_inventory(storage_root)?;
+) {
     report.blobs_present += inventory.blobs_present;
-    report.warnings.extend(inventory.warnings);
+    report.warnings.extend(inventory.warnings.clone());
 
     let unreferenced = inventory
-        .present_references
-        .difference(referenced_blobs)
+        .files
+        .keys()
+        .filter(|reference| !referenced_blobs.contains(*reference))
         .count();
     report.blobs_unreferenced += unreferenced;
     if unreferenced == 1 {
@@ -67,7 +67,6 @@ pub(super) fn report_blob_inventory(
             "{unreferenced} blobs are not referenced by repo.json"
         ));
     }
-    Ok(())
 }
 
 pub(super) fn blob_inventory(storage_root: &Path) -> io::Result<BlobInventory> {
@@ -93,15 +92,7 @@ pub(super) fn blob_inventory(storage_root: &Path) -> io::Result<BlobInventory> {
         match validate_blob_reference(&reference) {
             Ok(()) => {
                 let bytes = entry.metadata()?.len();
-                inventory.present_references.insert(reference.clone());
-                inventory.files.insert(
-                    reference.clone(),
-                    BlobFile {
-                        reference,
-                        path,
-                        bytes,
-                    },
-                );
+                inventory.files.insert(reference, BlobFile { path, bytes });
             }
             Err(error) => inventory.warnings.push(format!(
                 "blob file {} is not a valid sha256 blob name: {error}",
@@ -123,14 +114,12 @@ pub(super) fn hex(bytes: &[u8]) -> String {
 #[derive(Clone, Debug, Default)]
 pub(super) struct BlobInventory {
     pub(super) blobs_present: usize,
-    pub(super) present_references: BTreeSet<String>,
     pub(super) files: BTreeMap<String, BlobFile>,
     pub(super) warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct BlobFile {
-    pub(super) reference: String,
     pub(super) path: PathBuf,
     pub(super) bytes: u64,
 }

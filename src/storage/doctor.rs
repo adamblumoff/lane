@@ -7,7 +7,10 @@ use serde::Serialize;
 
 use crate::{LaneExecState, ensure_user_lane};
 
-use super::blobs::{read_blob, report_blob_inventory, sha256_hex, validate_blob_reference};
+use super::blobs::{
+    BlobInventory, blob_inventory, read_blob, record_blob_inventory, sha256_hex,
+    validate_blob_reference,
+};
 use super::manifest::{
     STORE_VERSION, StoredBase, StoredLaneEntryState, StoredRepoManifest, parse_fingerprint,
 };
@@ -15,15 +18,25 @@ use super::paths::{last_exec_file_name, manifest_path};
 use super::serde_util::json_error;
 
 pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorReport> {
+    inspect_storage(storage_root).map(|inspection| inspection.report)
+}
+
+pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorInspection> {
     let mut report = StorageDoctorReport::default();
 
     let manifest_path = manifest_path(storage_root);
     let bytes = match fs::read(&manifest_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            report_blob_inventory(storage_root, &BTreeSet::new(), &mut report)?;
+            let blob_inventory = blob_inventory(storage_root)?;
+            let referenced_blobs = BTreeSet::new();
+            record_blob_inventory(&blob_inventory, &referenced_blobs, &mut report);
             report.last_exec_files = count_json_files(&storage_root.join("last_exec"))?;
-            return Ok(report);
+            return Ok(StorageDoctorInspection {
+                report,
+                referenced_blobs,
+                blob_inventory,
+            });
         }
         Err(error) => return Err(error),
     };
@@ -36,9 +49,15 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
                 "manifest {} is invalid JSON: {error}",
                 manifest_path.display()
             ));
-            report_blob_inventory(storage_root, &BTreeSet::new(), &mut report)?;
+            let blob_inventory = blob_inventory(storage_root)?;
+            let referenced_blobs = BTreeSet::new();
+            record_blob_inventory(&blob_inventory, &referenced_blobs, &mut report);
             report.last_exec_files = count_json_files(&storage_root.join("last_exec"))?;
-            return Ok(report);
+            return Ok(StorageDoctorInspection {
+                report,
+                referenced_blobs,
+                blob_inventory,
+            });
         }
     };
 
@@ -155,8 +174,20 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
         }
     }
 
-    report_blob_inventory(storage_root, &referenced_blobs, &mut report)?;
-    Ok(report)
+    let blob_inventory = blob_inventory(storage_root)?;
+    record_blob_inventory(&blob_inventory, &referenced_blobs, &mut report);
+    Ok(StorageDoctorInspection {
+        report,
+        referenced_blobs,
+        blob_inventory,
+    })
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct StorageDoctorInspection {
+    pub(super) report: StorageDoctorReport,
+    pub(super) referenced_blobs: BTreeSet<String>,
+    pub(super) blob_inventory: BlobInventory,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
