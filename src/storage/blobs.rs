@@ -50,11 +50,8 @@ pub(super) fn report_blob_inventory(
     report: &mut StorageDoctorReport,
 ) -> io::Result<()> {
     let present_blobs = present_blob_references(storage_root, report)?;
-    let mut unreferenced = 0usize;
-    for _ in present_blobs.difference(referenced_blobs) {
-        report.blobs_unreferenced += 1;
-        unreferenced += 1;
-    }
+    let unreferenced = present_blobs.difference(referenced_blobs).count();
+    report.blobs_unreferenced += unreferenced;
     if unreferenced == 1 {
         report
             .warnings
