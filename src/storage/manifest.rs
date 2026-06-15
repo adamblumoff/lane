@@ -82,7 +82,6 @@ fn snapshot_from_manifest(
 
     Ok(LaneRepoStorageSnapshot {
         lanes: manifest.lanes.into_iter().collect(),
-        last_exec: BTreeMap::new(),
         files,
     })
 }

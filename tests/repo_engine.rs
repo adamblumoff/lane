@@ -1,4 +1,4 @@
-use lane::{BaseStorageSnapshot, LaneError, LaneExecState, LaneOpKind, LaneRepo};
+use lane::{BaseStorageSnapshot, LaneError, LaneOpKind, LaneRepo};
 use sha2::{Digest, Sha256};
 use std::ops::Range;
 
@@ -256,36 +256,6 @@ fn repo_state_snapshot_uses_sha256_base_fingerprint() {
         snapshot.files.get(PATH).unwrap().base,
         BaseStorageSnapshot::Present(expected)
     );
-}
-
-#[test]
-fn repo_state_round_trips_last_exec_metadata() {
-    let mut repo = seeded_repo();
-    repo.record_last_exec(
-        "agent-a",
-        LaneExecState::new(
-            Some(7),
-            Some("worker launch failed".to_owned()),
-            &"x".repeat(5000),
-            "simulated failure\n",
-            vec!["src/partial.ts".to_owned()],
-        ),
-    )
-    .unwrap();
-
-    let decoded = round_trip_repo(&repo);
-    let last_exec = decoded.last_exec("agent-a").unwrap().unwrap();
-
-    assert_eq!(last_exec.exit_code, Some(7));
-    assert_eq!(
-        last_exec.worker_error.as_deref(),
-        Some("worker launch failed")
-    );
-    assert_eq!(last_exec.stdout.text.len(), 4096);
-    assert!(last_exec.stdout.truncated);
-    assert_eq!(last_exec.stderr.text, "simulated failure\n");
-    assert!(!last_exec.stderr.truncated);
-    assert_eq!(last_exec.changed_paths, vec!["src/partial.ts"]);
 }
 
 #[test]

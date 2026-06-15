@@ -24,7 +24,7 @@ pub(super) fn exec(
     observe: bool,
     command: &[String],
 ) -> CliResult<ExitCode> {
-    let run = crate::virtual_exec::run_virtual_lane(
+    let output = crate::virtual_exec::run_virtual_lane(
         repo_root,
         lane,
         command,
@@ -34,8 +34,8 @@ pub(super) fn exec(
         },
     )
     .map_err(CliError::message)?;
-    let failed = run.failed();
-    print_json(&run.output)?;
+    let failed = output.failed();
+    print_json(&output)?;
     if failed {
         Ok(ExitCode::FAILURE)
     } else {
@@ -58,7 +58,7 @@ pub(super) fn exec(
 pub(super) fn review(repo_root: &Path, lane: Option<&str>, human: bool) -> CliResult<()> {
     let locked = open_locked_lane_fs(repo_root)?;
     let lanes = review_lanes(&locked.fs, lane)?;
-    let (summary, lane_summaries, paths) = collect_review(&locked.fs, &lanes)?;
+    let (summary, lane_summaries, paths) = collect_review(&locked.fs, &locked.last_exec, &lanes)?;
     let output = ReviewOutput {
         lane: lane.map(str::to_owned),
         repo_root: path_label(repo_root),

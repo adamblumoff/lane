@@ -63,12 +63,6 @@ enum Command {
     },
     #[command(about = "List stored attempt runs")]
     Runs,
-    #[command(about = "Show detailed attempt, check, and review evidence for a run")]
-    Run {
-        name: String,
-        #[arg(long)]
-        human: bool,
-    },
     #[command(about = "Compare attempts, checks, and lane review state for a run")]
     Compare {
         run: String,
@@ -133,9 +127,6 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
             orchestrate::check(&repo_root, &run, name.as_deref(), &command)
         }
         Command::Runs => orchestrate::runs(&repo_root).map(|()| ExitCode::SUCCESS),
-        Command::Run { name, human } => {
-            orchestrate::compare(&repo_root, &name, human).map(|()| ExitCode::SUCCESS)
-        }
         Command::Compare { run, human } => {
             orchestrate::compare(&repo_root, &run, human).map(|()| ExitCode::SUCCESS)
         }

@@ -1,19 +1,23 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::LaneRepo;
-use crate::storage::{RepoLock, acquire_repo_lock, load_repo, persist_repo};
+use crate::storage::{RepoLock, acquire_repo_lock, load_last_exec, load_repo, persist_repo};
 use crate::vfs::{FileWorktree, LaneFs, LaneFsError};
+use crate::{LaneExecState, LaneId, LaneRepo};
 
 use super::error::{CliError, CliResult};
 
 const STORAGE_PATH: &str = ".lane";
 
+pub(super) use crate::path_label;
+
 pub(super) struct LockedLaneFs {
     pub(super) storage_path: PathBuf,
     pub(super) fs: LaneFs,
+    pub(super) last_exec: BTreeMap<LaneId, LaneExecState>,
     _lock: RepoLock,
 }
 
@@ -34,9 +38,12 @@ pub(super) fn open_locked_lane_fs(repo_root: &Path) -> CliResult<LockedLaneFs> {
     let storage_path = storage_path(repo_root);
     let lock = acquire_repo_lock(&storage_path)?;
     let repo = load_lane_repo(&storage_path)?;
+    let lanes = repo.lane_ids().map(str::to_owned).collect::<BTreeSet<_>>();
+    let last_exec = load_last_exec(&storage_path, &lanes);
     Ok(LockedLaneFs {
         storage_path,
         fs: LaneFs::new(repo, FileWorktree::new(repo_root)),
+        last_exec,
         _lock: lock,
     })
 }
@@ -68,27 +75,6 @@ pub(super) fn repo_root(repo_root: PathBuf) -> CliResult<PathBuf> {
 
 pub(super) fn storage_path(repo_root: &Path) -> PathBuf {
     repo_root.join(STORAGE_PATH)
-}
-
-pub(super) fn path_label(path: impl AsRef<Path>) -> String {
-    display_path(path.as_ref())
-}
-
-#[cfg(windows)]
-fn display_path(path: &Path) -> String {
-    let label = path.display().to_string();
-    if let Some(path) = label.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{path}")
-    } else if let Some(path) = label.strip_prefix(r"\\?\") {
-        path.to_owned()
-    } else {
-        label
-    }
-}
-
-#[cfg(not(windows))]
-fn display_path(path: &Path) -> String {
-    path.display().to_string()
 }
 
 pub(super) fn print_json(output: &impl Serialize) -> CliResult<()> {

@@ -73,7 +73,6 @@ pub enum LaneOpKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaneRepoStorageSnapshot {
     pub lanes: BTreeSet<LaneId>,
-    pub last_exec: BTreeMap<LaneId, LaneExecState>,
     pub files: BTreeMap<FilePath, LaneFileStorageSnapshot>,
 }
 
@@ -162,7 +161,6 @@ pub enum DecodeError {
     OperationConflict,
     OperationOutOfBounds,
     OverlayLaneMissing(LaneId),
-    ExecStateLaneMissing(LaneId),
     ReservedLane(LaneId),
 }
 

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use similar::TextDiff;
 
 use crate::vfs::LaneFs;
-use crate::{FilePath, LaneOpSummary};
+use crate::{FilePath, LaneExecState, LaneId, LaneOpSummary};
 
 use super::error::{CliError, CliResult};
 use super::output::{
@@ -32,27 +32,23 @@ pub(super) fn review_lanes(fs: &LaneFs, lane: Option<&str>) -> CliResult<Vec<Str
 
 pub(super) fn collect_review(
     fs: &LaneFs,
+    last_exec: &BTreeMap<LaneId, LaneExecState>,
     lanes: &[String],
 ) -> CliResult<(ReviewSummary, Vec<ReviewLaneSummary>, Vec<ReviewPathOutput>)> {
     let mut by_path = BTreeMap::<FilePath, ReviewPathDraft>::new();
     let mut by_lane = lanes
         .iter()
         .map(|lane| {
-            fs.repo()
-                .last_exec(lane)
-                .map(|last_exec| {
-                    (
-                        lane.clone(),
-                        ReviewLaneSummaryDraft {
-                            lane: lane.clone(),
-                            last_exec: last_exec.cloned(),
-                            ..ReviewLaneSummaryDraft::default()
-                        },
-                    )
-                })
-                .map_err(CliError::from)
+            (
+                lane.clone(),
+                ReviewLaneSummaryDraft {
+                    lane: lane.clone(),
+                    last_exec: last_exec.get(lane).cloned(),
+                    ..ReviewLaneSummaryDraft::default()
+                },
+            )
         })
-        .collect::<CliResult<BTreeMap<_, _>>>()?;
+        .collect::<BTreeMap<_, _>>();
     let mut clean_ops = 0usize;
     let mut conflicted_ops = 0usize;
 
@@ -378,7 +374,7 @@ struct ReviewLaneSummaryDraft {
     changed_paths: usize,
     clean_ops: usize,
     conflicted_ops: usize,
-    last_exec: Option<crate::LaneExecState>,
+    last_exec: Option<LaneExecState>,
 }
 
 impl ReviewLaneSummaryDraft {

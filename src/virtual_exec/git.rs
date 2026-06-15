@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::support::path_label;
 use super::types::VirtualExecError;
+use crate::path_label;
 
 static NEXT_TEMP_GIT_ID: AtomicU64 = AtomicU64::new(1);
 

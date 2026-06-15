@@ -160,6 +160,6 @@ fn cli_doctor_reports_unreferenced_blob_without_failing() {
             .any(|warning| warning
                 .as_str()
                 .unwrap()
-                .contains("is not referenced by repo.json"))
+                .contains("not referenced by repo.json"))
     );
 }

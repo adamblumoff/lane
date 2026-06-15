@@ -774,10 +774,10 @@ fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|action| action["command"] == serde_json::json!(["run", "login"]))
+            .any(|action| action["command"] == serde_json::json!(["compare", "login"]))
     );
 
-    let run_detail = repo.run_json(["run", "login"]);
+    let run_detail = repo.run_json(["compare", "login"]);
     assert_eq!(run_detail["run"]["name"], "login");
     assert_eq!(run_detail["attempts"][1]["lane"], "login-2");
     assert_eq!(run_detail["attempts"][1]["checks_passed"], 1);
@@ -804,13 +804,13 @@ fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
     );
     assert_eq!(repo.run_json(["review"])["summary"]["lanes"], 0);
     assert_command_fails_with(
-        &repo.run_unchecked(&["run", "login"]),
+        &repo.run_unchecked(&["compare", "login"]),
         "run \"login\" is not readable",
     );
 }
 
 #[test]
-fn cli_run_detail_keeps_cleanup_available_when_base_changed() {
+fn cli_compare_keeps_cleanup_available_when_base_changed() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = 'original';");
 
@@ -828,7 +828,7 @@ fn cli_run_detail_keeps_cleanup_available_when_base_changed() {
     ]);
     repo.write("src/base.ts", b"export const base = 'parent';");
 
-    let detail = repo.run_json(["run", "stale"]);
+    let detail = repo.run_json(["compare", "stale"]);
     assert!(
         detail["review_error"]
             .as_str()
@@ -849,7 +849,7 @@ fn cli_run_detail_keeps_cleanup_available_when_base_changed() {
             .any(|action| action["command"] == serde_json::json!(["discard-run", "stale"]))
     );
 
-    let human = repo.run_text(["run", "stale", "--human"]);
+    let human = repo.run_text(["compare", "stale", "--human"]);
     assert!(human.contains("summary: 1 attempt, 0 checks, review unavailable"));
     assert!(human.contains("discard_run: lane discard-run stale"));
     assert!(human.contains("Needs decision\n  - review unavailable:"));

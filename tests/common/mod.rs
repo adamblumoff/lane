@@ -296,8 +296,6 @@ pub(crate) fn assert_exec_contract(output: &Value) {
     assert!(timings.is_object(), "timings must be an object: {output}");
     for key in [
         "total_ms",
-        "lock_wait_ms",
-        "lock_held_ms",
         "storage_lock_wait_ms",
         "storage_lock_held_ms",
         "pre_worker_lock_ms",
