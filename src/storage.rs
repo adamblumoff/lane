@@ -6,6 +6,8 @@ mod atomic;
 mod blobs;
 #[path = "storage/doctor.rs"]
 mod doctor;
+#[path = "storage/gc.rs"]
+mod gc;
 #[path = "storage/lock.rs"]
 mod lock;
 #[path = "storage/manifest.rs"]
@@ -26,6 +28,8 @@ use crate::{LaneExecState, LaneId, LaneRepo};
 pub(crate) use atomic::persist_bytes;
 #[allow(unused_imports)]
 pub(crate) use doctor::{StorageDoctorReport, doctor_storage};
+#[allow(unused_imports)]
+pub(crate) use gc::{StorageGcReport, gc_storage};
 #[allow(unused_imports)]
 pub(crate) use lock::{RepoLock, acquire_repo_lock, is_lock_contention};
 #[allow(unused_imports)]

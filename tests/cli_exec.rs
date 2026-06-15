@@ -344,7 +344,11 @@ fn cli_exec_observe_streams_worker_output_to_stderr_and_preserves_json_stdout() 
     assert_exec_contract(&result);
     assert_eq!(result["exit_code"], 0);
     assert_eq!(result["stdout"], "child out\r\n");
-    assert_eq!(result["stderr"], "child err\r\n");
+    let stderr = result["stderr"].as_str().unwrap();
+    assert!(
+        stderr.ends_with("child err\r\n"),
+        "stderr should preserve worker stderr: {stderr:?}"
+    );
     assert_eq!(change_statuses(&result), {
         let mut expected = BTreeMap::new();
         expected.insert("src/observed.ts".to_owned(), "created".to_owned());

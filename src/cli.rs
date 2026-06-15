@@ -98,6 +98,8 @@ enum Command {
     PromoteClean { lane: String },
     #[command(about = "Remove a lane and its private changes")]
     Discard { lane: String },
+    #[command(about = "Delete unreferenced blob files from lane storage")]
+    Gc,
     #[command(about = "Validate lane storage and report repairable state")]
     Doctor,
 }
@@ -155,6 +157,7 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
         Command::Discard { lane } => {
             commands::discard(&repo_root, &lane).map(|()| ExitCode::SUCCESS)
         }
+        Command::Gc => commands::gc(&repo_root).map(|()| ExitCode::SUCCESS),
         Command::Doctor => commands::doctor(&repo_root),
     }
 }

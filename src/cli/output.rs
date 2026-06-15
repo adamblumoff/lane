@@ -21,6 +21,15 @@ pub(super) struct DoctorOutput {
     pub(super) report: crate::storage::StorageDoctorReport,
 }
 
+#[derive(Serialize)]
+pub(super) struct GcOutput {
+    pub(super) repo_root: String,
+    pub(super) storage_path: String,
+    pub(super) blobs_removed: usize,
+    pub(super) bytes_removed: u64,
+    pub(super) blobs_remaining: usize,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct ReviewSummary {
     pub(super) lanes: usize,
