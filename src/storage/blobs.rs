@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -49,8 +49,14 @@ pub(super) fn report_blob_inventory(
     referenced_blobs: &BTreeSet<String>,
     report: &mut StorageDoctorReport,
 ) -> io::Result<()> {
-    let present_blobs = present_blob_references(storage_root, report)?;
-    let unreferenced = present_blobs.difference(referenced_blobs).count();
+    let inventory = blob_inventory(storage_root)?;
+    report.blobs_present += inventory.blobs_present;
+    report.warnings.extend(inventory.warnings);
+
+    let unreferenced = inventory
+        .present_references
+        .difference(referenced_blobs)
+        .count();
     report.blobs_unreferenced += unreferenced;
     if unreferenced == 1 {
         report
@@ -64,24 +70,21 @@ pub(super) fn report_blob_inventory(
     Ok(())
 }
 
-fn present_blob_references(
-    storage_root: &Path,
-    report: &mut StorageDoctorReport,
-) -> io::Result<BTreeSet<String>> {
+pub(super) fn blob_inventory(storage_root: &Path) -> io::Result<BlobInventory> {
     let dir = storage_root.join("blobs").join("sha256");
     if !dir.exists() {
-        return Ok(BTreeSet::new());
+        return Ok(BlobInventory::default());
     }
-    let mut blobs = BTreeSet::new();
+    let mut inventory = BlobInventory::default();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-        report.blobs_present += 1;
+        inventory.blobs_present += 1;
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            report
+            inventory
                 .warnings
                 .push(format!("blob file {} has a non-UTF-8 name", path.display()));
             continue;
@@ -89,15 +92,24 @@ fn present_blob_references(
         let reference = format!("sha256/{file_name}");
         match validate_blob_reference(&reference) {
             Ok(()) => {
-                blobs.insert(reference);
+                let bytes = entry.metadata()?.len();
+                inventory.present_references.insert(reference.clone());
+                inventory.files.insert(
+                    reference.clone(),
+                    BlobFile {
+                        reference,
+                        path,
+                        bytes,
+                    },
+                );
             }
-            Err(error) => report.warnings.push(format!(
+            Err(error) => inventory.warnings.push(format!(
                 "blob file {} is not a valid sha256 blob name: {error}",
                 path.display()
             )),
         }
     }
-    Ok(blobs)
+    Ok(inventory)
 }
 
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
@@ -106,4 +118,19 @@ pub(super) fn sha256_hex(bytes: &[u8]) -> String {
 
 pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct BlobInventory {
+    pub(super) blobs_present: usize,
+    pub(super) present_references: BTreeSet<String>,
+    pub(super) files: BTreeMap<String, BlobFile>,
+    pub(super) warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct BlobFile {
+    pub(super) reference: String,
+    pub(super) path: PathBuf,
+    pub(super) bytes: u64,
 }

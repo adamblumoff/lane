@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::{
-    acquire_repo_lock, doctor_storage, is_lock_contention, load_last_exec, load_repo,
+    acquire_repo_lock, doctor_storage, gc_storage, is_lock_contention, load_last_exec, load_repo,
     persist_last_exec, persist_repo,
 };
 
@@ -182,6 +182,60 @@ fn unreferenced_blob_is_reported_as_warning_not_error() {
 }
 
 #[test]
+fn storage_gc_removes_unreferenced_blobs_without_touching_referenced_blobs() {
+    let temp = TempStorage::new();
+    let repo = repo_with_agent_file();
+    persist_repo(temp.path(), &repo).unwrap();
+    let referenced_blob = first_blob_path(temp.path());
+    let stale_blob = stale_blob_path(temp.path());
+    fs::write(&stale_blob, b"stale").unwrap();
+
+    let gc = gc_storage(temp.path()).unwrap();
+
+    assert_eq!(gc.blobs_removed, 1);
+    assert_eq!(gc.bytes_removed, 5);
+    assert_eq!(gc.blobs_remaining, 1);
+    assert!(referenced_blob.exists());
+    assert!(!stale_blob.exists());
+
+    let report = doctor_storage(temp.path()).unwrap();
+    assert!(report.is_healthy());
+    assert_eq!(report.blobs_unreferenced, 0);
+    assert!(report.warnings.is_empty());
+}
+
+#[test]
+fn storage_gc_rejects_missing_manifest_without_deleting_blobs() {
+    let temp = TempStorage::new();
+    let stale_blob = stale_blob_path(temp.path());
+    fs::write(&stale_blob, b"stale").unwrap();
+
+    let error = gc_storage(temp.path()).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("without repo.json"));
+    assert!(stale_blob.exists());
+}
+
+#[test]
+fn storage_gc_rejects_corrupt_manifest_without_deleting_blobs() {
+    let temp = TempStorage::new();
+    let repo = repo_with_agent_file();
+    persist_repo(temp.path(), &repo).unwrap();
+    let referenced_blob = first_blob_path(temp.path());
+    let stale_blob = stale_blob_path(temp.path());
+    fs::write(&stale_blob, b"stale").unwrap();
+    fs::write(temp.path().join("repo.json"), b"not json").unwrap();
+
+    let error = gc_storage(temp.path()).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("cannot gc unhealthy"));
+    assert!(referenced_blob.exists());
+    assert!(stale_blob.exists());
+}
+
+#[test]
 fn reserved_manifest_lane_is_reported_by_doctor() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
@@ -252,6 +306,13 @@ fn first_blob_path(storage_root: &Path) -> PathBuf {
         .expect("test expected one blob file")
         .unwrap()
         .path()
+}
+
+fn stale_blob_path(storage_root: &Path) -> PathBuf {
+    let path = storage_root
+        .join("blobs/sha256/0000000000000000000000000000000000000000000000000000000000000000");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    path
 }
 
 struct TempStorage {

@@ -3,11 +3,11 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::storage::doctor_storage;
+use crate::storage::{doctor_storage, gc_storage};
 
 use super::error::{CliError, CliResult};
 use super::output::{
-    DiscardOutput, DoctorOutput, PromoteCleanOutput, PromoteOpsOutput, ResolveOpOutput,
+    DiscardOutput, DoctorOutput, GcOutput, PromoteCleanOutput, PromoteOpsOutput, ResolveOpOutput,
     ReviewOutput, ShowOpOutput,
 };
 use super::preview::byte_preview;
@@ -91,6 +91,20 @@ pub(super) fn doctor(repo_root: &Path) -> CliResult<ExitCode> {
     } else {
         Ok(ExitCode::FAILURE)
     }
+}
+
+pub(super) fn gc(repo_root: &Path) -> CliResult<()> {
+    let storage_path = storage_path(repo_root);
+    let report = gc_storage(&storage_path)?;
+    let output = GcOutput {
+        repo_root: path_label(repo_root),
+        storage_path: path_label(storage_path),
+        blobs_removed: report.blobs_removed,
+        bytes_removed: report.bytes_removed,
+        blobs_remaining: report.blobs_remaining,
+    };
+    print_json(&output)?;
+    Ok(())
 }
 
 pub(super) fn show_op(repo_root: &Path, lane: &str, path: &str, op_id: &str) -> CliResult<()> {

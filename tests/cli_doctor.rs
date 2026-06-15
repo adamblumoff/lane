@@ -163,3 +163,39 @@ fn cli_doctor_reports_unreferenced_blob_without_failing() {
                 .contains("not referenced by repo.json"))
     );
 }
+
+#[test]
+fn cli_gc_removes_unreferenced_blobs_and_doctor_drops_to_zero() {
+    let repo = repo_with_agent_exec();
+    let stale_blob =
+        ".lane/blobs/sha256/0000000000000000000000000000000000000000000000000000000000000000";
+    repo.write(stale_blob, b"stale");
+
+    let before = repo.run_json(["doctor"]);
+    assert_eq!(before["report"]["blobs_unreferenced"], 1);
+
+    let gc = repo.run_json(["gc"]);
+    assert_eq!(gc["blobs_removed"], 1);
+    assert_eq!(gc["bytes_removed"], 5);
+    assert_eq!(gc["blobs_remaining"], 1);
+    assert!(!repo.path().join(stale_blob).exists());
+
+    let after = repo.run_json(["doctor"]);
+    assert_eq!(after["healthy"], true);
+    assert_eq!(after["report"]["blobs_unreferenced"], 0);
+    assert!(after["report"]["warnings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn cli_gc_rejects_corrupt_manifest_without_deleting_blobs() {
+    let repo = repo_with_agent_exec();
+    let stale_blob =
+        ".lane/blobs/sha256/0000000000000000000000000000000000000000000000000000000000000000";
+    repo.write(stale_blob, b"stale");
+    fs::write(repo.path().join(".lane/repo.json"), b"not json").unwrap();
+
+    let output = repo.run_unchecked(&["gc"]);
+
+    assert_command_fails_with(&output, "cannot gc unhealthy");
+    assert!(repo.path().join(stale_blob).exists());
+}
