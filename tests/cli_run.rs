@@ -5,12 +5,12 @@ mod common;
 use common::*;
 
 #[test]
-fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
+fn cli_run_runs_command_in_virtual_mount_and_accepts_output() {
     let repo = TempRepo::new();
     repo.write("src/example.ts", b"export const mode = 'base';\n");
 
-    let exec_result = repo.run_json([
-        "exec",
+    let run_result = repo.run_json([
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -18,24 +18,19 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
         "-Command",
         "$ErrorActionPreference = \"Stop\"; if ((Resolve-Path $env:LANE_REPO_ROOT).ProviderPath -ne (Get-Location).ProviderPath) { throw \"LANE_REPO_ROOT must be the mounted view\" }; if ((Resolve-Path $env:LANE_VIEW_ROOT).ProviderPath -ne (Get-Location).ProviderPath) { throw \"LANE_VIEW_ROOT must be the mounted view\" }; if ($env:LANE_STORAGE_PATH) { throw \"LANE_STORAGE_PATH leaked\" }; if ($env:LANE_EXEC_MODE -ne \"virtual_mount\") { throw \"expected virtual_mount mode\" }; Set-Content -Path src/example.ts -Value \"export const mode = 'agent-a';\" -NoNewline; Set-Content -Path src/created.ts -Value \"export const created = true;\" -NoNewline",
     ]);
-    assert_exec_contract(&exec_result);
-    assert_eq!(exec_result["lane"], "agent-a");
-    assert_eq!(exec_result["mode"], "virtual_mount");
-    assert_eq!(exec_result["exit_code"], 0);
-    assert_eq!(exec_result["worker_error"], Value::Null);
-    assert!(exec_result["warnings"].as_array().unwrap().is_empty());
-    assert!(exec_result["timings"]["storage_lock_held_ms"].is_u64());
-    assert!(
-        exec_result["projected_paths"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    assert_run_contract(&run_result);
+    assert_eq!(run_result["lane"], "agent-a");
+    assert_eq!(run_result["mode"], "virtual_mount");
+    assert_eq!(run_result["exit_code"], 0);
+    assert_eq!(run_result["worker_error"], Value::Null);
+    assert!(run_result["warnings"].as_array().unwrap().is_empty());
+    assert!(run_result["timings"]["storage_lock_held_ms"].is_u64());
+    assert!(run_result["projected_paths"].as_array().unwrap().is_empty());
     assert_eq!(
-        string_array(&exec_result["changed_paths"]),
+        string_array(&run_result["changed_paths"]),
         vec!["src/created.ts", "src/example.ts"]
     );
-    assert_eq!(change_statuses(&exec_result), {
+    assert_eq!(change_statuses(&run_result), {
         let mut expected = BTreeMap::new();
         expected.insert("src/created.ts".to_owned(), "created".to_owned());
         expected.insert("src/example.ts".to_owned(), "modified".to_owned());
@@ -48,7 +43,7 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
     );
     assert!(!repo.path().join("src/created.ts").exists());
     assert!(repo.path().join(".lane/repo.json").exists());
-    assert!(repo.path().join(".lane/last_exec/agent-a.json").exists());
+    assert!(repo.path().join(".lane/last_run/agent-a.json").exists());
     assert!(
         fs::read_dir(repo.path().join(".lane/blobs/sha256"))
             .unwrap()
@@ -67,7 +62,7 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
         expected
     });
 
-    let diff = repo.run_text(["diff", "agent-a"]);
+    let diff = repo.run_text(["review", "agent-a", "--diff"]);
     assert!(diff.contains("--- base/src/example.ts"));
     assert!(diff.contains("+++ agent-a/src/example.ts"));
     assert!(diff.contains("-export const mode = 'base';"));
@@ -75,8 +70,8 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
     assert!(diff.contains("+++ agent-a/src/created.ts"));
 
     let example_ops = review_clean_op_ids(review_path(&review, "src/example.ts"));
-    let promoted_file = run_promote_ops_json(&repo, "agent-a", "src/example.ts", &example_ops);
-    assert_eq!(change_statuses_from_key(&promoted_file, "promoted"), {
+    let accepted_file = run_accept_ops_json(&repo, "agent-a", "src/example.ts", &example_ops);
+    assert_eq!(change_statuses_from_key(&accepted_file, "accepted"), {
         let mut expected = BTreeMap::new();
         expected.insert("src/example.ts".to_owned(), "modified".to_owned());
         expected
@@ -94,8 +89,8 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
         expected
     });
 
-    let promoted_lane = repo.run_json(["promote-clean", "agent-a"]);
-    assert_eq!(change_statuses_from_key(&promoted_lane, "promoted"), {
+    let accepted_lane = repo.run_json(["accept", "agent-a"]);
+    assert_eq!(change_statuses_from_key(&accepted_lane, "accepted"), {
         let mut expected = BTreeMap::new();
         expected.insert("src/created.ts".to_owned(), "created".to_owned());
         expected
@@ -114,12 +109,12 @@ fn cli_exec_runs_command_in_virtual_mount_and_promotes_output() {
 }
 
 #[test]
-fn cli_exec_projects_existing_lane_file_without_worker_changes() {
+fn cli_run_projects_existing_lane_file_without_worker_changes() {
     let repo = TempRepo::new();
     repo.write("src/example.ts", b"export const mode = 'base';\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -129,7 +124,7 @@ fn cli_exec_projects_existing_lane_file_without_worker_changes() {
     ]);
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -154,12 +149,12 @@ fn cli_exec_projects_existing_lane_file_without_worker_changes() {
 }
 
 #[test]
-fn cli_exec_projects_existing_lane_deletion_without_worker_changes() {
+fn cli_run_projects_existing_lane_deletion_without_worker_changes() {
     let repo = TempRepo::new();
     repo.write("src/example.ts", b"export const mode = 'base';\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -169,7 +164,7 @@ fn cli_exec_projects_existing_lane_deletion_without_worker_changes() {
     ]);
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -197,12 +192,12 @@ fn cli_exec_projects_existing_lane_deletion_without_worker_changes() {
 }
 
 #[test]
-fn cli_exec_deleting_lane_created_file_clears_overlay() {
+fn cli_run_deleting_lane_created_file_clears_overlay() {
     let repo = TempRepo::new();
     repo.write("src/example.ts", b"export const mode = 'base';\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -212,7 +207,7 @@ fn cli_exec_deleting_lane_created_file_clears_overlay() {
     ]);
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -242,7 +237,7 @@ fn cli_exec_deleting_lane_created_file_clears_overlay() {
 }
 
 #[test]
-fn cli_exec_parent_relative_escape_stays_inside_virtual_lane_view() {
+fn cli_run_parent_relative_escape_stays_inside_virtual_lane_view() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;\n");
     let escaped_name = format!("escaped-by-parent-{}.txt", unique_suffix());
@@ -250,7 +245,7 @@ fn cli_exec_parent_relative_escape_stays_inside_virtual_lane_view() {
     assert!(!parent_candidate.exists());
 
     let result = output_json(&repo.run_vec(vec![
-        "exec".to_owned(),
+        "run".to_owned(),
         "escape-check".to_owned(),
         "--".to_owned(),
         "pwsh".to_owned(),
@@ -261,7 +256,7 @@ fn cli_exec_parent_relative_escape_stays_inside_virtual_lane_view() {
         ),
     ]));
 
-    assert_exec_contract(&result);
+    assert_run_contract(&result);
     assert_eq!(result["exit_code"], 0);
     assert_eq!(result["worker_error"], Value::Null);
     assert_eq!(
@@ -276,7 +271,7 @@ fn cli_exec_parent_relative_escape_stays_inside_virtual_lane_view() {
     assert!(!repo.path().join(&escaped_name).exists());
     assert!(!parent_candidate.exists());
 
-    repo.run_json(["promote-clean", "escape-check"]);
+    repo.run_json(["accept", "escape-check"]);
     assert_eq!(
         fs::read(repo.path().join(&escaped_name)).unwrap(),
         b"virtualized"
@@ -284,7 +279,7 @@ fn cli_exec_parent_relative_escape_stays_inside_virtual_lane_view() {
 }
 
 #[test]
-fn cli_exec_releases_storage_lock_while_worker_runs() {
+fn cli_run_releases_storage_lock_while_worker_runs() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");
     let marker = std::env::temp_dir().join(format!(
@@ -296,7 +291,7 @@ fn cli_exec_releases_storage_lock_while_worker_runs() {
 
     let root = repo.path().to_path_buf();
     let job = thread::spawn(move || {
-        run_lane_exec(
+        run_lane_command(
             &root,
             "slow-worker",
             &format!(
@@ -324,12 +319,12 @@ fn cli_exec_releases_storage_lock_while_worker_runs() {
 }
 
 #[test]
-fn cli_exec_observe_streams_worker_output_to_stderr_and_preserves_json_stdout() {
+fn cli_run_observe_streams_worker_output_to_stderr_and_preserves_json_stdout() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");
 
     let output = repo.run([
-        "exec",
+        "run",
         "observed",
         "--observe",
         "--",
@@ -341,7 +336,7 @@ fn cli_exec_observe_streams_worker_output_to_stderr_and_preserves_json_stdout() 
 
     assert!(output.status.success());
     let result = output_json(&output);
-    assert_exec_contract(&result);
+    assert_run_contract(&result);
     assert_eq!(result["exit_code"], 0);
     assert_eq!(result["stdout"], "child out\r\n");
     let stderr = result["stderr"].as_str().unwrap();
@@ -356,15 +351,15 @@ fn cli_exec_observe_streams_worker_output_to_stderr_and_preserves_json_stdout() 
     });
 
     let observed = String::from_utf8(output.stderr).unwrap();
-    assert!(observed.contains("[lane exec observed +"));
+    assert!(observed.contains("[lane run observed +"));
     assert!(observed.contains("starting worker: pwsh"));
-    assert!(observed.contains("[lane exec observed stdout] child out"));
-    assert!(observed.contains("[lane exec observed stderr] child err"));
+    assert!(observed.contains("[lane run observed stdout] child out"));
+    assert!(observed.contains("[lane run observed stderr] child err"));
     assert!(observed.contains("storage done"));
 }
 
 #[test]
-fn cli_exec_parallel_repeated_blob_writes_do_not_fail() {
+fn cli_run_parallel_repeated_blob_writes_do_not_fail() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");
     let root = repo.path().to_path_buf();
@@ -379,7 +374,7 @@ fn cli_exec_parallel_repeated_blob_writes_do_not_fail() {
                 let script = format!(
                     "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Force -Path stress | Out-Null; $bytes = New-Object byte[] 4096; for ($j = 0; $j -lt $bytes.Length; $j++) {{ $bytes[$j] = {byte} }}; for ($i = 0; $i -lt 80; $i++) {{ [IO.File]::WriteAllBytes(('stress/{name}-{{0:D3}}.bin' -f $i), $bytes) }}"
                 );
-                run_lane_exec(&root, &lane, &script)
+                run_lane_command(&root, &lane, &script)
             })
         })
         .collect::<Vec<_>>();
@@ -387,7 +382,7 @@ fn cli_exec_parallel_repeated_blob_writes_do_not_fail() {
     for job in jobs {
         let output = assert_success(job.join().unwrap());
         let result = output_json(&output);
-        assert_exec_contract(&result);
+        assert_run_contract(&result);
         assert_eq!(result["exit_code"], 0);
         assert_eq!(result["worker_error"], Value::Null);
         assert_eq!(result["changes"].as_array().unwrap().len(), 80);
@@ -400,11 +395,11 @@ fn cli_exec_parallel_repeated_blob_writes_do_not_fail() {
 }
 
 #[test]
-fn cli_exec_returns_json_for_child_failure() {
+fn cli_run_returns_json_for_child_failure() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';");
 
-    let output = run_lane_exec(
+    let output = run_lane_command(
         repo.path(),
         "failing-lane",
         "$ErrorActionPreference = \"Continue\"; Write-Error \"simulated failure\"; exit 7",
@@ -413,7 +408,7 @@ fn cli_exec_returns_json_for_child_failure() {
     assert!(!output.status.success());
     assert!(output.stderr.is_empty());
     let result = output_json(&output);
-    assert_exec_contract(&result);
+    assert_run_contract(&result);
     assert_eq!(result["lane"], "failing-lane");
     assert_eq!(result["exit_code"], 7);
     assert_eq!(result["worker_error"], Value::Null);
@@ -427,18 +422,18 @@ fn cli_exec_returns_json_for_child_failure() {
 }
 
 #[test]
-fn cli_exec_buffers_chunked_writes_until_worker_finishes() {
+fn cli_run_buffers_chunked_writes_until_worker_finishes() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "chunked",
         "--",
         "pwsh",
         "-NoProfile",
         "-Command",
-        "$ErrorActionPreference = \"Stop\"; $stream = [IO.File]::Open('src/big.bin', 'Create', 'Write', 'None'); try { $chunk = New-Object byte[] 4096; for ($i = 0; $i -lt 256; $i++) { $stream.Write($chunk, 0, $chunk.Length) } } finally { $stream.Close() }",
+        "$ErrorActionPreference = \"Stop\"; $stream = [IO.File]::Open('src/big.bin', 'Create', 'Write', 'None'); $chunk = New-Object byte[] 4096; for ($i = 0; $i -lt 256; $i++) { $stream.Write($chunk, 0, $chunk.Length) }; $stream.Close()",
     ]);
 
     assert_eq!(result["exit_code"], 0);
@@ -452,7 +447,7 @@ fn cli_exec_buffers_chunked_writes_until_worker_finishes() {
     });
     assert!(!repo.path().join("src/big.bin").exists());
 
-    repo.run_json(["promote-clean", "chunked"]);
+    repo.run_json(["accept", "chunked"]);
     assert_eq!(
         fs::metadata(repo.path().join("src/big.bin")).unwrap().len(),
         1 << 20
@@ -460,12 +455,12 @@ fn cli_exec_buffers_chunked_writes_until_worker_finishes() {
 }
 
 #[test]
-fn cli_exec_creates_nested_file_in_new_directory() {
+fn cli_run_creates_nested_file_in_new_directory() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "nested-create",
         "--",
         "pwsh",
@@ -487,7 +482,7 @@ fn cli_exec_creates_nested_file_in_new_directory() {
     });
     assert!(!repo.path().join("src/nested").exists());
 
-    repo.run_json(["promote-clean", "nested-create"]);
+    repo.run_json(["accept", "nested-create"]);
     assert_eq!(
         fs::read(repo.path().join("src/nested/created.ts")).unwrap(),
         b"export const created = true;"
@@ -495,12 +490,12 @@ fn cli_exec_creates_nested_file_in_new_directory() {
 }
 
 #[test]
-fn cli_exec_replaces_file_with_directory_tree() {
+fn cli_run_replaces_file_with_directory_tree() {
     let repo = TempRepo::new();
     repo.write("src/swap", b"base file");
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "file-to-dir",
         "--",
         "pwsh",
@@ -526,7 +521,7 @@ fn cli_exec_replaces_file_with_directory_tree() {
         b"base file"
     );
 
-    repo.run_json(["promote-clean", "file-to-dir"]);
+    repo.run_json(["accept", "file-to-dir"]);
     assert!(repo.path().join("src/swap").is_dir());
     assert_eq!(
         fs::read(repo.path().join("src/swap/nested.txt")).unwrap(),
@@ -535,12 +530,12 @@ fn cli_exec_replaces_file_with_directory_tree() {
 }
 
 #[test]
-fn cli_exec_replaces_directory_tree_with_file() {
+fn cli_run_replaces_directory_tree_with_file() {
     let repo = TempRepo::new();
     repo.write("src/swap/original.txt", b"original");
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "dir-to-file",
         "--",
         "pwsh",
@@ -567,7 +562,7 @@ fn cli_exec_replaces_directory_tree_with_file() {
         b"original"
     );
 
-    repo.run_json(["promote-clean", "dir-to-file"]);
+    repo.run_json(["accept", "dir-to-file"]);
     assert!(repo.path().join("src/swap").is_file());
     assert_eq!(
         fs::read(repo.path().join("src/swap")).unwrap(),
@@ -577,12 +572,12 @@ fn cli_exec_replaces_directory_tree_with_file() {
 }
 
 #[test]
-fn cli_exec_recursive_directory_delete_hides_descendants_immediately() {
+fn cli_run_recursive_directory_delete_hides_descendants_immediately() {
     let repo = TempRepo::new();
     repo.write("src/tree/nested/original.txt", b"original");
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "delete-tree",
         "--",
         "pwsh",
@@ -603,17 +598,17 @@ fn cli_exec_recursive_directory_delete_hides_descendants_immediately() {
     });
     assert!(repo.path().join("src/tree/nested/original.txt").exists());
 
-    repo.run_json(["promote-clean", "delete-tree"]);
+    repo.run_json(["accept", "delete-tree"]);
     assert!(!repo.path().join("src/tree/nested/original.txt").exists());
 }
 
 #[test]
-fn cli_exec_recursive_directory_delete_hides_descendants_across_path_casing() {
+fn cli_run_recursive_directory_delete_hides_descendants_across_path_casing() {
     let repo = TempRepo::new();
     repo.write("src/tree/nested/original.txt", b"original");
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "delete-tree-case",
         "--",
         "pwsh",
@@ -635,13 +630,13 @@ fn cli_exec_recursive_directory_delete_hides_descendants_across_path_casing() {
 }
 
 #[test]
-fn cli_exec_recursive_directory_delete_allows_recreated_subtree_in_same_session() {
+fn cli_run_recursive_directory_delete_allows_recreated_subtree_in_same_session() {
     let repo = TempRepo::new();
     repo.write("src/tree/nested/original.txt", b"original");
     repo.write("src/tree/other.txt", b"other");
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "recreate-tree",
         "--",
         "pwsh",
@@ -663,7 +658,7 @@ fn cli_exec_recursive_directory_delete_allows_recreated_subtree_in_same_session(
         expected
     });
 
-    repo.run_json(["promote-clean", "recreate-tree"]);
+    repo.run_json(["accept", "recreate-tree"]);
     assert!(!repo.path().join("src/tree/nested/original.txt").exists());
     assert!(!repo.path().join("src/tree/other.txt").exists());
     assert_eq!(
@@ -673,12 +668,12 @@ fn cli_exec_recursive_directory_delete_allows_recreated_subtree_in_same_session(
 }
 
 #[test]
-fn cli_exec_case_only_rename_does_not_promote_as_delete() {
+fn cli_run_case_only_rename_does_not_accept_as_delete() {
     let repo = TempRepo::new();
     repo.write("src/case.txt", b"case");
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "case-rename",
         "--",
         "cmd",
@@ -694,18 +689,18 @@ fn cli_exec_case_only_rename_does_not_promote_as_delete() {
             .any(|status| status == "deleted")
     );
 
-    repo.run_json(["promote-clean", "case-rename"]);
+    repo.run_json(["accept", "case-rename"]);
     assert_eq!(fs::read(repo.path().join("src/case.txt")).unwrap(), b"case");
 }
 
 #[test]
-fn cli_exec_runs_agent_like_process_with_git_view_and_atomic_save() {
+fn cli_run_runs_agent_like_process_with_git_view_and_atomic_save() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';\n");
     repo.init_git_repo();
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "agent-realish",
         "--",
         "pwsh",
@@ -748,7 +743,7 @@ if (-not ($status -match "M src/login.tsx")) {
     );
     assert!(!repo.path().join("src/login.tsx.tmp").exists());
 
-    repo.run_json(["promote-clean", "agent-realish"]);
+    repo.run_json(["accept", "agent-realish"]);
     assert_eq!(
         fs::read(repo.path().join("src/login.tsx")).unwrap(),
         b"export const design = 'agent-realish';"
@@ -756,22 +751,22 @@ if (-not ($status -match "M src/login.tsx")) {
 }
 
 #[test]
-fn cli_exec_keeps_lane_and_git_metadata_private_for_agent_processes() {
+fn cli_run_keeps_lane_and_git_metadata_private_for_agent_processes() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;\n");
     repo.init_git_repo();
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "agent-git",
         "--",
         "pwsh",
         "-NoProfile",
         "-Command",
-        "$ErrorActionPreference = \"Stop\"; git status --short | Out-Null; $rootNames = @(Get-ChildItem -Force -Name .); foreach ($metadataName in @('.lane', '.git')) { if ($rootNames -contains $metadataName) { throw \"metadata entry unexpectedly visible: $metadataName\" } }; foreach ($path in @('.lane/agent-owned.json', '.LANE/agent-owned.json', '.git/index.lock', '.GIT/index.lock')) { $wrote = $false; try { Set-Content -LiteralPath $path -Value nope -NoNewline -ErrorAction Stop; $wrote = $true } catch { } if ($wrote) { throw \"metadata write unexpectedly succeeded: $path\" } }; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
+        "$ErrorActionPreference = \"Stop\"; git status --short | Out-Null; $rootNames = @(Get-ChildItem -Force -Name .); foreach ($metadataName in @('.lane', '.git')) { if ($rootNames -contains $metadataName) { throw \"metadata entry unexpectedly visible: $metadataName\" } }; foreach ($path in @('.lane/agent-owned.json', '.LANE/agent-owned.json', '.git/index.lock', '.GIT/index.lock')) { $writeErrors = @(); Set-Content -LiteralPath $path -Value nope -NoNewline -ErrorAction SilentlyContinue -ErrorVariable +writeErrors; if ($writeErrors.Count -eq 0) { throw \"metadata write unexpectedly succeeded: $path\" } }; Set-Content -Path src/agent.ts -Value \"export const agent = true;\" -NoNewline",
     ]);
 
-    assert_exec_contract(&result);
+    assert_run_contract(&result);
     assert_eq!(result["exit_code"], 0);
     assert_eq!(result["worker_error"], Value::Null);
     assert_eq!(string_array(&result["changed_paths"]), vec!["src/agent.ts"]);
@@ -789,7 +784,7 @@ fn cli_exec_keeps_lane_and_git_metadata_private_for_agent_processes() {
 }
 
 #[test]
-fn cli_exec_resolves_agent_command_shims_from_path() {
+fn cli_run_finds_agent_command_shims_from_path() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;\n");
     repo.write(
@@ -803,7 +798,7 @@ fn cli_exec_resolves_agent_command_shims_from_path() {
     );
 
     let result = repo.run_json_with_env(
-        ["exec", "shim-agent", "--", "fake-agent"],
+        ["run", "shim-agent", "--", "fake-agent"],
         [("PATH", path.as_str())],
     );
 

@@ -6,21 +6,21 @@ use common::*;
 use std::collections::BTreeSet;
 
 #[test]
-fn cli_exec_preserves_parallel_lane_outputs() {
+fn cli_run_preserves_parallel_lane_outputs() {
     let repo = TempRepo::new();
     repo.write("src/feature.ts", b"export const approach = 'base';");
 
     let root_a = repo.path().to_path_buf();
     let root_b = repo.path().to_path_buf();
     let job_a = thread::spawn(move || {
-        run_lane_exec(
+        run_lane_command(
             &root_a,
             "approach-a",
             "$ErrorActionPreference = \"Stop\"; Start-Sleep -Milliseconds 400; Set-Content -Path src/feature.ts -Value \"export const approach = 'a';\" -NoNewline; Set-Content -Path src/a.ts -Value \"export const a = true;\" -NoNewline",
         )
     });
     let job_b = thread::spawn(move || {
-        run_lane_exec(
+        run_lane_command(
             &root_b,
             "approach-b",
             "$ErrorActionPreference = \"Stop\"; Start-Sleep -Milliseconds 400; Set-Content -Path src/feature.ts -Value \"export const approach = 'b';\" -NoNewline; Set-Content -Path src/b.ts -Value \"export const b = true;\" -NoNewline",
@@ -29,14 +29,14 @@ fn cli_exec_preserves_parallel_lane_outputs() {
 
     let output_a = assert_success(job_a.join().unwrap());
     let output_b = assert_success(job_b.join().unwrap());
-    let exec_a = output_json(&output_a);
-    let exec_b = output_json(&output_b);
-    assert_eq!(exec_a["lane"], "approach-a");
-    assert_eq!(exec_b["lane"], "approach-b");
-    assert_eq!(exec_a["exit_code"], 0);
-    assert_eq!(exec_b["exit_code"], 0);
-    assert_eq!(exec_a["worker_error"], Value::Null);
-    assert_eq!(exec_b["worker_error"], Value::Null);
+    let run_a = output_json(&output_a);
+    let run_b = output_json(&output_b);
+    assert_eq!(run_a["lane"], "approach-a");
+    assert_eq!(run_b["lane"], "approach-b");
+    assert_eq!(run_a["exit_code"], 0);
+    assert_eq!(run_b["exit_code"], 0);
+    assert_eq!(run_a["worker_error"], Value::Null);
+    assert_eq!(run_b["worker_error"], Value::Null);
 
     assert_eq!(
         fs::read(repo.path().join("src/feature.ts")).unwrap(),
@@ -62,15 +62,15 @@ fn cli_exec_preserves_parallel_lane_outputs() {
     );
 
     let approach_b = repo.run_json(["review", "approach-b"]);
-    let promoted_clean = run_review_action_json(
+    let accepted_clean = run_review_action_json(
         &repo,
         review_action(
             &review_lane(&approach_b, "approach-b")["actions"],
-            "promote_clean",
+            "accept",
             "approach-b",
         ),
     );
-    assert_eq!(change_statuses_from_key(&promoted_clean, "promoted"), {
+    assert_eq!(change_statuses_from_key(&accepted_clean, "accepted"), {
         let mut expected = BTreeMap::new();
         expected.insert("src/b.ts".to_owned(), "created".to_owned());
         expected
@@ -81,20 +81,20 @@ fn cli_exec_preserves_parallel_lane_outputs() {
         &review_path(&conflict_review, "src/feature.ts")["conflicts"][0]["actions"];
     let shown = run_review_action_json(
         &repo,
-        review_action(conflict_actions, "show_op", "approach-b"),
+        review_action(conflict_actions, "detail", "approach-b"),
     );
-    let resolution = repo.path().join("approach-b-resolution.txt");
+    let replacement = repo.path().join("approach-b-replacement.txt");
     fs::write(
-        &resolution,
+        &replacement,
         shown["inserted"]["utf8"].as_str().unwrap().as_bytes(),
     )
     .unwrap();
-    let resolved = run_review_action_with_replacement_json(
+    let accepted = run_review_action_with_replacement_json(
         &repo,
-        review_action(conflict_actions, "resolve_op", "approach-b"),
-        &resolution,
+        review_action(conflict_actions, "accept", "approach-b"),
+        &replacement,
     );
-    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    assert!(accepted["remaining"].as_array().unwrap().is_empty());
 
     assert_eq!(
         fs::read(repo.path().join("src/feature.ts")).unwrap(),
@@ -108,12 +108,12 @@ fn cli_exec_preserves_parallel_lane_outputs() {
 }
 
 #[test]
-fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops() {
+fn cli_accept_ops_applies_selected_same_file_op_and_preserves_other_lane_ops() {
     let repo = TempRepo::new();
     repo.write("src/math.txt", b"alpha=1\nbeta=2\ngamma=3\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -122,7 +122,7 @@ fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops()
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/math.txt', \"alpha=10`nbeta=2`ngamma=30`n\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -137,10 +137,10 @@ fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops()
     assert_eq!(ops.len(), 2);
     let op_id = ops[0]["op"]["op_id"].as_str().unwrap().to_owned();
 
-    let promoted = repo.run_json(["promote-ops", "agent-a", "src/math.txt", op_id.as_str()]);
-    assert_eq!(string_array(&promoted["promoted_ops"]), vec![op_id.clone()]);
-    assert_eq!(promoted["promoted"][0]["ops"].as_array().unwrap().len(), 1);
-    assert_eq!(promoted["promoted"][0]["ops"][0]["op_id"], op_id);
+    let accepted = repo.run_json(["accept", "agent-a", "src/math.txt", op_id.as_str()]);
+    assert_eq!(string_array(&accepted["accepted_ops"]), vec![op_id.clone()]);
+    assert_eq!(accepted["accepted"][0]["ops"].as_array().unwrap().len(), 1);
+    assert_eq!(accepted["accepted"][0]["ops"][0]["op_id"], op_id);
     assert_eq!(
         fs::read(repo.path().join("src/math.txt")).unwrap(),
         b"alpha=10\nbeta=2\ngamma=3\n"
@@ -158,7 +158,7 @@ fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops()
         expected
     });
 
-    repo.run_json(["promote-clean", "agent-b"]);
+    repo.run_json(["accept", "agent-b"]);
     assert_eq!(
         fs::read(repo.path().join("src/math.txt")).unwrap(),
         b"alpha=10\nbeta=20\ngamma=3\n"
@@ -166,12 +166,12 @@ fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops()
 }
 
 #[test]
-fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
+fn cli_conflicts_and_accept_drive_op_level_orchestration() {
     let repo = TempRepo::new();
     repo.write("src/vars.txt", b"a=1\nb=2\nc=3\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -180,7 +180,7 @@ fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=A`nb=B`nc=C`n\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -202,14 +202,14 @@ fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
         vec!["agent-b"]
     );
 
-    let promoted = repo.run_json(["promote-clean", "agent-a"]);
-    assert_eq!(promoted["promoted_ops"].as_array().unwrap().len(), 1);
-    assert_eq!(promoted["promoted_ops"][0]["path"], "src/vars.txt");
+    let accepted = repo.run_json(["accept", "agent-a"]);
+    assert_eq!(accepted["accepted_ops"].as_array().unwrap().len(), 1);
+    assert_eq!(accepted["accepted_ops"][0]["path"], "src/vars.txt");
     assert_eq!(
-        string_array(&promoted["promoted_ops"][0]["ops"]),
+        string_array(&accepted["accepted_ops"][0]["ops"]),
         vec!["agent-a:1", "agent-a:3"]
     );
-    assert_eq!(promoted["conflicts"][0]["ops"][0]["op_id"], "agent-a:2");
+    assert_eq!(accepted["conflicts"][0]["ops"][0]["op_id"], "agent-a:2");
     assert_eq!(
         fs::read(repo.path().join("src/vars.txt")).unwrap(),
         b"a=A\nb=2\nc=C\n"
@@ -229,20 +229,19 @@ fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
     let conflict_review = repo.run_json(["review"]);
     let conflict_actions =
         &review_path(&conflict_review, "src/vars.txt")["conflicts"][0]["actions"];
-    let shown =
-        run_review_action_json(&repo, review_action(conflict_actions, "show_op", "agent-b"));
-    let resolution = repo.path().join("agent-b-resolution.txt");
+    let shown = run_review_action_json(&repo, review_action(conflict_actions, "detail", "agent-b"));
+    let replacement = repo.path().join("agent-b-replacement.txt");
     fs::write(
-        &resolution,
+        &replacement,
         shown["inserted"]["utf8"].as_str().unwrap().as_bytes(),
     )
     .unwrap();
-    let resolved = run_review_action_with_replacement_json(
+    let accepted = run_review_action_with_replacement_json(
         &repo,
-        review_action(conflict_actions, "resolve_op", "agent-b"),
-        &resolution,
+        review_action(conflict_actions, "accept", "agent-b"),
+        &replacement,
     );
-    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    assert!(accepted["remaining"].as_array().unwrap().is_empty());
     assert_eq!(
         fs::read(repo.path().join("src/vars.txt")).unwrap(),
         b"a=A\nb=X\nc=C\n"
@@ -250,12 +249,12 @@ fn cli_conflicts_and_promote_clean_drive_op_level_orchestration() {
 }
 
 #[test]
-fn cli_promote_clean_rolls_back_worktree_when_later_write_fails() {
+fn cli_accept_rolls_back_worktree_when_later_write_fails() {
     let repo = TempRepo::new();
     repo.write("src/swap/original.txt", b"original");
 
     let result = repo.run_json([
-        "exec",
+        "run",
         "rollback-lane",
         "--",
         "pwsh",
@@ -269,16 +268,16 @@ fn cli_promote_clean_rolls_back_worktree_when_later_write_fails() {
     assert!(!repo.path().join("zz-blocked").exists());
 
     fs::write(repo.path().join("zz-blocked"), b"still a file").unwrap();
-    let output = repo.run_unchecked(&["promote-clean", "rollback-lane"]);
+    let output = repo.run_unchecked(&["accept", "rollback-lane"]);
     assert!(
         !output.status.success(),
-        "promotion unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        "accept unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
         output.stdout.is_empty(),
-        "failing promotion should not emit JSON stdout:\n{}",
+        "failing accept should not emit JSON stdout:\n{}",
         String::from_utf8_lossy(&output.stdout)
     );
 
@@ -311,7 +310,7 @@ fn cli_review_groups_clean_ops_and_conflict_decisions_json_first() {
     repo.write("src/vars.txt", b"a=1\nb=2\nc=3\nd=4\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -320,7 +319,7 @@ fn cli_review_groups_clean_ops_and_conflict_decisions_json_first() {
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=A`nb=B`nc=3`nd=4`n\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -329,7 +328,7 @@ fn cli_review_groups_clean_ops_and_conflict_decisions_json_first() {
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=1`nb=X`nc=C`nd=4`n\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-c",
         "--",
         "pwsh",
@@ -386,7 +385,7 @@ fn cli_review_groups_clean_ops_and_conflict_decisions_json_first() {
         vec!["agent-a:2"]
     );
 
-    repo.run_json(["promote-clean", "agent-a"]);
+    repo.run_json(["accept", "agent-a"]);
     let after_clean = repo.run_json(["review", "agent-a"]);
     assert_eq!(after_clean["summary"]["clean_ops"], 0);
     assert_eq!(after_clean["summary"]["conflicted_ops"], 1);
@@ -402,7 +401,7 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
     repo.write("src/vars.txt", b"a=1\nb=2\nc=3\nd=4\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -411,7 +410,7 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=A`nb=B`nc=3`nd=4`n\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -420,7 +419,7 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=1`nb=X`nc=C`nd=4`n\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-c",
         "--",
         "pwsh",
@@ -439,10 +438,10 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
         "summary: 3 lanes, 2 changed paths, 3 clean ops, 2 conflicted ops, 1 conflict group"
     ));
     assert!(human.contains(
-        "Lane status\n  - agent-a: 1 changed path, 1 clean op, 1 conflicted op, last exec ok, exec touched 1 path"
+        "Lane status\n  - agent-a: 1 changed path, 1 clean op, 1 conflicted op, last run ok, run touched 1 path"
     ));
     assert!(human.contains(
-        "Promotable now\n  - agent-a: 1 clean op across 1 path, 1 changed path total, last exec ok, exec touched 1 path\n    command: lane promote-clean agent-a"
+        "Acceptable now\n  - agent-a: 1 clean op across 1 path, 1 changed path total, last run ok, run touched 1 path\n    command: lane accept agent-a"
     ));
     assert!(human.contains(
         "Needs decision\n  - src/vars.txt group 1 [6..7), 2 ops, lanes: agent-a, agent-b"
@@ -452,17 +451,17 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
     ));
     assert!(human.contains("  |- clean ops\n  |  - agent-a agent-a:1 replace [2..3), inserts 1 B"));
     assert!(human.contains("  |    base: \"1\"\n  |    inserted: \"A\""));
-    assert!(human.contains("  |    promote: lane promote-ops agent-a src/vars.txt agent-a:1"));
-    let owner_promote = human
+    assert!(human.contains("  |    accept: lane accept agent-a src/vars.txt agent-a:1"));
+    let owner_accept = human
         .lines()
-        .find_map(|line| line.strip_prefix("  |    promote: "))
+        .find_map(|line| line.strip_prefix("  |    accept: "))
         .filter(|command| command.contains("owner''s.txt"))
-        .unwrap_or_else(|| panic!("missing quoted owner promote command:\n{human}"));
+        .unwrap_or_else(|| panic!("missing quoted owner accept command:\n{human}"));
     assert_eq!(
-        owner_promote,
-        "lane promote-ops agent-c 'src/owner''s.txt' agent-c:1"
+        owner_accept,
+        "lane accept agent-c 'src/owner''s.txt' agent-c:1"
     );
-    assert_success(run_human_command(&repo, owner_promote));
+    assert_success(run_human_command(&repo, owner_accept));
     assert_eq!(
         fs::read(repo.path().join("src/owner's.txt")).unwrap(),
         b"owned \"quote\""
@@ -472,9 +471,9 @@ fn cli_review_human_groups_by_path_with_copyable_commands() {
     assert!(human.contains("         base: \"2\"\n         inserted: \"B\""));
     assert!(human.contains("         inserted: \"X\""));
     assert!(human.contains(
-        "         resolve: lane resolve-op agent-a src/vars.txt agent-a:2 --with-file <replacement-file>"
+        "         accept: lane accept agent-a src/vars.txt agent-a:2 --with-file <replacement-file>"
     ));
-    assert!(!human.contains("inspect:"));
+    assert!(!human.contains("detail:"));
     assert!(human.contains(
         "Discard lanes\n  - agent-a: lane discard agent-a\n  - agent-b: lane discard agent-b"
     ));
@@ -491,7 +490,7 @@ fn cli_review_human_compacts_many_clean_only_paths_and_keeps_conflict_commands()
     repo.write("src/shared.txt", b"a=1\nb=2\nc=3\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "clean-lane",
         "--",
         "pwsh",
@@ -500,7 +499,7 @@ fn cli_review_human_compacts_many_clean_only_paths_and_keeps_conflict_commands()
         "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Force -Path generated | Out-Null; for ($i = 0; $i -lt 25; $i++) { Set-Content -Path ('generated/file-{0:D3}.txt' -f $i) -Value ('clean {0}' -f $i) -NoNewline }; [IO.File]::WriteAllText('src/shared.txt', \"a=A`nb=2`nc=3`n\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "conflict-a",
         "--",
         "pwsh",
@@ -509,7 +508,7 @@ fn cli_review_human_compacts_many_clean_only_paths_and_keeps_conflict_commands()
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/shared.txt', \"a=1`nb=A`nc=3`n\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "conflict-b",
         "--",
         "pwsh",
@@ -531,20 +530,18 @@ fn cli_review_human_compacts_many_clean_only_paths_and_keeps_conflict_commands()
         human.contains("Clean-only paths\n  - 25 clean-only paths omitted from detailed listing")
     );
     assert!(human.contains(
-        "  - clean-lane: 25 clean ops across 25 clean-only paths; command promotes 26 clean ops across 26 paths\n    command: lane promote-clean clean-lane"
+        "  - clean-lane: 25 clean ops across 25 clean-only paths; command accepts 26 clean ops across 26 paths\n    command: lane accept clean-lane"
     ));
     assert!(human.contains("  - full JSON details: lane review"));
     assert!(human.contains("    - generated/file-000.txt"));
     assert!(human.contains("    - ... 17 more paths"));
-    assert!(
-        !human.contains("promote: lane promote-ops clean-lane generated/file-000.txt clean-lane:1")
-    );
+    assert!(!human.contains("accept: lane accept clean-lane generated/file-000.txt clean-lane:1"));
     assert!(human.contains("Needs decision\n  - src/shared.txt group 1"));
     assert!(human.contains(
-        "resolve: lane resolve-op conflict-a src/shared.txt conflict-a:1 --with-file <replacement-file>"
+        "accept: lane accept conflict-a src/shared.txt conflict-a:1 --with-file <replacement-file>"
     ));
     assert!(human.contains(
-        "resolve: lane resolve-op conflict-b src/shared.txt conflict-b:1 --with-file <replacement-file>"
+        "accept: lane accept conflict-b src/shared.txt conflict-b:1 --with-file <replacement-file>"
     ));
 
     assert_eq!(repo.run_json(["review"]), json_before);
@@ -559,7 +556,7 @@ fn cli_review_human_compacts_many_clean_ops_on_one_conflicted_path() {
     repo.write("src/many.txt", base.as_bytes());
 
     repo.run_json([
-        "exec",
+        "run",
         "many-clean",
         "--",
         "pwsh",
@@ -568,7 +565,7 @@ fn cli_review_human_compacts_many_clean_ops_on_one_conflicted_path() {
         "$ErrorActionPreference = \"Stop\"; $lines = [Collections.Generic.List[string]](Get-Content src/many.txt); for ($n = 1; $n -le 14; $n++) { $index = ($n - 1) * 2; if ($n -eq 14) { $lines[$index] = \"k14=left\" } else { $lines[$index] = (\"k{0:D2}=agent-a\" -f $n) } }; [IO.File]::WriteAllText(\"src/many.txt\", (($lines -join \"`n\") + \"`n\"))",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "reviewer",
         "--",
         "pwsh",
@@ -593,16 +590,14 @@ fn cli_review_human_compacts_many_clean_ops_on_one_conflicted_path() {
     assert!(
         human.lines().any(|line| line.contains("many-clean: ")
             && line.contains(" clean op")
-            && line.contains(
-                " omitted; promote: lane promote-ops many-clean src/many.txt many-clean:"
-            )),
-        "missing path-scoped promote command for omitted clean op:\n{human}"
+            && line.contains(" omitted; accept: lane accept many-clean src/many.txt many-clean:")),
+        "missing path-scoped accept command for omitted clean op:\n{human}"
     );
     assert!(
         human.lines().any(|line| line
-            .contains("resolve: lane resolve-op many-clean src/many.txt many-clean:")
+            .contains("accept: lane accept many-clean src/many.txt many-clean:")
             && line.contains("--with-file <replacement-file>")),
-        "missing many-clean resolve command:\n{human}"
+        "missing many-clean accept command:\n{human}"
     );
 }
 
@@ -611,7 +606,7 @@ fn cli_review_human_escapes_and_bounds_inline_previews() {
     let repo = TempRepo::new();
 
     repo.run_json([
-        "exec",
+        "run",
         "preview-agent",
         "--",
         "pwsh",
@@ -627,12 +622,12 @@ fn cli_review_human_escapes_and_bounds_inline_previews() {
 }
 
 #[test]
-fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
+fn cli_review_op_detail_and_accept_replacement_op_complete_conflicted_operation_flow() {
     let repo = TempRepo::new();
     repo.write("src/vars.txt", b"a=1\nb=2\nc=3\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -641,7 +636,7 @@ fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=A`nb=B`nc=C`n\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -650,9 +645,9 @@ fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/vars.txt', \"a=1`nb=X`nc=3`n\")",
     ]);
 
-    repo.run_json(["promote-clean", "agent-a"]);
+    repo.run_json(["accept", "agent-a"]);
 
-    let shown = repo.run_json(["show-op", "agent-a", "src/vars.txt", "agent-a:2"]);
+    let shown = repo.run_json(["review", "agent-a", "src/vars.txt", "agent-a:2"]);
     assert_eq!(shown["op"]["op_id"], "agent-a:2");
     assert_eq!(shown["base"]["utf8"], "2");
     assert_eq!(shown["inserted"]["utf8"], "B");
@@ -661,10 +656,10 @@ fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
         vec!["agent-b"]
     );
 
-    let replacement = repo.path().join("resolution.txt");
+    let replacement = repo.path().join("replacement.txt");
     fs::write(&replacement, b"Y").unwrap();
-    let resolved = output_json(&repo.run_vec(vec![
-        "resolve-op".to_owned(),
+    let accepted = output_json(&repo.run_vec(vec![
+        "accept".to_owned(),
         "agent-a".to_owned(),
         "src/vars.txt".to_owned(),
         "agent-a:2".to_owned(),
@@ -672,9 +667,9 @@ fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
         replacement.display().to_string().to_owned(),
     ]));
 
-    assert_eq!(resolved["resolved_op"]["op_id"], "agent-a:2");
-    assert_eq!(resolved["replacement"]["utf8"], "Y");
-    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    assert_eq!(accepted["accepted_op"]["op_id"], "agent-a:2");
+    assert_eq!(accepted["replacement"]["utf8"], "Y");
+    assert!(accepted["remaining"].as_array().unwrap().is_empty());
     assert_eq!(
         fs::read(repo.path().join("src/vars.txt")).unwrap(),
         b"a=A\nb=Y\nc=C\n"
@@ -689,13 +684,12 @@ fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
 }
 
 #[test]
-fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
+fn cli_run_check_review_lists_attempt_evidence_without_ranking() {
     let repo = TempRepo::new();
     repo.write("src/login.tsx", b"export const design = 'base';");
 
     let attempted = repo.run_json([
-        "try",
-        "--name",
+        "run",
         "login",
         "--attempts",
         "3",
@@ -731,39 +725,39 @@ fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
     let checked = output_json(&checked_output);
     assert_eq!(checked["check"]["name"], "pick-second");
     assert_eq!(checked["check"]["attempts"].as_array().unwrap().len(), 3);
-    assert_eq!(checked["check"]["attempts"][0]["exec"]["exit_code"], 9);
-    assert_eq!(checked["check"]["attempts"][1]["exec"]["exit_code"], 0);
+    assert_eq!(checked["check"]["attempts"][0]["process"]["exit_code"], 9);
+    assert_eq!(checked["check"]["attempts"][1]["process"]["exit_code"], 0);
 
     let preferred_review = repo.run_json(["review", "login-2"]);
     let preferred_paths = review_paths(&preferred_review);
     assert_eq!(preferred_paths, vec!["src/login.tsx", "src/preferred.ts"]);
     assert!(!preferred_paths.contains(&"check-artifact.txt"));
 
-    let compared = repo.run_json(["compare", "login"]);
-    assert_eq!(compared["run"]["checks"].as_array().unwrap().len(), 1);
-    assert_eq!(compared["attempts"][0]["lane"], "login-1");
-    assert_eq!(compared["attempts"][1]["lane"], "login-2");
-    assert_eq!(compared["attempts"][2]["lane"], "login-3");
-    assert_eq!(compared["attempts"][1]["checks_passed"], 1);
-    assert_eq!(compared["attempts"][1]["checks_failed"], 0);
+    let reviewed = repo.run_json(["review", "login"]);
+    assert_eq!(reviewed["run"]["checks"].as_array().unwrap().len(), 1);
+    assert_eq!(reviewed["attempts"][0]["lane"], "login-1");
+    assert_eq!(reviewed["attempts"][1]["lane"], "login-2");
+    assert_eq!(reviewed["attempts"][2]["lane"], "login-3");
+    assert_eq!(reviewed["attempts"][1]["checks_passed"], 1);
+    assert_eq!(reviewed["attempts"][1]["checks_failed"], 0);
     assert!(
-        compared["attempts"][1]["actions"]
+        reviewed["attempts"][1]["actions"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|action| action["kind"] == "promote_clean")
+            .any(|action| action["kind"] == "accept")
     );
     assert!(
-        compared["actions"]
+        reviewed["actions"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|action| action["command"] == serde_json::json!(["discard-run", "login"]))
+            .any(|action| action["command"] == serde_json::json!(["discard", "login"]))
     );
-    assert_eq!(compared["review"]["summary"]["lanes"], 3);
-    assert_eq!(compared["review"]["summary"]["changed_paths"], 2);
+    assert_eq!(reviewed["review"]["summary"]["lanes"], 3);
+    assert_eq!(reviewed["review"]["summary"]["changed_paths"], 2);
 
-    let runs = repo.run_json(["runs"]);
+    let runs = repo.run_json(["review", "--history"]);
     assert_eq!(runs["runs"].as_array().unwrap().len(), 1);
     let run_summary = &runs["runs"][0];
     assert_eq!(run_summary["name"], "login");
@@ -782,52 +776,51 @@ fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|action| action["command"] == serde_json::json!(["compare", "login"]))
+            .any(|action| action["command"] == serde_json::json!(["review", "login"]))
     );
 
-    let run_detail = repo.run_json(["compare", "login"]);
+    let run_detail = repo.run_json(["review", "login"]);
     assert_eq!(run_detail["run"]["name"], "login");
     assert_eq!(run_detail["attempts"][1]["lane"], "login-2");
     assert_eq!(run_detail["attempts"][1]["checks_passed"], 1);
 
-    let human = repo.run_text(["compare", "login", "--human"]);
-    assert!(human.starts_with("Lane compare\nrun: login\n"));
-    assert!(
-        human.contains("Run actions\n  - runs: lane runs\n  - discard_run: lane discard-run login")
-    );
+    let human = repo.run_text(["review", "login", "--human"]);
+    assert!(human.starts_with("Lane review\nrun: login\n"));
+    assert!(human.contains(
+        "Run actions\n  - history: lane review --history\n  - discard: lane discard login"
+    ));
     assert!(human.contains("Attempts\n  - login-1: attempt ok, checks 0/1"));
     assert!(human.contains("  - login-2: attempt ok, checks 1/1"));
-    assert!(human.contains("promote_clean: lane promote-clean login-2"));
+    assert!(human.contains("accept: lane accept login-2"));
     assert!(human.contains("  - pick-second\n    login-1: exit 9\n    login-2: ok"));
     assert!(human.contains(
-        "combine: lane resolve-ops src/login.tsx --op login-1:1 --op login-2:1 --op login-3:1 --with-file <replacement-file>"
+        "combine: lane accept src/login.tsx --op login-1:1 --op login-2:1 --op login-3:1 --with-file <replacement-file>"
     ));
 
-    let discarded = repo.run_json(["discard-run", "login"]);
+    let discarded = repo.run_json(["discard", "login"]);
     assert_eq!(discarded["removed_attempt_lanes"], 3);
     assert_eq!(discarded["discarded_changes"], 4);
     assert!(!repo.path().join(".lane/runs/login.json").exists());
     assert!(
-        repo.run_json(["runs"])["runs"]
+        repo.run_json(["review", "--history"])["runs"]
             .as_array()
             .unwrap()
             .is_empty()
     );
     assert_eq!(repo.run_json(["review"])["summary"]["lanes"], 0);
     assert_command_fails_with(
-        &repo.run_unchecked(&["compare", "login"]),
-        "run \"login\" is not readable",
+        &repo.run_unchecked(&["review", "login"]),
+        "review target \"login\" is neither a run nor a lane",
     );
 }
 
 #[test]
-fn cli_compare_keeps_cleanup_available_when_base_changed() {
+fn cli_review_keeps_cleanup_available_when_base_changed() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = 'original';");
 
     repo.run_json([
-        "try",
-        "--name",
+        "run",
         "stale",
         "--attempts",
         "1",
@@ -839,7 +832,7 @@ fn cli_compare_keeps_cleanup_available_when_base_changed() {
     ]);
     repo.write("src/base.ts", b"export const base = 'parent';");
 
-    let detail = repo.run_json(["compare", "stale"]);
+    let detail = repo.run_json(["review", "stale"]);
     assert!(
         detail["review_error"]
             .as_str()
@@ -857,37 +850,36 @@ fn cli_compare_keeps_cleanup_available_when_base_changed() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|action| action["command"] == serde_json::json!(["discard-run", "stale"]))
+            .any(|action| action["command"] == serde_json::json!(["discard", "stale"]))
     );
 
-    let human = repo.run_text(["compare", "stale", "--human"]);
+    let human = repo.run_text(["review", "stale", "--human"]);
     assert!(human.contains("summary: 1 attempt, 0 checks, review unavailable"));
-    assert!(human.contains("discard_run: lane discard-run stale"));
+    assert!(human.contains("discard: lane discard stale"));
     assert!(human.contains("Needs decision\n  - review unavailable:"));
 
-    let discarded = repo.run_json(["discard-run", "stale"]);
+    let discarded = repo.run_json(["discard", "stale"]);
     assert_eq!(discarded["removed_attempt_lanes"], 1);
     assert_eq!(discarded["discarded_changes"], 0);
     assert!(!repo.path().join(".lane/runs/stale.json").exists());
 }
 
 #[test]
-fn cli_try_and_check_spawn_all_workers_before_joining() {
+fn cli_run_and_check_spawn_all_workers_before_joining() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");
     let markers = std::env::temp_dir().join(format!("lane-parallel-{}", unique_suffix()));
-    let try_markers = markers.join("try");
+    let run_markers = markers.join("run");
     let check_markers = markers.join("check");
-    fs::create_dir_all(&try_markers).unwrap();
+    fs::create_dir_all(&run_markers).unwrap();
     fs::create_dir_all(&check_markers).unwrap();
 
-    let try_marker_arg = ps_single_quoted_path(&try_markers);
-    let try_script = format!(
-        "$ErrorActionPreference = \"Stop\"; $dir = {try_marker_arg}; $me = $env:LANE_ID; Set-Content -LiteralPath (Join-Path $dir ($me + '.started')) -Value started -NoNewline; $other = if ($me -eq 'parallel-1') {{ 'parallel-2' }} else {{ 'parallel-1' }}; $deadline = (Get-Date).AddSeconds(5); while (-not (Test-Path -LiteralPath (Join-Path $dir ($other + '.started')))) {{ if ((Get-Date) -gt $deadline) {{ throw 'other attempt did not start' }}; Start-Sleep -Milliseconds 50 }}; Set-Content -Path ($me + '.txt') -Value done -NoNewline"
+    let run_marker_arg = ps_single_quoted_path(&run_markers);
+    let run_script = format!(
+        "$ErrorActionPreference = \"Stop\"; $dir = {run_marker_arg}; $me = $env:LANE_ID; Set-Content -LiteralPath (Join-Path $dir ($me + '.started')) -Value started -NoNewline; $other = if ($me -eq 'parallel-1') {{ 'parallel-2' }} else {{ 'parallel-1' }}; $deadline = (Get-Date).AddSeconds(5); while (-not (Test-Path -LiteralPath (Join-Path $dir ($other + '.started')))) {{ if ((Get-Date) -gt $deadline) {{ throw 'other attempt did not start' }}; Start-Sleep -Milliseconds 50 }}; Set-Content -Path ($me + '.txt') -Value done -NoNewline"
     );
     let tried = repo.run_json([
-        "try",
-        "--name",
+        "run",
         "parallel",
         "--attempts",
         "2",
@@ -895,10 +887,10 @@ fn cli_try_and_check_spawn_all_workers_before_joining() {
         "pwsh",
         "-NoProfile",
         "-Command",
-        try_script.as_str(),
+        run_script.as_str(),
     ]);
-    assert_eq!(tried["run"]["attempts"][0]["exec"]["exit_code"], 0);
-    assert_eq!(tried["run"]["attempts"][1]["exec"]["exit_code"], 0);
+    assert_eq!(tried["run"]["attempts"][0]["process"]["exit_code"], 0);
+    assert_eq!(tried["run"]["attempts"][1]["process"]["exit_code"], 0);
 
     let check_marker_arg = ps_single_quoted_path(&check_markers);
     let check_script = format!(
@@ -915,8 +907,8 @@ fn cli_try_and_check_spawn_all_workers_before_joining() {
         "-Command",
         check_script.as_str(),
     ]);
-    assert_eq!(checked["check"]["attempts"][0]["exec"]["exit_code"], 0);
-    assert_eq!(checked["check"]["attempts"][1]["exec"]["exit_code"], 0);
+    assert_eq!(checked["check"]["attempts"][0]["process"]["exit_code"], 0);
+    assert_eq!(checked["check"]["attempts"][1]["process"]["exit_code"], 0);
 
     let _ = fs::remove_dir_all(markers);
 }
@@ -926,8 +918,7 @@ fn cli_check_merges_concurrent_check_results() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");
     repo.run_json([
-        "try",
-        "--name",
+        "run",
         "merge-checks",
         "--attempts",
         "1",
@@ -950,8 +941,8 @@ fn cli_check_merges_concurrent_check_results() {
     assert_success(job_a.join().unwrap());
     assert_success(job_b.join().unwrap());
 
-    let compare = repo.run_json(["compare", "merge-checks"]);
-    let check_names = compare["run"]["checks"]
+    let reviewed = repo.run_json(["review", "merge-checks"]);
+    let check_names = reviewed["run"]["checks"]
         .as_array()
         .unwrap()
         .iter()
@@ -966,10 +957,10 @@ fn cli_check_merges_concurrent_check_results() {
 }
 
 #[test]
-fn cli_try_rejects_existing_attempt_lanes() {
+fn cli_run_rejects_existing_attempt_lanes() {
     let repo = TempRepo::new();
     repo.run_json([
-        "exec",
+        "run",
         "dupe-1",
         "--",
         "pwsh",
@@ -979,8 +970,7 @@ fn cli_try_rejects_existing_attempt_lanes() {
     ]);
 
     let output = repo.run_unchecked(&[
-        "try",
-        "--name",
+        "run",
         "dupe",
         "--attempts",
         "1",
@@ -995,13 +985,67 @@ fn cli_try_rejects_existing_attempt_lanes() {
 }
 
 #[test]
-fn cli_try_records_failed_attempts_as_comparison_evidence() {
+fn cli_run_rejects_run_and_lane_name_overlap() {
+    let repo = TempRepo::new();
+    repo.run_json([
+        "run",
+        "shared",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "exit 0",
+    ]);
+
+    assert_command_fails_with(
+        &repo.run_unchecked(&[
+            "run",
+            "shared",
+            "--attempts",
+            "1",
+            "--",
+            "pwsh",
+            "-NoProfile",
+            "-Command",
+            "exit 0",
+        ]),
+        "run name \"shared\" overlaps an existing lane",
+    );
+
+    let repo = TempRepo::new();
+    repo.run_json([
+        "run",
+        "shared",
+        "--attempts",
+        "1",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "exit 0",
+    ]);
+
+    assert_command_fails_with(
+        &repo.run_unchecked(&[
+            "run",
+            "shared",
+            "--",
+            "pwsh",
+            "-NoProfile",
+            "-Command",
+            "exit 0",
+        ]),
+        "lane name \"shared\" overlaps an existing run",
+    );
+}
+
+#[test]
+fn cli_run_records_failed_attempts_as_review_evidence() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");
 
     let output = repo.run([
-        "try",
-        "--name",
+        "run",
         "failure-evidence",
         "--attempts",
         "2",
@@ -1012,7 +1056,7 @@ fn cli_try_records_failed_attempts_as_comparison_evidence() {
         "$ErrorActionPreference = \"Continue\"; if ($env:LANE_ID -eq \"failure-evidence-1\") { Write-Error \"attempt failed\"; exit 7 }; Set-Content -Path src/preferred.ts -Value \"export const preferred = true;\" -NoNewline",
     ]);
     assert_success(output);
-    let attempted = output_json(&repo.run(["compare", "failure-evidence"]));
+    let attempted = output_json(&repo.run(["review", "failure-evidence"]));
     assert_eq!(attempted["attempts"][0]["lane"], "failure-evidence-1");
     assert_eq!(attempted["attempts"][0]["attempt_ok"], false);
     assert_eq!(attempted["attempts"][0]["attempt_exit_code"], 7);

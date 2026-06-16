@@ -22,7 +22,7 @@ pub(super) struct DoctorOutput {
 }
 
 #[derive(Serialize)]
-pub(super) struct GcOutput {
+pub(super) struct StorageCleanupOutput {
     pub(super) repo_root: String,
     pub(super) storage_path: String,
     pub(super) blobs_removed: usize,
@@ -45,7 +45,7 @@ pub(super) struct ReviewLaneSummary {
     pub(super) changed_paths: usize,
     pub(super) clean_ops: usize,
     pub(super) conflicted_ops: usize,
-    pub(super) last_exec: Option<crate::LaneExecState>,
+    pub(super) last_run: Option<crate::LaneRunState>,
     pub(super) actions: Vec<ReviewActionOutput>,
 }
 
@@ -94,10 +94,8 @@ pub(super) struct ReviewActionOutput {
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum ReviewActionKind {
-    PromoteClean,
-    ShowOp,
-    ResolveOp,
-    ResolveOps,
+    Accept,
+    Detail,
     Discard,
 }
 
@@ -132,7 +130,7 @@ pub(super) enum ReviewOpState {
 }
 
 #[derive(Serialize)]
-pub(super) struct ShowOpOutput<'a> {
+pub(super) struct OpDetailOutput<'a> {
     pub(super) lane: &'a str,
     pub(super) path: &'a str,
     pub(super) repo_root: String,
@@ -143,26 +141,26 @@ pub(super) struct ShowOpOutput<'a> {
 }
 
 #[derive(Serialize)]
-pub(super) struct ResolveOpOutput<'a> {
+pub(super) struct AcceptReplacementOpOutput<'a> {
     pub(super) lane: &'a str,
     pub(super) path: &'a str,
     pub(super) op_id: &'a str,
     pub(super) repo_root: String,
     pub(super) storage_path: String,
     pub(super) replacement_file: String,
-    pub(super) resolved_op: LaneOpSummary,
+    pub(super) accepted_op: LaneOpSummary,
     pub(super) replacement: BytePreview,
     pub(super) remaining: Vec<ChangeOutput>,
 }
 
 #[derive(Serialize)]
-pub(super) struct ResolveOpsOutput {
+pub(super) struct AcceptReplacementOpsOutput {
     pub(super) path: FilePath,
     pub(super) ops: Vec<String>,
     pub(super) repo_root: String,
     pub(super) storage_path: String,
     pub(super) replacement_file: String,
-    pub(super) resolved_ops: Vec<LaneOpSummary>,
+    pub(super) accepted_ops: Vec<LaneOpSummary>,
     pub(super) replacement: BytePreview,
     pub(super) remaining: Vec<ChangeOutput>,
 }
@@ -203,22 +201,22 @@ impl From<LaneFileChange> for ChangeOutput {
 }
 
 #[derive(Serialize)]
-pub(super) struct PromoteOpsOutput<'a> {
+pub(super) struct AcceptOpsOutput<'a> {
     pub(super) lane: &'a str,
     pub(super) path: &'a str,
     pub(super) repo_root: String,
     pub(super) storage_path: String,
-    pub(super) promoted_ops: Vec<String>,
-    pub(super) promoted: Vec<ChangeOutput>,
+    pub(super) accepted_ops: Vec<String>,
+    pub(super) accepted: Vec<ChangeOutput>,
 }
 
 #[derive(Serialize)]
-pub(super) struct PromoteCleanOutput<'a> {
+pub(super) struct AcceptCleanOutput<'a> {
     pub(super) lane: &'a str,
     pub(super) repo_root: String,
     pub(super) storage_path: String,
-    pub(super) promoted_ops: Vec<PathOpsOutput>,
-    pub(super) promoted: Vec<ChangeOutput>,
+    pub(super) accepted_ops: Vec<PathOpsOutput>,
+    pub(super) accepted: Vec<ChangeOutput>,
     pub(super) conflicts: Vec<ChangeOutput>,
 }
 

@@ -126,21 +126,21 @@ pub(super) struct RebaseOpSet<'a> {
     pub(super) ops: &'a [FileOp],
 }
 
-pub(super) fn rebase_ops_after_promotion(
+pub(super) fn rebase_ops_after_accept(
     path: &str,
     retained: RebaseOpSet<'_>,
-    promoted: RebaseOpSet<'_>,
+    accepted: RebaseOpSet<'_>,
 ) -> Result<Vec<FileOp>, LaneError> {
-    let promoted_ops = sorted_ops(promoted.ops);
+    let accepted_ops = sorted_ops(accepted.ops);
     retained
         .ops
         .iter()
         .map(|op| {
             let mut base_start = i128::from(op.base_start);
-            for promoted_op in &promoted_ops {
-                if promoted_op_shifts_start(retained.lane, op, promoted.lane, promoted_op) {
+            for accepted_op in &accepted_ops {
+                if accepted_op_shifts_start(retained.lane, op, accepted.lane, accepted_op) {
                     base_start +=
-                        promoted_op.inserted.len() as i128 - i128::from(promoted_op.base_len);
+                        accepted_op.inserted.len() as i128 - i128::from(accepted_op.base_len);
                 }
             }
 
@@ -154,27 +154,27 @@ pub(super) fn rebase_ops_after_promotion(
         .collect()
 }
 
-fn promoted_op_shifts_start(
+fn accepted_op_shifts_start(
     retained_lane: &str,
     op: &FileOp,
-    promoted_lane: &str,
-    promoted_op: &FileOp,
+    accepted_lane: &str,
+    accepted_op: &FileOp,
 ) -> bool {
-    if promoted_op.base_len == 0 {
-        match promoted_op.base_start.cmp(&op.base_start) {
+    if accepted_op.base_len == 0 {
+        match accepted_op.base_start.cmp(&op.base_start) {
             Ordering::Less => true,
             Ordering::Equal => {
-                compare_ops_for_render(promoted_lane, promoted_op, retained_lane, op)
+                order_ops_for_render(accepted_lane, accepted_op, retained_lane, op)
                     == Ordering::Less
             }
             Ordering::Greater => false,
         }
     } else {
-        promoted_op.base_start + promoted_op.base_len <= op.base_start
+        accepted_op.base_start + accepted_op.base_len <= op.base_start
     }
 }
 
-fn compare_ops_for_render(
+fn order_ops_for_render(
     left_lane: &str,
     left: &FileOp,
     right_lane: &str,

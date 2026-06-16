@@ -4,10 +4,10 @@
 mod atomic;
 #[path = "storage/blobs.rs"]
 mod blobs;
+#[path = "storage/cleanup.rs"]
+mod cleanup;
 #[path = "storage/doctor.rs"]
 mod doctor;
-#[path = "storage/gc.rs"]
-mod gc;
 #[path = "storage/lock.rs"]
 mod lock;
 #[path = "storage/manifest.rs"]
@@ -22,21 +22,19 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::{LaneExecState, LaneId, LaneRepo};
+use crate::{LaneId, LaneRepo, LaneRunState};
 
-#[allow(unused_imports)]
 pub(crate) use atomic::persist_bytes;
-#[allow(unused_imports)]
+pub(crate) use cleanup::cleanup_storage;
 pub(crate) use doctor::{StorageDoctorReport, doctor_storage};
+#[cfg(test)]
 #[allow(unused_imports)]
-pub(crate) use gc::{StorageGcReport, gc_storage};
-#[allow(unused_imports)]
-pub(crate) use lock::{RepoLock, acquire_repo_lock, is_lock_contention};
-#[allow(unused_imports)]
+pub(crate) use lock::is_lock_contention;
+pub(crate) use lock::{RepoLock, acquire_repo_lock};
 pub(crate) use paths::encode_path_component;
 
 use manifest::{load_manifest_snapshot, persist_manifest_snapshot};
-use paths::{last_exec_file_name, last_exec_path, manifest_path};
+use paths::{last_run_file_name, last_run_path, manifest_path};
 use serde_util::{invalid_storage, json_error};
 
 pub(crate) fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
@@ -55,27 +53,27 @@ pub(crate) fn persist_repo(storage_root: &Path, repo: &LaneRepo) -> io::Result<(
     fs::create_dir_all(storage_root)?;
 
     persist_manifest_snapshot(storage_root, &manifest_path(storage_root), &snapshot)?;
-    prune_stale_last_exec_files(storage_root, &snapshot.lanes);
+    prune_stale_last_run_files(storage_root, &snapshot.lanes);
     Ok(())
 }
 
-pub(crate) fn persist_last_exec(
+pub(crate) fn persist_last_run(
     storage_root: &Path,
     lane: &str,
-    state: &LaneExecState,
+    state: &LaneRunState,
 ) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(state).map_err(json_error)?;
-    persist_bytes(&last_exec_path(storage_root, lane), &bytes)
+    persist_bytes(&last_run_path(storage_root, lane), &bytes)
 }
 
-pub(crate) fn load_last_exec(
+pub(crate) fn load_last_run(
     storage_root: &Path,
     lanes: &BTreeSet<LaneId>,
-) -> BTreeMap<LaneId, LaneExecState> {
+) -> BTreeMap<LaneId, LaneRunState> {
     lanes
         .iter()
         .filter_map(|lane| {
-            let path = last_exec_path(storage_root, lane);
+            let path = last_run_path(storage_root, lane);
             let bytes = fs::read(path).ok()?;
             let state = serde_json::from_slice(&bytes).ok()?;
             Some((lane.clone(), state))
@@ -83,15 +81,15 @@ pub(crate) fn load_last_exec(
         .collect()
 }
 
-fn prune_stale_last_exec_files(storage_root: &Path, lanes: &BTreeSet<LaneId>) {
-    let last_exec_dir = storage_root.join("last_exec");
+fn prune_stale_last_run_files(storage_root: &Path, lanes: &BTreeSet<LaneId>) {
+    let last_run_dir = storage_root.join("last_run");
     let expected = lanes
         .iter()
-        .map(|lane| last_exec_file_name(lane))
+        .map(|lane| last_run_file_name(lane))
         .collect::<BTreeSet<_>>();
 
-    // last_exec is advisory; failed cleanup must not block repo persistence.
-    if let Ok(entries) = fs::read_dir(&last_exec_dir) {
+    // last_run is advisory; failed cleanup must not block repo persistence.
+    if let Ok(entries) = fs::read_dir(&last_run_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {

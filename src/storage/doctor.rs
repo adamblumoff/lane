@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::{LaneExecState, ensure_user_lane};
+use crate::{LaneRunState, ensure_user_lane};
 
 use super::blobs::{
     BlobInventory, blob_inventory, read_blob, record_blob_inventory, sha256_hex,
@@ -14,7 +14,7 @@ use super::blobs::{
 use super::manifest::{
     STORE_VERSION, StoredBase, StoredLaneEntryState, StoredRepoManifest, parse_fingerprint,
 };
-use super::paths::{last_exec_file_name, manifest_path};
+use super::paths::{last_run_file_name, manifest_path};
 use super::serde_util::json_error;
 
 pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorReport> {
@@ -31,7 +31,7 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
             let blob_inventory = blob_inventory(storage_root)?;
             let referenced_blobs = BTreeSet::new();
             record_blob_inventory(&blob_inventory, &referenced_blobs, &mut report);
-            report.last_exec_files = count_json_files(&storage_root.join("last_exec"))?;
+            report.last_run_files = count_json_files(&storage_root.join("last_run"))?;
             return Ok(StorageDoctorInspection {
                 report,
                 referenced_blobs,
@@ -52,7 +52,7 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
             let blob_inventory = blob_inventory(storage_root)?;
             let referenced_blobs = BTreeSet::new();
             record_blob_inventory(&blob_inventory, &referenced_blobs, &mut report);
-            report.last_exec_files = count_json_files(&storage_root.join("last_exec"))?;
+            report.last_run_files = count_json_files(&storage_root.join("last_run"))?;
             return Ok(StorageDoctorInspection {
                 report,
                 referenced_blobs,
@@ -78,10 +78,10 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
                 .push(format!("manifest lane {lane:?} is invalid: {error:?}"));
         }
     }
-    let expected_last_exec = manifest
+    let expected_last_run = manifest
         .lanes
         .iter()
-        .map(|lane| last_exec_file_name(lane))
+        .map(|lane| last_run_file_name(lane))
         .collect::<BTreeSet<_>>();
     let mut referenced_blobs = BTreeSet::new();
 
@@ -140,10 +140,10 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
         }
     }
 
-    let last_exec_dir = storage_root.join("last_exec");
-    report.last_exec_files = count_json_files(&last_exec_dir)?;
-    if last_exec_dir.exists() {
-        for entry in fs::read_dir(&last_exec_dir)? {
+    let last_run_dir = storage_root.join("last_run");
+    report.last_run_files = count_json_files(&last_run_dir)?;
+    if last_run_dir.exists() {
+        for entry in fs::read_dir(&last_run_dir)? {
             let entry = entry?;
             let path = entry.path();
             if !path.is_file() {
@@ -155,19 +155,19 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
             if !file_name.ends_with(".json") {
                 continue;
             }
-            if !expected_last_exec.contains(file_name) {
+            if !expected_last_run.contains(file_name) {
                 report.warnings.push(format!(
-                    "last_exec file {} does not belong to a manifest lane",
+                    "last_run file {} does not belong to a manifest lane",
                     path.display()
                 ));
                 continue;
             }
             match fs::read(&path).and_then(|bytes| {
-                serde_json::from_slice::<LaneExecState>(&bytes).map_err(json_error)
+                serde_json::from_slice::<LaneRunState>(&bytes).map_err(json_error)
             }) {
                 Ok(_) => {}
                 Err(error) => report.errors.push(format!(
-                    "last_exec file {} is invalid: {error}",
+                    "last_run file {} is invalid: {error}",
                     path.display()
                 )),
             }
@@ -200,7 +200,7 @@ pub(crate) struct StorageDoctorReport {
     pub(crate) blobs_referenced: usize,
     pub(crate) blobs_present: usize,
     pub(crate) blobs_unreferenced: usize,
-    pub(crate) last_exec_files: usize,
+    pub(crate) last_run_files: usize,
     pub(crate) warnings: Vec<String>,
     pub(crate) errors: Vec<String>,
 }

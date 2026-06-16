@@ -28,88 +28,86 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    #[command(about = "Run a command in a lane through a virtual mounted lane view")]
-    Exec {
-        lane: String,
-        #[arg(long)]
-        observe: bool,
-        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
-        command: Vec<String>,
-    },
-    #[command(about = "Review lane work across every lane or one lane")]
-    Review {
-        #[arg(long)]
-        human: bool,
-        lane: Option<String>,
-    },
-    #[command(about = "Run N isolated attempts for the same command")]
-    Try {
-        #[arg(long)]
+    #[command(about = "Run isolated work in one lane or multiple attempt lanes")]
+    Run {
+        #[arg(value_name = "NAME", help = "Lane id, or run id when using --attempts")]
         name: String,
-        #[arg(long, default_value_t = 5)]
-        attempts: usize,
-        #[arg(long)]
+        #[arg(long, value_name = "N", help = "Create N attempt lanes for this run")]
+        attempts: Option<usize>,
+        #[arg(
+            long,
+            help = "Stream worker output to stderr while preserving JSON stdout"
+        )]
         observe: bool,
-        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "COMMAND"
+        )]
         command: Vec<String>,
     },
     #[command(about = "Run a verification command across every attempt in a run")]
     Check {
+        #[arg(value_name = "RUN", help = "Run id created by lane run --attempts")]
         run: String,
-        #[arg(long)]
+        #[arg(long, value_name = "NAME", help = "Name for this check result")]
         name: Option<String>,
-        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "COMMAND"
+        )]
         command: Vec<String>,
     },
-    #[command(about = "List stored attempt runs")]
-    Runs,
-    #[command(about = "Compare attempts, checks, and lane review state for a run")]
-    Compare {
-        run: String,
-        #[arg(long)]
+    #[command(about = "Review runs, lanes, diffs, or one lane operation")]
+    Review {
+        #[arg(long, help = "Print human-readable review text instead of JSON")]
         human: bool,
+        #[arg(long, help = "List stored runs")]
+        history: bool,
+        #[arg(long, help = "Show lane text diff; requires a lane target")]
+        diff: bool,
+        #[arg(value_name = "RUN_OR_LANE", help = "Run id or lane id")]
+        target: Option<String>,
+        #[arg(
+            value_name = "PATH_OR_OP",
+            help = "For op detail: <path> <op-id>; with --diff: optional paths"
+        )]
+        detail: Vec<String>,
     },
-    #[command(about = "Remove a run and every recorded attempt lane")]
-    DiscardRun { run: String },
-    #[command(about = "Show one lane operation with base and inserted byte previews")]
-    ShowOp {
-        lane: String,
-        path: String,
-        op_id: String,
-    },
-    #[command(about = "Resolve and promote one lane operation from replacement bytes")]
-    ResolveOp {
-        lane: String,
-        path: String,
-        op_id: String,
-        #[arg(long = "with-file", value_name = "PATH")]
-        with_file: PathBuf,
-    },
-    #[command(about = "Resolve and promote multiple lane operations from replacement bytes")]
-    ResolveOps {
-        path: String,
-        #[arg(long = "op", required = true)]
+    #[command(about = "Accept clean lane work, selected operations, or replacement bytes")]
+    Accept {
+        #[arg(
+            value_name = "LANE_OR_PATH",
+            help = "Lane id, or path when using repeated --op selections"
+        )]
+        target: String,
+        #[arg(value_name = "PATH", help = "Path for lane-scoped operation accepts")]
+        path: Option<String>,
+        #[arg(value_name = "OP_ID", help = "Operation ids for lane-scoped accepts")]
         ops: Vec<String>,
-        #[arg(long = "with-file", value_name = "PATH")]
-        with_file: PathBuf,
+        #[arg(
+            long = "op",
+            value_name = "LANE:OP",
+            help = "Lane-qualified operation for multi-lane replacement accepts"
+        )]
+        selected_ops: Vec<String>,
+        #[arg(
+            long = "with-file",
+            value_name = "PATH",
+            help = "Replacement byte source"
+        )]
+        with_file: Option<PathBuf>,
     },
-    #[command(about = "Show a text diff for a lane")]
-    Diff { lane: String, paths: Vec<String> },
-    #[command(about = "Promote selected lane operations into the normal repo")]
-    PromoteOps {
-        lane: String,
-        path: String,
-        #[arg(required = true)]
-        ops: Vec<String>,
-    },
-    #[command(about = "Promote every non-conflicting operation in a lane")]
-    PromoteClean { lane: String },
-    #[command(about = "Remove a lane and its private changes")]
-    Discard { lane: String },
-    #[command(about = "Delete unreferenced blob files from lane storage")]
-    Gc,
+    #[command(about = "Discard one lane or one stored run")]
+    Discard { target: String },
     #[command(about = "Validate lane storage and report repairable state")]
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        cleanup: bool,
+    },
 }
 
 pub fn run() -> CliResult<ExitCode> {
@@ -119,58 +117,170 @@ pub fn run() -> CliResult<ExitCode> {
 fn run_cli(cli: Cli) -> CliResult<ExitCode> {
     let repo_root = repo::repo_root(cli.repo_root)?;
     match cli.command {
-        Command::Exec {
-            lane,
-            observe,
-            command,
-        } => commands::exec(&repo_root, &lane, observe, &command),
-        Command::Review { human, lane } => {
-            commands::review(&repo_root, lane.as_deref(), human).map(|()| ExitCode::SUCCESS)
-        }
-        Command::Try {
+        Command::Run {
             name,
             attempts,
             observe,
             command,
-        } => orchestrate::try_run(&repo_root, &name, attempts, observe, &command),
+        } => match attempts {
+            Some(attempts) => {
+                orchestrate::run_attempts(&repo_root, &name, attempts, observe, &command)
+            }
+            None => {
+                if orchestrate::run_exists(&repo_root, &name) {
+                    return Err(CliError::message(format!(
+                        "lane name {name:?} overlaps an existing run"
+                    )));
+                }
+                commands::run_one(&repo_root, &name, observe, &command)
+            }
+        },
         Command::Check { run, name, command } => {
             orchestrate::check(&repo_root, &run, name.as_deref(), &command)
         }
-        Command::Runs => orchestrate::runs(&repo_root).map(|()| ExitCode::SUCCESS),
-        Command::Compare { run, human } => {
-            orchestrate::compare(&repo_root, &run, human).map(|()| ExitCode::SUCCESS)
-        }
-        Command::DiscardRun { run } => {
-            orchestrate::discard_run(&repo_root, &run).map(|()| ExitCode::SUCCESS)
-        }
-        Command::ShowOp { lane, path, op_id } => {
-            commands::show_op(&repo_root, &lane, &path, &op_id).map(|()| ExitCode::SUCCESS)
-        }
-        Command::ResolveOp {
-            lane,
-            path,
-            op_id,
-            with_file,
-        } => commands::resolve_op(&repo_root, &lane, &path, &op_id, &with_file)
+        Command::Review {
+            human,
+            history,
+            diff,
+            target,
+            detail,
+        } => review_target(&repo_root, human, history, diff, target, detail)
             .map(|()| ExitCode::SUCCESS),
-        Command::ResolveOps {
+        Command::Accept {
+            target,
             path,
             ops,
+            selected_ops,
             with_file,
-        } => commands::resolve_ops(&repo_root, &path, &ops, &with_file).map(|()| ExitCode::SUCCESS),
-        Command::Diff { lane, paths } => {
-            commands::diff(&repo_root, &lane, paths).map(|()| ExitCode::SUCCESS)
+        } => accept_target(&repo_root, &target, path, ops, selected_ops, with_file)
+            .map(|()| ExitCode::SUCCESS),
+        Command::Discard { target } => {
+            discard_target(&repo_root, &target).map(|()| ExitCode::SUCCESS)
         }
-        Command::PromoteOps { lane, path, ops } => {
-            commands::promote_ops(&repo_root, &lane, &path, &ops).map(|()| ExitCode::SUCCESS)
+        Command::Doctor { cleanup } => {
+            if cleanup {
+                commands::cleanup_storage(&repo_root).map(|()| ExitCode::SUCCESS)
+            } else {
+                commands::doctor(&repo_root)
+            }
         }
-        Command::PromoteClean { lane } => {
-            commands::promote_clean(&repo_root, &lane).map(|()| ExitCode::SUCCESS)
+    }
+}
+
+fn review_target(
+    repo_root: &std::path::Path,
+    human: bool,
+    history: bool,
+    diff: bool,
+    target: Option<String>,
+    detail: Vec<String>,
+) -> CliResult<()> {
+    if history {
+        if target.is_some() || !detail.is_empty() || diff {
+            return Err(CliError::message(
+                "review --history cannot be combined with a target, detail args, or --diff",
+            ));
         }
-        Command::Discard { lane } => {
-            commands::discard(&repo_root, &lane).map(|()| ExitCode::SUCCESS)
+        return orchestrate::review_history(repo_root);
+    }
+
+    let Some(target) = target else {
+        if diff {
+            return Err(CliError::message("review --diff requires a lane target"));
         }
-        Command::Gc => commands::gc(&repo_root).map(|()| ExitCode::SUCCESS),
-        Command::Doctor => commands::doctor(&repo_root),
+        if !detail.is_empty() {
+            return Err(CliError::message("review detail requires a target"));
+        }
+        return commands::review(repo_root, None, human);
+    };
+
+    if diff {
+        return commands::review_diff(repo_root, &target, detail);
+    }
+
+    match detail.as_slice() {
+        [] => {
+            let is_run = orchestrate::run_exists(repo_root, &target);
+            let is_lane = commands::lane_exists(repo_root, &target)?;
+            match (is_run, is_lane) {
+                (true, true) => Err(CliError::message(format!(
+                    "review target {target:?} is both a run and a lane"
+                ))),
+                (true, false) => orchestrate::review_run(repo_root, &target, human),
+                (false, true) => commands::review(repo_root, Some(&target), human),
+                (false, false) => Err(CliError::message(format!(
+                    "review target {target:?} is neither a run nor a lane"
+                ))),
+            }
+        }
+        [path, op_id] => commands::review_op_detail(repo_root, &target, path, op_id),
+        _ => Err(CliError::message(
+            "review detail accepts either <target> or <lane> <path> <op-id>; use --diff for path diffs",
+        )),
+    }
+}
+
+fn accept_target(
+    repo_root: &std::path::Path,
+    target: &str,
+    path: Option<String>,
+    ops: Vec<String>,
+    selected_ops: Vec<String>,
+    with_file: Option<PathBuf>,
+) -> CliResult<()> {
+    if !selected_ops.is_empty() {
+        if path.is_some() || !ops.is_empty() {
+            return Err(CliError::message(
+                "accept with --op uses the form: accept <path> --op <lane:op>... --with-file <path>",
+            ));
+        }
+        let Some(with_file) = with_file else {
+            return Err(CliError::message("accept with --op requires --with-file"));
+        };
+        return commands::accept_replacement_ops(repo_root, target, &selected_ops, &with_file);
+    }
+
+    let Some(path) = path else {
+        if with_file.is_some() {
+            return Err(CliError::message(
+                "accept <lane> cannot use --with-file without <path> <op-id>",
+            ));
+        }
+        if !ops.is_empty() {
+            return Err(CliError::message("accept operation args require a path"));
+        }
+        return commands::accept_clean(repo_root, target);
+    };
+
+    if ops.is_empty() {
+        return Err(CliError::message(
+            "accept <lane> <path> requires at least one operation id",
+        ));
+    }
+
+    if let Some(with_file) = with_file {
+        if ops.len() != 1 {
+            return Err(CliError::message(
+                "accept replacement for multiple operations requires --op <lane:op> selections",
+            ));
+        }
+        commands::accept_replacement_op(repo_root, target, &path, &ops[0], &with_file)
+    } else {
+        commands::accept_ops(repo_root, target, &path, &ops)
+    }
+}
+
+fn discard_target(repo_root: &std::path::Path, target: &str) -> CliResult<()> {
+    let is_run = orchestrate::run_exists(repo_root, target);
+    let is_lane = commands::lane_exists(repo_root, target)?;
+    match (is_run, is_lane) {
+        (true, true) => Err(CliError::message(format!(
+            "discard target {target:?} is both a run and a lane"
+        ))),
+        (true, false) => orchestrate::discard(repo_root, target),
+        (false, true) => commands::discard(repo_root, target),
+        (false, false) => Err(CliError::message(format!(
+            "discard target {target:?} is neither a run nor a lane"
+        ))),
     }
 }

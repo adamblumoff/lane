@@ -5,14 +5,13 @@ mod common;
 use common::*;
 
 #[test]
-fn cli_rejects_collapsed_review_and_promotion_shortcuts() {
+fn cli_rejects_collapsed_review_and_acceptance_shortcuts() {
     let repo = TempRepo::new();
 
     for args in [
         vec!["changes", "agent-a"],
         vec!["conflicts", "agent-a"],
-        vec!["promote", "agent-a", "src/example.ts"],
-        vec!["promote-lane", "agent-a"],
+        vec!["accept-lane", "agent-a"],
     ] {
         let output = repo.run_unchecked(&args);
         assert!(
@@ -33,7 +32,7 @@ fn cli_rejects_reserved_lane_names_at_entry_points() {
 
     for lane in ["base", "   "] {
         let output = repo.run_unchecked(&[
-            "exec",
+            "run",
             lane,
             "--",
             "pwsh",
@@ -51,7 +50,7 @@ fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
     let repo = TempRepo::new();
     repo.write("src/example.ts", b"base");
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -64,26 +63,32 @@ fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
     let absolute_path = repo.path().join("src/example.ts").display().to_string();
 
     assert!(
-        repo.run_text(["diff", "agent-a", "./src/example.ts"])
+        repo.run_text(["review", "agent-a", "--diff", "./src/example.ts"])
             .contains("no changes in lane agent-a")
     );
 
     for (args, message) in [
         (
-            vec!["diff".to_owned(), "agent-a".to_owned(), "".to_owned()],
+            vec![
+                "review".to_owned(),
+                "agent-a".to_owned(),
+                "--diff".to_owned(),
+                "".to_owned(),
+            ],
             "missing path",
         ),
         (
             vec![
-                "diff".to_owned(),
+                "review".to_owned(),
                 "agent-a".to_owned(),
+                "--diff".to_owned(),
                 ".lane/repo.json".to_owned(),
             ],
             "cannot project lane state files",
         ),
         (
             vec![
-                "show-op".to_owned(),
+                "review".to_owned(),
                 "agent-a".to_owned(),
                 ".lane/repo.json".to_owned(),
                 "agent-a:1".to_owned(),
@@ -92,7 +97,7 @@ fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
         ),
         (
             vec![
-                "resolve-op".to_owned(),
+                "accept".to_owned(),
                 "agent-a".to_owned(),
                 ".lane/repo.json".to_owned(),
                 "agent-a:1".to_owned(),
@@ -103,15 +108,16 @@ fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
         ),
         (
             vec![
-                "diff".to_owned(),
+                "review".to_owned(),
                 "agent-a".to_owned(),
+                "--diff".to_owned(),
                 ".GIT/config".to_owned(),
             ],
             "cannot project git metadata files",
         ),
         (
             vec![
-                "promote-ops".to_owned(),
+                "accept".to_owned(),
                 "agent-a".to_owned(),
                 "..\\outside.ts".to_owned(),
                 "agent-a:1".to_owned(),
@@ -120,7 +126,7 @@ fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
         ),
         (
             vec![
-                "promote-ops".to_owned(),
+                "accept".to_owned(),
                 "agent-a".to_owned(),
                 absolute_path,
                 "agent-a:1".to_owned(),

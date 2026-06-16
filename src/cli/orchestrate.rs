@@ -17,7 +17,7 @@ use super::review::{collect_changes, collect_review};
 
 const RUN_VERSION: u32 = 1;
 
-pub(super) fn try_run(
+pub(super) fn run_attempts(
     repo_root: &Path,
     name: &str,
     attempts: usize,
@@ -55,7 +55,7 @@ pub(super) fn try_run(
     };
     persist_run(repo_root, &run)?;
 
-    let output = TryOutput {
+    let output = RunAttemptsOutput {
         repo_root: path_label(repo_root),
         storage_path: path_label(storage_path(repo_root)),
         run,
@@ -121,18 +121,22 @@ pub(super) fn check(
     })
 }
 
-pub(super) fn runs(repo_root: &Path) -> CliResult<()> {
+pub(super) fn review_history(repo_root: &Path) -> CliResult<()> {
     let runs = load_runs(repo_root)?
         .into_iter()
         .map(|run| summarize_run(&run))
         .collect::<Vec<_>>();
-    let output = RunsOutput {
+    let output = ReviewHistoryOutput {
         repo_root: path_label(repo_root),
         storage_path: path_label(storage_path(repo_root)),
         runs,
     };
     print_json(&output)?;
     Ok(())
+}
+
+pub(super) fn run_exists(repo_root: &Path, run_name: &str) -> bool {
+    run_path(repo_root, run_name).is_file()
 }
 
 fn join_attempt_jobs(
@@ -150,7 +154,7 @@ fn join_attempt_jobs(
     records
 }
 
-pub(super) fn compare(repo_root: &Path, run_name: &str, human: bool) -> CliResult<()> {
+pub(super) fn review_run(repo_root: &Path, run_name: &str, human: bool) -> CliResult<()> {
     let run = load_run(repo_root, run_name)?;
     let lanes = run
         .attempts
@@ -158,7 +162,7 @@ pub(super) fn compare(repo_root: &Path, run_name: &str, human: bool) -> CliResul
         .map(|attempt| attempt.lane.clone())
         .collect::<Vec<_>>();
     let locked = open_locked_lane_fs(repo_root)?;
-    let review_result = collect_review(&locked.fs, &locked.last_exec, &lanes);
+    let review_result = collect_review(&locked.fs, &locked.last_run, &lanes);
     let (review, review_error) = match review_result {
         Ok((summary, lane_summaries, paths)) => (
             ReviewOutput {
@@ -176,8 +180,8 @@ pub(super) fn compare(repo_root: &Path, run_name: &str, human: bool) -> CliResul
             Some(error.to_string()),
         ),
     };
-    let attempts = compare_attempts(&run, review_error.is_none().then_some(&review));
-    let output = CompareOutput {
+    let attempts = review_attempts(&run, review_error.is_none().then_some(&review));
+    let output = RunReviewOutput {
         repo_root: path_label(repo_root),
         storage_path: path_label(&locked.storage_path),
         actions: detail_actions(&run.name),
@@ -188,14 +192,14 @@ pub(super) fn compare(repo_root: &Path, run_name: &str, human: bool) -> CliResul
     };
 
     if human {
-        print!("{}", format_compare(&output));
+        print!("{}", format_run_review(&output));
     } else {
         print_json(&output)?;
     }
     Ok(())
 }
 
-pub(super) fn discard_run(repo_root: &Path, run_name: &str) -> CliResult<()> {
+pub(super) fn discard(repo_root: &Path, run_name: &str) -> CliResult<()> {
     let run = load_run(repo_root, run_name)?;
     let mut locked = open_locked_lane_fs(repo_root)?;
     let mut attempts = Vec::new();
@@ -283,6 +287,11 @@ fn reserve_attempt_lanes(repo_root: &Path, name: &str, lanes: &[LaneId]) -> CliR
     let storage_path = storage_path(repo_root);
     let _lock = acquire_repo_lock(&storage_path)?;
     let mut repo = load_lane_repo(&storage_path)?;
+    if repo.lane_ids().any(|lane| lane == name) {
+        return Err(CliError::message(format!(
+            "run name {name:?} overlaps an existing lane"
+        )));
+    }
     let existing = repo
         .lane_ids()
         .filter(|lane| lanes.iter().any(|attempt_lane| attempt_lane == lane))
@@ -310,11 +319,11 @@ fn run_lane_command(
     command: Vec<String>,
     observe: bool,
 ) -> AttemptRecord {
-    match crate::virtual_exec::run_virtual_lane(
+    match crate::virtual_run::run_virtual_lane(
         &repo_root,
         &lane,
         &command,
-        crate::virtual_exec::VirtualExecOptions {
+        crate::virtual_run::VirtualRunOptions {
             observe,
             ..Default::default()
         },
@@ -322,13 +331,13 @@ fn run_lane_command(
         Ok(run) => AttemptRecord {
             index,
             lane,
-            exec: Some(run.into_record().into()),
+            process: Some(run.into_record().into()),
             orchestration_error: None,
         },
         Err(error) => AttemptRecord {
             index,
             lane,
-            exec: None,
+            process: None,
             orchestration_error: Some(error.to_string()),
         },
     }
@@ -345,9 +354,9 @@ fn run_lane_command(
     AttemptRecord {
         index,
         lane,
-        exec: None,
+        process: None,
         orchestration_error: Some(
-            "lane try is only supported on Windows (requires the WinFsp virtual filesystem)"
+            "lane run --attempts is only supported on Windows (requires the WinFsp virtual filesystem)"
                 .to_owned(),
         ),
     }
@@ -360,11 +369,11 @@ fn run_check_command(
     index: usize,
     command: Vec<String>,
 ) -> AttemptRecord {
-    match crate::virtual_exec::run_virtual_lane(
+    match crate::virtual_run::run_virtual_lane(
         &repo_root,
         &lane,
         &command,
-        crate::virtual_exec::VirtualExecOptions {
+        crate::virtual_run::VirtualRunOptions {
             observe: false,
             persist_changes: false,
         },
@@ -372,13 +381,13 @@ fn run_check_command(
         Ok(run) => AttemptRecord {
             index,
             lane,
-            exec: Some(run.into_record().into()),
+            process: Some(run.into_record().into()),
             orchestration_error: None,
         },
         Err(error) => AttemptRecord {
             index,
             lane,
-            exec: None,
+            process: None,
             orchestration_error: Some(error.to_string()),
         },
     }
@@ -394,7 +403,7 @@ fn run_check_command(
     AttemptRecord {
         index,
         lane,
-        exec: None,
+        process: None,
         orchestration_error: Some(
             "lane check is only supported on Windows (requires the WinFsp virtual filesystem)"
                 .to_owned(),
@@ -480,7 +489,7 @@ fn append_check(repo_root: &Path, run_name: &str, check: CheckRecord) -> CliResu
     Ok(run)
 }
 
-fn compare_attempts(run: &RunRecord, review: Option<&ReviewOutput>) -> Vec<CompareAttempt> {
+fn review_attempts(run: &RunRecord, review: Option<&ReviewOutput>) -> Vec<ReviewedAttempt> {
     let review_by_lane = review
         .map(|review| {
             review
@@ -503,14 +512,17 @@ fn compare_attempts(run: &RunRecord, review: Option<&ReviewOutput>) -> Vec<Compa
                         .attempts
                         .iter()
                         .find(|check_attempt| check_attempt.lane == attempt.lane)
-                        .map(|check_attempt| CompareCheck {
+                        .map(|check_attempt| ReviewedCheck {
                             name: check.name.clone(),
                             ok: check_attempt.ok(),
-                            exit_code: check_attempt.exec.as_ref().and_then(|exec| exec.exit_code),
-                            worker_error: check_attempt
-                                .exec
+                            exit_code: check_attempt
+                                .process
                                 .as_ref()
-                                .and_then(|exec| exec.worker_error.clone()),
+                                .and_then(|process| process.exit_code),
+                            worker_error: check_attempt
+                                .process
+                                .as_ref()
+                                .and_then(|process| process.worker_error.clone()),
                             orchestration_error: check_attempt.orchestration_error.clone(),
                         })
                 })
@@ -520,16 +532,19 @@ fn compare_attempts(run: &RunRecord, review: Option<&ReviewOutput>) -> Vec<Compa
             let clean_ops = lane_review.map_or(0, |lane| lane.clean_ops);
             let conflicted_ops = lane_review.map_or(0, |lane| lane.conflicted_ops);
             let changed_paths = lane_review.map_or(0, |lane| lane.changed_paths);
-            CompareAttempt {
+            ReviewedAttempt {
                 index: attempt.index,
                 lane: attempt.lane.clone(),
                 attempt_ok: attempt.ok(),
-                attempt_exit_code: attempt.exec.as_ref().and_then(|exec| exec.exit_code),
+                attempt_exit_code: attempt
+                    .process
+                    .as_ref()
+                    .and_then(|process| process.exit_code),
                 attempt_error: attempt.orchestration_error.clone().or_else(|| {
                     attempt
-                        .exec
+                        .process
                         .as_ref()
-                        .and_then(|exec| exec.worker_error.clone())
+                        .and_then(|process| process.worker_error.clone())
                 }),
                 checks_passed,
                 checks_failed,
@@ -537,7 +552,7 @@ fn compare_attempts(run: &RunRecord, review: Option<&ReviewOutput>) -> Vec<Compa
                 changed_paths,
                 clean_ops,
                 conflicted_ops,
-                actions: compare_actions(&attempt.lane, clean_ops, review_available),
+                actions: attempt_actions(&attempt.lane, clean_ops, review_available),
             }
         })
         .collect()
@@ -570,40 +585,47 @@ fn summarize_run(run: &RunRecord) -> RunSummary {
     }
 }
 
-fn summary_actions(run_name: &str) -> Vec<CompareAction> {
+fn summary_actions(run_name: &str) -> Vec<ReviewCommandAction> {
     vec![
-        CompareAction::new("compare", ["compare", run_name]),
-        CompareAction::new("compare_human", ["compare", run_name, "--human"]),
-        CompareAction::new("discard_run", ["discard-run", run_name]),
+        ReviewCommandAction::new("review", ["review", run_name]),
+        ReviewCommandAction::new("review_human", ["review", run_name, "--human"]),
+        ReviewCommandAction::new("discard", ["discard", run_name]),
     ]
 }
 
-fn detail_actions(run_name: &str) -> Vec<CompareAction> {
+fn detail_actions(run_name: &str) -> Vec<ReviewCommandAction> {
     vec![
-        CompareAction::new("runs", ["runs"]),
-        CompareAction::new("discard_run", ["discard-run", run_name]),
+        ReviewCommandAction::new("history", ["review", "--history"]),
+        ReviewCommandAction::new("discard", ["discard", run_name]),
     ]
 }
 
-fn compare_actions(lane: &str, clean_ops: usize, review_available: bool) -> Vec<CompareAction> {
+fn attempt_actions(
+    lane: &str,
+    clean_ops: usize,
+    review_available: bool,
+) -> Vec<ReviewCommandAction> {
     let mut actions = Vec::new();
     if review_available {
-        actions.push(CompareAction::new(
+        actions.push(ReviewCommandAction::new(
             "review_human",
-            ["review", "--human", lane],
+            ["review", lane, "--human"],
         ));
-        actions.push(CompareAction::new("diff", ["diff", lane]));
+        actions.push(ReviewCommandAction::new(
+            "review_diff",
+            ["review", lane, "--diff"],
+        ));
         if clean_ops > 0 {
-            actions.push(CompareAction::new("promote_clean", ["promote-clean", lane]));
+            actions.push(ReviewCommandAction::new("accept", ["accept", lane]));
         }
     }
-    actions.push(CompareAction::new("discard", ["discard", lane]));
+    actions.push(ReviewCommandAction::new("discard", ["discard", lane]));
     actions
 }
 
-fn format_compare(output: &CompareOutput) -> String {
+fn format_run_review(output: &RunReviewOutput) -> String {
     let mut text = String::new();
-    text.push_str("Lane compare\n");
+    text.push_str("Lane review\n");
     text.push_str(&format!("run: {}\n", output.run.name));
     text.push_str(&format!("repo: {}\n", output.repo_root));
     text.push_str(&format!("storage: {}\n", output.storage_path));
@@ -679,7 +701,7 @@ fn format_compare(output: &CompareOutput) -> String {
                     attempt.lane,
                     attempt_status_label(
                         attempt.ok(),
-                        attempt.exec.as_ref(),
+                        attempt.process.as_ref(),
                         attempt.orchestration_error.as_deref()
                     )
                 ));
@@ -703,23 +725,23 @@ fn format_compare(output: &CompareOutput) -> String {
                     conflict.range_end,
                     conflict.lanes.join(", "),
                 ));
-                if let Some(action) = conflict
-                    .actions
-                    .iter()
-                    .find(|action| matches!(action.kind, ReviewActionKind::ResolveOps))
-                {
+                if let Some(action) = conflict.actions.iter().find(|action| {
+                    matches!(action.kind, ReviewActionKind::Accept)
+                        && action.op_ids.len() > 1
+                        && !action.required_inputs.is_empty()
+                }) {
                     text.push_str(&format!(
                         "    combine: {}\n",
                         format_command(action.command.iter().map(String::as_str))
                     ));
                 }
-                for action in conflict
-                    .actions
-                    .iter()
-                    .filter(|action| matches!(action.kind, ReviewActionKind::ResolveOp))
-                {
+                for action in conflict.actions.iter().filter(|action| {
+                    matches!(action.kind, ReviewActionKind::Accept)
+                        && action.op_ids.len() == 1
+                        && !action.required_inputs.is_empty()
+                }) {
                     text.push_str(&format!(
-                        "    resolve: {}\n",
+                        "    accept: {}\n",
                         format_command(action.command.iter().map(String::as_str))
                     ));
                 }
@@ -730,21 +752,26 @@ fn format_compare(output: &CompareOutput) -> String {
     text
 }
 
-fn attempt_status_label(ok: bool, exec: Option<&RecordedExec>, error: Option<&str>) -> String {
+fn attempt_status_label(
+    ok: bool,
+    process: Option<&RecordedProcess>,
+    error: Option<&str>,
+) -> String {
     if let Some(error) = error {
         return format!("orchestration error: {error}");
     }
-    let Some(exec) = exec else {
-        return "missing exec result".to_owned();
+    let Some(process) = process else {
+        return "missing process result".to_owned();
     };
     if ok {
         "ok".to_owned()
-    } else if let Some(error) = &exec.worker_error {
+    } else if let Some(error) = &process.worker_error {
         format!("worker error: {error}")
     } else {
         format!(
             "exit {}",
-            exec.exit_code
+            process
+                .exit_code
                 .map_or_else(|| "none".to_owned(), |code| code.to_string())
         )
     }
@@ -763,7 +790,7 @@ struct RunRecord {
 struct AttemptRecord {
     index: usize,
     lane: LaneId,
-    exec: Option<RecordedExec>,
+    process: Option<RecordedProcess>,
     orchestration_error: Option<String>,
 }
 
@@ -772,17 +799,16 @@ impl AttemptRecord {
         Self {
             index,
             lane,
-            exec: None,
+            process: None,
             orchestration_error: Some(format!("{kind} thread panicked")),
         }
     }
 
     fn ok(&self) -> bool {
         self.orchestration_error.is_none()
-            && self
-                .exec
-                .as_ref()
-                .is_some_and(|exec| exec.worker_error.is_none() && exec.exit_code == Some(0))
+            && self.process.as_ref().is_some_and(|process| {
+                process.worker_error.is_none() && process.exit_code == Some(0)
+            })
     }
 }
 
@@ -794,7 +820,7 @@ struct CheckRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct RecordedExec {
+struct RecordedProcess {
     exit_code: Option<i32>,
     worker_error: Option<String>,
     stdout: LaneTextPreview,
@@ -806,14 +832,14 @@ struct RecordedExec {
 }
 
 #[cfg(windows)]
-impl From<crate::virtual_exec::VirtualExecRecord> for RecordedExec {
-    fn from(record: crate::virtual_exec::VirtualExecRecord) -> Self {
+impl From<crate::virtual_run::VirtualRunRecord> for RecordedProcess {
+    fn from(record: crate::virtual_run::VirtualRunRecord) -> Self {
         Self {
-            exit_code: record.exec.exit_code,
-            worker_error: record.exec.worker_error,
-            stdout: record.exec.stdout,
-            stderr: record.exec.stderr,
-            changed_paths: record.exec.changed_paths,
+            exit_code: record.process.exit_code,
+            worker_error: record.process.worker_error,
+            stdout: record.process.stdout,
+            stderr: record.process.stderr,
+            changed_paths: record.process.changed_paths,
             total_ms: record.total_ms,
             change_count: record.change_count,
             warnings: record.warnings,
@@ -822,7 +848,7 @@ impl From<crate::virtual_exec::VirtualExecRecord> for RecordedExec {
 }
 
 #[derive(Serialize)]
-struct TryOutput {
+struct RunAttemptsOutput {
     repo_root: String,
     storage_path: String,
     run: RunRecord,
@@ -837,7 +863,7 @@ struct CheckOutput {
 }
 
 #[derive(Serialize)]
-struct RunsOutput {
+struct ReviewHistoryOutput {
     repo_root: String,
     storage_path: String,
     runs: Vec<RunSummary>,
@@ -854,18 +880,18 @@ struct RunSummary {
     checks: usize,
     checks_passed: usize,
     checks_failed: usize,
-    actions: Vec<CompareAction>,
+    actions: Vec<ReviewCommandAction>,
 }
 
 #[derive(Serialize)]
-struct CompareOutput {
+struct RunReviewOutput {
     repo_root: String,
     storage_path: String,
-    actions: Vec<CompareAction>,
+    actions: Vec<ReviewCommandAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     review_error: Option<String>,
     run: RunRecord,
-    attempts: Vec<CompareAttempt>,
+    attempts: Vec<ReviewedAttempt>,
     review: ReviewOutput,
 }
 
@@ -888,7 +914,7 @@ struct DiscardRunAttempt {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct CompareAttempt {
+struct ReviewedAttempt {
     index: usize,
     lane: LaneId,
     attempt_ok: bool,
@@ -896,15 +922,15 @@ struct CompareAttempt {
     attempt_error: Option<String>,
     checks_passed: usize,
     checks_failed: usize,
-    checks: Vec<CompareCheck>,
+    checks: Vec<ReviewedCheck>,
     changed_paths: usize,
     clean_ops: usize,
     conflicted_ops: usize,
-    actions: Vec<CompareAction>,
+    actions: Vec<ReviewCommandAction>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct CompareCheck {
+struct ReviewedCheck {
     name: String,
     ok: bool,
     exit_code: Option<i32>,
@@ -913,12 +939,12 @@ struct CompareCheck {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct CompareAction {
+struct ReviewCommandAction {
     kind: &'static str,
     command: Vec<String>,
 }
 
-impl CompareAction {
+impl ReviewCommandAction {
     fn new<'a>(kind: &'static str, command: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
             kind,

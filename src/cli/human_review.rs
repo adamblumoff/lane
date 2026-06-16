@@ -8,7 +8,7 @@ use super::output::{
     BytePreview, ReviewActionKind, ReviewActionOutput, ReviewLaneSummary, ReviewOpState,
     ReviewOrderedOpOutput, ReviewOutput, ReviewPathOutput,
 };
-use super::review::resolve_op_action;
+use super::review::accept_replacement_op_action;
 
 const HUMAN_PREVIEW_CHAR_LIMIT: usize = 160;
 const CLEAN_ONLY_PATH_DETAIL_LIMIT: usize = 20;
@@ -94,9 +94,9 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
             write_op_previews(text, "  |    ", &op.base, &op.inserted)?;
             writeln!(
                 text,
-                "  |    promote: {}",
+                "  |    accept: {}",
                 format_command([
-                    "promote-ops",
+                    "accept",
                     op.op.lane.as_str(),
                     op.op.path.as_str(),
                     op.op.op_id.as_str(),
@@ -121,11 +121,11 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
                 conflict.range_end,
                 conflict.lanes.join(", "),
             )?;
-            if let Some(action) = conflict
-                .actions
-                .iter()
-                .find(|action| matches!(action.kind, ReviewActionKind::ResolveOps))
-            {
+            if let Some(action) = conflict.actions.iter().find(|action| {
+                matches!(action.kind, ReviewActionKind::Accept)
+                    && action.op_ids.len() > 1
+                    && !action.required_inputs.is_empty()
+            }) {
                 writeln!(text, "       combine: {}", format_action_command(action))?;
             }
             for op in &conflict.ops {
@@ -133,8 +133,8 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
                 write_op_previews(text, "         ", &op.base, &op.inserted)?;
                 writeln!(
                     text,
-                    "         resolve: {}",
-                    format_action_command(&resolve_op_action(op))
+                    "         accept: {}",
+                    format_action_command(&accept_replacement_op_action(op))
                 )?;
             }
         }
@@ -202,7 +202,7 @@ fn write_clean_only_paths(text: &mut String, output: &ReviewOutput) -> fmt::Resu
         } else {
             writeln!(
                 text,
-                "  - {}: {} across {}; command promotes {} across {}",
+                "  - {}: {} across {}; command accepts {} across {}",
                 lane.lane,
                 count_label(clean_ops, "clean op"),
                 count_label(path_count, "clean-only path"),
@@ -213,7 +213,7 @@ fn write_clean_only_paths(text: &mut String, output: &ReviewOutput) -> fmt::Resu
         if let Some(action) = lane
             .actions
             .iter()
-            .find(|action| matches!(action.kind, ReviewActionKind::PromoteClean))
+            .find(|action| matches!(action.kind, ReviewActionKind::Accept))
         {
             writeln!(text, "    command: {}", format_action_command(action))?;
         }
@@ -260,11 +260,11 @@ fn write_omitted_clean_ops(
             .push(op.op.op_id.as_str());
     }
     for (lane, op_ids) in omitted_by_lane {
-        let mut command = vec!["promote-ops", lane, path.path.as_str()];
+        let mut command = vec!["accept", lane, path.path.as_str()];
         command.extend(op_ids.iter().copied());
         writeln!(
             text,
-            "  |    {}: {} omitted; promote: {}",
+            "  |    {}: {} omitted; accept: {}",
             lane,
             count_label(op_ids.len(), "clean op"),
             format_command(command)
@@ -289,9 +289,9 @@ fn write_lane_status(text: &mut String, lanes: &[ReviewLaneSummary]) -> fmt::Res
             count_label(lane.changed_paths, "changed path"),
             count_label(lane.clean_ops, "clean op"),
             count_label(lane.conflicted_ops, "conflicted op"),
-            last_exec_label(lane.last_exec.as_ref()),
+            last_run_label(lane.last_run.as_ref()),
         )?;
-        if let Some(detail) = last_exec_detail(lane.last_exec.as_ref()) {
+        if let Some(detail) = last_run_detail(lane.last_run.as_ref()) {
             writeln!(text, "    {detail}")?;
         }
     }
@@ -303,7 +303,7 @@ fn write_promotable_now(
     lanes: &[ReviewLaneSummary],
     paths: &[ReviewPathOutput],
 ) -> fmt::Result {
-    writeln!(text, "\nPromotable now")?;
+    writeln!(text, "\nAcceptable now")?;
     let mut wrote_lane = false;
     for lane in lanes.iter().filter(|lane| lane.clean_ops > 0) {
         wrote_lane = true;
@@ -314,12 +314,12 @@ fn write_promotable_now(
             count_label(lane.clean_ops, "clean op"),
             count_label(promotable_path_count(paths, &lane.lane), "path"),
             count_label(lane.changed_paths, "changed path"),
-            last_exec_label(lane.last_exec.as_ref()),
+            last_run_label(lane.last_run.as_ref()),
         )?;
         if let Some(action) = lane
             .actions
             .iter()
-            .find(|action| matches!(action.kind, ReviewActionKind::PromoteClean))
+            .find(|action| matches!(action.kind, ReviewActionKind::Accept))
         {
             writeln!(text, "    command: {}", format_action_command(action))?;
         }
@@ -453,58 +453,58 @@ fn is_plain_command_arg(arg: &str) -> bool {
         })
 }
 
-fn last_exec_label(last_exec: Option<&crate::LaneExecState>) -> String {
-    let Some(last_exec) = last_exec else {
-        return "last exec unavailable".to_owned();
+fn last_run_label(last_run: Option<&crate::LaneRunState>) -> String {
+    let Some(last_run) = last_run else {
+        return "last run unavailable".to_owned();
     };
 
-    let status = if last_exec.worker_error.is_some() {
-        "last exec worker error".to_owned()
+    let status = if last_run.worker_error.is_some() {
+        "last run worker error".to_owned()
     } else {
-        match last_exec.exit_code {
-            Some(0) => "last exec ok".to_owned(),
-            Some(code) => format!("last exec exit {code}"),
-            None => "last exec no exit code".to_owned(),
+        match last_run.exit_code {
+            Some(0) => "last run ok".to_owned(),
+            Some(code) => format!("last run exit {code}"),
+            None => "last run no exit code".to_owned(),
         }
     };
 
     format!(
-        "{status}, exec touched {}",
-        count_label(last_exec.changed_paths.len(), "path")
+        "{status}, run touched {}",
+        count_label(last_run.changed_paths.len(), "path")
     )
 }
 
-fn last_exec_detail(last_exec: Option<&crate::LaneExecState>) -> Option<String> {
-    let last_exec = last_exec?;
-    if let Some(error) = &last_exec.worker_error {
+fn last_run_detail(last_run: Option<&crate::LaneRunState>) -> Option<String> {
+    let last_run = last_run?;
+    if let Some(error) = &last_run.worker_error {
         return Some(format!("worker error: {}", one_line_preview(error)));
     }
 
-    if last_exec.exit_code == Some(0) {
+    if last_run.exit_code == Some(0) {
         return None;
     }
 
-    if !last_exec.stderr.text.trim().is_empty() {
-        let truncated = if last_exec.stderr.truncated {
+    if !last_run.stderr.text.trim().is_empty() {
+        let truncated = if last_run.stderr.truncated {
             " (truncated)"
         } else {
             ""
         };
         return Some(format!(
             "stderr: {}{truncated}",
-            one_line_preview(&last_exec.stderr.text),
+            one_line_preview(&last_run.stderr.text),
         ));
     }
 
-    if !last_exec.stdout.text.trim().is_empty() {
-        let truncated = if last_exec.stdout.truncated {
+    if !last_run.stdout.text.trim().is_empty() {
+        let truncated = if last_run.stdout.truncated {
             " (truncated)"
         } else {
             ""
         };
         return Some(format!(
             "stdout: {}{truncated}",
-            one_line_preview(&last_exec.stdout.text),
+            one_line_preview(&last_run.stdout.text),
         ));
     }
 
