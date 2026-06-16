@@ -11,15 +11,15 @@ use windows_sys::Win32::Foundation::{
 };
 use winfsp_wrs::{FileInfo, SecurityDescriptor, U16CStr, WriteMode};
 
-use crate::storage::{acquire_repo_lock, load_repo, persist_last_exec, persist_repo};
+use crate::storage::{acquire_repo_lock, load_repo, persist_last_run, persist_repo};
 use crate::vfs::{DirEntryKind, FileWorktree, LaneFs};
-use crate::{FilePath, LaneExecState};
+use crate::{FilePath, LaneRunState};
 
 use super::nodes::{
     VirtualNode, change_for_path, child_path, dir_info, file_info, status_from_lane_fs_error,
 };
 use super::support::elapsed_ms;
-use super::types::{VirtualChangeOutput, VirtualExecError, VirtualFsMetrics};
+use super::types::{VirtualChangeOutput, VirtualFsMetrics, VirtualRunError};
 
 pub(super) struct VirtualLaneState {
     repo_root: PathBuf,
@@ -381,11 +381,11 @@ impl VirtualLaneState {
         operation(&fs)
     }
 
-    pub(super) fn flush(&self) -> Result<(), VirtualExecError> {
+    pub(super) fn flush(&self) -> Result<(), VirtualRunError> {
         let dirty = self
             .dirty
             .lock()
-            .map_err(|_| VirtualExecError::message("virtual lane dirty map lock poisoned"))?
+            .map_err(|_| VirtualRunError::message("virtual lane dirty map lock poisoned"))?
             .clone();
         if dirty.is_empty() {
             return Ok(());
@@ -393,7 +393,7 @@ impl VirtualLaneState {
         let versions = self
             .versions
             .lock()
-            .map_err(|_| VirtualExecError::message("virtual lane version map lock poisoned"))?
+            .map_err(|_| VirtualRunError::message("virtual lane version map lock poisoned"))?
             .clone();
 
         with_lane_fs_write(
@@ -415,31 +415,31 @@ impl VirtualLaneState {
         )
     }
 
-    pub(super) fn collect_changes(&self) -> Result<Vec<VirtualChangeOutput>, VirtualExecError> {
+    pub(super) fn collect_changes(&self) -> Result<Vec<VirtualChangeOutput>, VirtualRunError> {
         let dirty = self
             .dirty
             .lock()
-            .map_err(|_| VirtualExecError::message("virtual lane dirty map lock poisoned"))?
+            .map_err(|_| VirtualRunError::message("virtual lane dirty map lock poisoned"))?
             .clone();
         let versions = self
             .versions
             .lock()
-            .map_err(|_| VirtualExecError::message("virtual lane version map lock poisoned"))?
+            .map_err(|_| VirtualRunError::message("virtual lane version map lock poisoned"))?
             .clone();
         let fs = self
             .fs
             .lock()
-            .map_err(|_| VirtualExecError::message("virtual lane session lock poisoned"))?;
+            .map_err(|_| VirtualRunError::message("virtual lane session lock poisoned"))?;
         let mut draft = LaneFs::new(fs.repo().clone(), FileWorktree::new(&self.repo_root));
         let dirty = canonicalize_dirty_entries(&draft, &self.lane, &dirty, &versions).map_err(
-            |status| VirtualExecError::from_status("collect dirty virtual changes", status),
+            |status| VirtualRunError::from_status("collect dirty virtual changes", status),
         )?;
         apply_dirty_entries(
             &mut draft,
             &self.lane,
             dirty.iter().map(|(path, entry)| (path.as_str(), entry)),
         )
-        .map_err(|status| VirtualExecError::from_status("collect dirty virtual changes", status))?;
+        .map_err(|status| VirtualRunError::from_status("collect dirty virtual changes", status))?;
         draft
             .changed_paths(&self.lane)
             .map_err(status_from_lane_fs_error)
@@ -450,25 +450,22 @@ impl VirtualLaneState {
                     .collect::<Result<Vec<_>, _>>()
                     .map(|changes| changes.into_iter().flatten().collect())
             })
-            .map_err(|status| VirtualExecError::from_status("collect projected lane paths", status))
+            .map_err(|status| VirtualRunError::from_status("collect projected lane paths", status))
     }
 
-    pub(super) fn record_last_exec(
-        &self,
-        exec_state: LaneExecState,
-    ) -> Result<(), VirtualExecError> {
+    pub(super) fn record_last_run(&self, run_state: LaneRunState) -> Result<(), VirtualRunError> {
         let wait_start = Instant::now();
         let lock = acquire_repo_lock(&self.storage_path).map_err(|error| {
-            VirtualExecError::message(format!(
+            VirtualRunError::message(format!(
                 "failed to acquire lane storage lock {}: {error}",
                 self.storage_path.display()
             ))
         })?;
         let wait_ms = elapsed_ms(wait_start);
         let held_start = Instant::now();
-        persist_last_exec(&self.storage_path, &self.lane, &exec_state).map_err(|error| {
-            VirtualExecError::message(format!(
-                "failed to persist last_exec metadata {}: {error}",
+        persist_last_run(&self.storage_path, &self.lane, &run_state).map_err(|error| {
+            VirtualRunError::message(format!(
+                "failed to persist last_run metadata {}: {error}",
                 self.storage_path.display()
             ))
         })?;
@@ -478,19 +475,19 @@ impl VirtualLaneState {
         Ok(())
     }
 
-    pub(super) fn projected_paths(&self) -> Result<Vec<FilePath>, VirtualExecError> {
+    pub(super) fn projected_paths(&self) -> Result<Vec<FilePath>, VirtualRunError> {
         self.fs
             .lock()
-            .map_err(|_| VirtualExecError::message("virtual lane session lock poisoned"))?
+            .map_err(|_| VirtualRunError::message("virtual lane session lock poisoned"))?
             .changed_paths(&self.lane)
             .map_err(status_from_lane_fs_error)
-            .map_err(|status| VirtualExecError::from_status("collect projected lane paths", status))
+            .map_err(|status| VirtualRunError::from_status("collect projected lane paths", status))
     }
 
-    pub(super) fn worker_changed_paths(&self) -> Result<Vec<FilePath>, VirtualExecError> {
+    pub(super) fn worker_changed_paths(&self) -> Result<Vec<FilePath>, VirtualRunError> {
         self.canonical_dirty_entries()
             .map(|dirty| dirty.into_iter().map(|(path, _)| path).collect())
-            .map_err(|status| VirtualExecError::from_status("collect worker changed paths", status))
+            .map_err(|status| VirtualRunError::from_status("collect worker changed paths", status))
     }
 
     fn dirty_entry(&self, path: &str) -> Result<Option<DirtyEntry>, i32> {
@@ -721,7 +718,7 @@ pub(super) fn prepare_session_fs(
     storage_path: &Path,
     lane: &str,
     metrics: &VirtualFsMetrics,
-) -> Result<LaneFs, VirtualExecError> {
+) -> Result<LaneFs, VirtualRunError> {
     with_lane_fs_write(repo_root, storage_path, metrics, |fs| {
         fs.create_lane(lane).map_err(status_from_lane_fs_error)?;
         Ok(LaneFs::new(fs.repo().clone(), FileWorktree::new(repo_root)))
@@ -733,10 +730,10 @@ fn with_lane_fs_write<T>(
     storage_path: &Path,
     metrics: &VirtualFsMetrics,
     operation: impl FnOnce(&mut LaneFs) -> Result<T, i32>,
-) -> Result<T, VirtualExecError> {
+) -> Result<T, VirtualRunError> {
     let wait_start = Instant::now();
     let lock = acquire_repo_lock(storage_path).map_err(|error| {
-        VirtualExecError::message(format!(
+        VirtualRunError::message(format!(
             "failed to acquire lane storage lock {}: {error}",
             storage_path.display()
         ))
@@ -745,7 +742,7 @@ fn with_lane_fs_write<T>(
     let held_start = Instant::now();
     let repo = load_repo(storage_path)
         .map_err(|error| {
-            VirtualExecError::message(format!(
+            VirtualRunError::message(format!(
                 "failed to load lane storage {}: {error}",
                 storage_path.display()
             ))
@@ -755,7 +752,7 @@ fn with_lane_fs_write<T>(
     let result = operation(&mut fs);
     if result.is_ok() {
         persist_repo(storage_path, fs.repo()).map_err(|error| {
-            VirtualExecError::message(format!(
+            VirtualRunError::message(format!(
                 "failed to persist lane storage {}: {error}",
                 storage_path.display()
             ))
@@ -764,5 +761,5 @@ fn with_lane_fs_write<T>(
     let held_ms = elapsed_ms(held_start);
     drop(lock);
     metrics.record_write(wait_ms, held_ms);
-    result.map_err(|status| VirtualExecError::from_status("apply lane storage update", status))
+    result.map_err(|status| VirtualRunError::from_status("apply lane storage update", status))
 }

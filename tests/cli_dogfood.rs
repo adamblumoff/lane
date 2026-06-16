@@ -5,7 +5,7 @@ mod common;
 use common::*;
 
 #[test]
-fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes() {
+fn cli_parent_dogfood_flow_reviews_accepts_replacements_and_discards_worker_lanes() {
     let repo = TempRepo::new();
     repo.write(
         "src/app.ts",
@@ -14,7 +14,7 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     repo.write("README.md", b"# Lane\n\nBase docs.\n");
 
     let docs_clean = repo.run_json([
-        "exec",
+        "run",
         "docs-clean",
         "--",
         "pwsh",
@@ -26,7 +26,7 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     assert_eq!(docs_clean["worker_error"], Value::Null);
 
     let title_loud = repo.run_json([
-        "exec",
+        "run",
         "title-loud",
         "--",
         "pwsh",
@@ -38,7 +38,7 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     assert_eq!(title_loud["worker_error"], Value::Null);
 
     let title_grid = repo.run_json([
-        "exec",
+        "run",
         "title-grid",
         "--",
         "pwsh",
@@ -50,7 +50,7 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     assert_eq!(title_grid["worker_error"], Value::Null);
 
     let scratch_build = repo.run_json([
-        "exec",
+        "run",
         "scratch-build",
         "--",
         "pwsh",
@@ -61,7 +61,7 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     assert_eq!(scratch_build["exit_code"], 0);
     assert_eq!(scratch_build["worker_error"], Value::Null);
 
-    let failed_output = run_lane_exec(
+    let failed_output = run_lane_command(
         repo.path(),
         "failed-worker",
         "$ErrorActionPreference = \"Continue\"; New-Item -ItemType Directory -Path '.cache' -Force | Out-Null; [IO.File]::WriteAllText('.cache/failed.log', \"failed`n\"); [IO.File]::WriteAllText('src/partial.ts', \"export const partial = true;`n\"); Write-Error \"simulated dogfood failure\"; exit 9",
@@ -107,10 +107,10 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
 
     let human = repo.run_text(["review", "--human"]);
     assert!(human.contains(
-        "  - failed-worker: 2 changed paths, 2 clean ops, 0 conflicted ops, last exec exit 9, exec touched 3 paths"
+        "  - failed-worker: 2 changed paths, 2 clean ops, 0 conflicted ops, last run exit 9, run touched 3 paths"
     ));
     assert!(human.contains(
-        "  - failed-worker: 2 clean ops across 2 paths, 2 changed paths total, last exec exit 9, exec touched 3 paths"
+        "  - failed-worker: 2 clean ops across 2 paths, 2 changed paths total, last run exit 9, run touched 3 paths"
     ));
     assert!(human.contains("stderr: "));
     assert!(human.contains("simulated dogfood failure"));
@@ -119,27 +119,27 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     assert_eq!(failed_lane["changed_paths"], 2);
     assert_eq!(failed_lane["clean_ops"], 2);
     assert_eq!(failed_lane["conflicted_ops"], 0);
-    assert_eq!(failed_lane["last_exec"]["exit_code"], 9);
-    assert_eq!(failed_lane["last_exec"]["worker_error"], Value::Null);
+    assert_eq!(failed_lane["last_run"]["exit_code"], 9);
+    assert_eq!(failed_lane["last_run"]["worker_error"], Value::Null);
     assert_eq!(
-        string_array(&failed_lane["last_exec"]["changed_paths"]),
+        string_array(&failed_lane["last_run"]["changed_paths"]),
         vec![".cache", ".cache/failed.log", "src/partial.ts"]
     );
     assert!(
-        failed_lane["last_exec"]["stderr"]["text"]
+        failed_lane["last_run"]["stderr"]["text"]
             .as_str()
             .unwrap()
             .contains("simulated dogfood failure")
     );
-    assert_eq!(failed_lane["last_exec"]["stderr"]["truncated"], false);
+    assert_eq!(failed_lane["last_run"]["stderr"]["truncated"], false);
     assert_eq!(
         review_action_kinds(&failed_lane["actions"]),
-        vec!["promote_clean", "discard"]
+        vec!["accept", "discard"]
     );
     assert_eq!(
         review_action_commands(&failed_lane["actions"]),
         vec![
-            vec!["promote-clean", "failed-worker"],
+            vec!["accept", "failed-worker"],
             vec!["discard", "failed-worker"]
         ]
     );
@@ -148,13 +148,10 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     assert_eq!(selected_lane["changed_paths"], 2);
     assert_eq!(selected_lane["clean_ops"], 1);
     assert_eq!(selected_lane["conflicted_ops"], 1);
-    assert_eq!(selected_lane["last_exec"]["exit_code"], 0);
+    assert_eq!(selected_lane["last_run"]["exit_code"], 0);
     assert_eq!(
         review_action_commands(&selected_lane["actions"]),
-        vec![
-            vec!["promote-clean", "title-loud"],
-            vec!["discard", "title-loud"]
-        ]
+        vec![vec!["accept", "title-loud"], vec!["discard", "title-loud"]]
     );
 
     let app_review = review_path(&review, "src/app.ts");
@@ -170,19 +167,13 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     );
     assert_eq!(
         review_action_kinds(&app_conflict["actions"]),
-        vec![
-            "resolve_ops",
-            "show_op",
-            "resolve_op",
-            "show_op",
-            "resolve_op"
-        ]
+        vec!["accept", "detail", "accept", "detail", "accept"]
     );
     assert_eq!(
         review_action_commands(&app_conflict["actions"]),
         vec![
             vec![
-                "resolve-ops",
+                "accept",
                 "src/app.ts",
                 "--op",
                 "title-grid:1",
@@ -191,18 +182,18 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
                 "--with-file",
                 "<replacement-file>"
             ],
-            vec!["show-op", "title-grid", "src/app.ts", "title-grid:1"],
+            vec!["review", "title-grid", "src/app.ts", "title-grid:1"],
             vec![
-                "resolve-op",
+                "accept",
                 "title-grid",
                 "src/app.ts",
                 "title-grid:1",
                 "--with-file",
                 "<replacement-file>"
             ],
-            vec!["show-op", "title-loud", "src/app.ts", "title-loud:1"],
+            vec!["review", "title-loud", "src/app.ts", "title-loud:1"],
             vec![
-                "resolve-op",
+                "accept",
                 "title-loud",
                 "src/app.ts",
                 "title-loud:1",
@@ -225,31 +216,31 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     assert_eq!(failed_review["lanes"][0]["status"], "created");
     assert_eq!(failed_review["lanes"][0]["clean_ops"], 1);
 
-    let docs_promoted = run_review_action_json(
+    let docs_accepted = run_review_action_json(
         &repo,
         review_action(
             &review_lane(&review, "docs-clean")["actions"],
-            "promote_clean",
+            "accept",
             "docs-clean",
         ),
     );
-    assert_eq!(change_statuses_from_key(&docs_promoted, "promoted"), {
+    assert_eq!(change_statuses_from_key(&docs_accepted, "accepted"), {
         let mut expected = BTreeMap::new();
         expected.insert("README.md".to_owned(), "modified".to_owned());
         expected.insert("src/analytics.ts".to_owned(), "created".to_owned());
         expected
     });
-    assert!(docs_promoted["conflicts"].as_array().unwrap().is_empty());
+    assert!(docs_accepted["conflicts"].as_array().unwrap().is_empty());
 
     let selected_clean = run_review_action_json(
         &repo,
         review_action(
             &review_lane(&review, "title-loud")["actions"],
-            "promote_clean",
+            "accept",
             "title-loud",
         ),
     );
-    assert_eq!(change_statuses_from_key(&selected_clean, "promoted"), {
+    assert_eq!(change_statuses_from_key(&selected_clean, "accepted"), {
         let mut expected = BTreeMap::new();
         expected.insert("src/banner.ts".to_owned(), "created".to_owned());
         expected
@@ -271,7 +262,7 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
 
     let shown = run_review_action_json(
         &repo,
-        review_action(&after_clean_conflict["actions"], "show_op", "title-loud"),
+        review_action(&after_clean_conflict["actions"], "detail", "title-loud"),
     );
     let selected_op_id = shown["op"]["op_id"].as_str().unwrap();
     assert_eq!(shown["op"]["op_id"], selected_op_id);
@@ -282,15 +273,15 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
         vec!["title-grid"]
     );
 
-    let resolution = repo.path().join("title-resolution.txt");
-    fs::write(&resolution, b"Launch").unwrap();
-    let resolved = run_review_action_with_replacement_json(
+    let replacement = repo.path().join("title-replacement.txt");
+    fs::write(&replacement, b"Launch").unwrap();
+    let accepted = run_review_action_with_replacement_json(
         &repo,
-        review_action(&after_clean_conflict["actions"], "resolve_op", "title-loud"),
-        &resolution,
+        review_action(&after_clean_conflict["actions"], "accept", "title-loud"),
+        &replacement,
     );
-    assert_eq!(resolved["replacement"]["utf8"], "Launch");
-    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    assert_eq!(accepted["replacement"]["utf8"], "Launch");
+    assert!(accepted["remaining"].as_array().unwrap().is_empty());
 
     assert_eq!(
         fs::read(repo.path().join("src/app.ts")).unwrap(),

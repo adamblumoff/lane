@@ -7,26 +7,26 @@ use serde::Serialize;
 use super::doctor::inspect_storage;
 use super::lock::acquire_repo_lock;
 
-pub(crate) fn gc_storage(storage_root: &Path) -> io::Result<StorageGcReport> {
+pub(crate) fn cleanup_storage(storage_root: &Path) -> io::Result<StorageCleanupReport> {
     let _lock = acquire_repo_lock(storage_root)?;
     let inspection = inspect_storage(storage_root)?;
     let report = &inspection.report;
     if !report.manifest_present {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "cannot gc lane storage without repo.json",
+            "cannot clean lane storage without repo.json",
         ));
     }
     if !report.is_healthy() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "cannot gc unhealthy lane storage; run lane doctor first",
+            "cannot clean unhealthy lane storage; run lane doctor first",
         ));
     }
     if !inspection.blob_inventory.warnings.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "cannot gc storage with invalid blob files; run lane doctor first",
+            "cannot clean storage with invalid blob files; run lane doctor first",
         ));
     }
 
@@ -46,7 +46,7 @@ pub(crate) fn gc_storage(storage_root: &Path) -> io::Result<StorageGcReport> {
         bytes_removed += blob.bytes;
     }
 
-    Ok(StorageGcReport {
+    Ok(StorageCleanupReport {
         blobs_removed,
         bytes_removed,
         blobs_remaining: inspection.blob_inventory.blobs_present - blobs_removed,
@@ -54,7 +54,7 @@ pub(crate) fn gc_storage(storage_root: &Path) -> io::Result<StorageGcReport> {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct StorageGcReport {
+pub(crate) struct StorageCleanupReport {
     pub(crate) blobs_removed: usize,
     pub(crate) bytes_removed: u64,
     pub(crate) blobs_remaining: usize,

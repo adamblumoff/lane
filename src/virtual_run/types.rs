@@ -6,15 +6,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
 
 use crate::vfs::{LaneFileChange, LaneFileChangeStatus};
-use crate::{FilePath, LaneExecState, LaneOpSummary};
+use crate::{FilePath, LaneOpSummary, LaneRunState};
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct VirtualExecOptions {
+pub(crate) struct VirtualRunOptions {
     pub(crate) observe: bool,
     pub(crate) persist_changes: bool,
 }
 
-impl Default for VirtualExecOptions {
+impl Default for VirtualRunOptions {
     fn default() -> Self {
         Self {
             observe: false,
@@ -55,7 +55,7 @@ pub(super) struct VirtualFsMetricsSnapshot {
 }
 
 #[derive(Serialize)]
-pub(crate) struct VirtualExecOutput {
+pub(crate) struct VirtualRunOutput {
     pub(super) lane: String,
     pub(super) repo_root: String,
     pub(super) storage_path: String,
@@ -68,27 +68,27 @@ pub(crate) struct VirtualExecOutput {
     pub(super) stderr: String,
     pub(super) worker_error: Option<String>,
     pub(super) changed_paths: Vec<FilePath>,
-    pub(super) timings: VirtualExecTimings,
+    pub(super) timings: VirtualRunTimings,
     pub(super) changes: Vec<VirtualChangeOutput>,
-    pub(super) warnings: Vec<VirtualExecWarning>,
+    pub(super) warnings: Vec<VirtualRunWarning>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct VirtualExecRecord {
-    pub(crate) exec: LaneExecState,
+pub(crate) struct VirtualRunRecord {
+    pub(crate) process: LaneRunState,
     pub(crate) total_ms: u64,
     pub(crate) change_count: usize,
     pub(crate) warnings: Vec<String>,
 }
 
-impl VirtualExecOutput {
+impl VirtualRunOutput {
     pub(crate) fn failed(&self) -> bool {
         self.exit_code != Some(0) || self.worker_error.is_some()
     }
 
-    pub(crate) fn into_record(self) -> VirtualExecRecord {
-        VirtualExecRecord {
-            exec: LaneExecState::new(
+    pub(crate) fn into_record(self) -> VirtualRunRecord {
+        VirtualRunRecord {
+            process: LaneRunState::new(
                 self.exit_code,
                 self.worker_error,
                 &self.stdout,
@@ -107,13 +107,13 @@ impl VirtualExecOutput {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
-pub(super) struct VirtualExecWarning {
+pub(super) struct VirtualRunWarning {
     pub(super) kind: &'static str,
     pub(super) message: String,
 }
 
 #[derive(Serialize)]
-pub(super) struct VirtualExecTimings {
+pub(super) struct VirtualRunTimings {
     pub(super) total_ms: u64,
     pub(super) storage_lock_wait_ms: u64,
     pub(super) storage_lock_held_ms: u64,
@@ -147,11 +147,11 @@ impl From<LaneFileChange> for VirtualChangeOutput {
 }
 
 #[derive(Debug)]
-pub(crate) struct VirtualExecError {
+pub(crate) struct VirtualRunError {
     message: String,
 }
 
-impl VirtualExecError {
+impl VirtualRunError {
     pub(super) fn message(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -160,20 +160,20 @@ impl VirtualExecError {
 
     pub(super) fn from_status(operation: &str, status: i32) -> Self {
         Self::message(format!(
-            "virtual lane filesystem failed while trying to {operation} with NTSTATUS {status:#x}"
+            "virtual lane filesystem failed while running {operation} with NTSTATUS {status:#x}"
         ))
     }
 }
 
-impl fmt::Display for VirtualExecError {
+impl fmt::Display for VirtualRunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.message)
     }
 }
 
-impl Error for VirtualExecError {}
+impl Error for VirtualRunError {}
 
-impl From<io::Error> for VirtualExecError {
+impl From<io::Error> for VirtualRunError {
     fn from(error: io::Error) -> Self {
         Self::message(error.to_string())
     }

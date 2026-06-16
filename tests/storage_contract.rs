@@ -1,7 +1,7 @@
 pub use lane::{
     BaseFingerprint, BaseStorageSnapshot, FileOpStorageSnapshot, FilePath,
-    LaneEntryStorageSnapshot, LaneExecState, LaneFileStorageSnapshot, LaneId, LaneRepo,
-    LaneRepoStorageSnapshot, ensure_user_lane,
+    LaneEntryStorageSnapshot, LaneFileStorageSnapshot, LaneId, LaneRepo, LaneRepoStorageSnapshot,
+    LaneRunState, ensure_user_lane,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -11,46 +11,46 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::{
-    acquire_repo_lock, doctor_storage, gc_storage, is_lock_contention, load_last_exec, load_repo,
-    persist_last_exec, persist_repo,
+    acquire_repo_lock, cleanup_storage, doctor_storage, is_lock_contention, load_last_run,
+    load_repo, persist_last_run, persist_repo,
 };
 
 // This recompiles the crate-private storage module inside the integration test.
 // Keep the lane::* re-exports above aligned with storage.rs crate:: imports.
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports)]
 #[path = "../src/storage.rs"]
 mod storage;
 
 static NEXT_UNIQUE_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 #[test]
-fn storage_v2_persists_manifest_blobs_and_last_exec() {
+fn storage_v2_persists_manifest_blobs_and_last_run() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
 
     persist_repo(temp.path(), &repo).unwrap();
-    persist_last_exec(
+    persist_last_run(
         temp.path(),
         "agent-a",
-        &LaneExecState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
+        &LaneRunState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
     )
     .unwrap();
 
     assert!(temp.path().join("repo.json").exists());
     assert_eq!(doctor_storage(temp.path()).unwrap().blobs_present, 1);
-    assert!(temp.path().join("last_exec/agent-a.json").exists());
+    assert!(temp.path().join("last_run/agent-a.json").exists());
 
     let loaded = load_repo(temp.path()).unwrap().unwrap();
     assert_eq!(
         loaded.read_path("src/new.ts", "agent-a", None).unwrap(),
         Some(b"new\n".to_vec())
     );
-    let last_exec = load_last_exec(temp.path(), &lane_set(&loaded));
-    let last_exec = last_exec.get("agent-a").unwrap();
-    assert_eq!(last_exec.exit_code, Some(0));
-    assert_eq!(last_exec.stdout.text, "ok\n");
-    assert!(!last_exec.stdout.truncated);
-    assert_eq!(last_exec.changed_paths, vec!["src/new.ts"]);
+    let last_run = load_last_run(temp.path(), &lane_set(&loaded));
+    let last_run = last_run.get("agent-a").unwrap();
+    assert_eq!(last_run.exit_code, Some(0));
+    assert_eq!(last_run.stdout.text, "ok\n");
+    assert!(!last_run.stdout.truncated);
+    assert_eq!(last_run.changed_paths, vec!["src/new.ts"]);
 }
 
 #[test]
@@ -78,24 +78,24 @@ fn storage_v2_deduplicates_repeated_inserted_blobs() {
 }
 
 #[test]
-fn corrupt_last_exec_is_advisory_but_doctor_reports_it() {
+fn corrupt_last_run_is_advisory_but_doctor_reports_it() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
     persist_repo(temp.path(), &repo).unwrap();
-    persist_last_exec(
+    persist_last_run(
         temp.path(),
         "agent-a",
-        &LaneExecState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
+        &LaneRunState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
     )
     .unwrap();
-    fs::write(temp.path().join("last_exec/agent-a.json"), b"not json").unwrap();
+    fs::write(temp.path().join("last_run/agent-a.json"), b"not json").unwrap();
 
     let loaded = load_repo(temp.path()).unwrap().unwrap();
     assert_eq!(
         loaded.read_path("src/new.ts", "agent-a", None).unwrap(),
         Some(b"new\n".to_vec())
     );
-    assert!(load_last_exec(temp.path(), &lane_set(&loaded)).is_empty());
+    assert!(load_last_run(temp.path(), &lane_set(&loaded)).is_empty());
 
     let report = doctor_storage(temp.path()).unwrap();
     assert!(!report.is_healthy());
@@ -103,24 +103,24 @@ fn corrupt_last_exec_is_advisory_but_doctor_reports_it() {
         report
             .errors
             .iter()
-            .any(|error| error.contains("last_exec file"))
+            .any(|error| error.contains("last_run file"))
     );
 }
 
 #[test]
-fn orphan_last_exec_is_warning_not_error() {
+fn orphan_last_run_is_warning_not_error() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
     persist_repo(temp.path(), &repo).unwrap();
-    fs::create_dir_all(temp.path().join("last_exec")).unwrap();
-    fs::write(temp.path().join("last_exec/agent-b.json"), b"not json").unwrap();
+    fs::create_dir_all(temp.path().join("last_run")).unwrap();
+    fs::write(temp.path().join("last_run/agent-b.json"), b"not json").unwrap();
 
     let loaded = load_repo(temp.path()).unwrap().unwrap();
-    assert!(load_last_exec(temp.path(), &lane_set(&loaded)).is_empty());
+    assert!(load_last_run(temp.path(), &lane_set(&loaded)).is_empty());
 
     let report = doctor_storage(temp.path()).unwrap();
     assert!(report.is_healthy());
-    assert_eq!(report.last_exec_files, 1);
+    assert_eq!(report.last_run_files, 1);
     assert!(report.errors.is_empty());
     assert!(
         report
@@ -182,7 +182,7 @@ fn unreferenced_blob_is_reported_as_warning_not_error() {
 }
 
 #[test]
-fn storage_gc_removes_unreferenced_blobs_without_touching_referenced_blobs() {
+fn storage_cleanup_removes_unreferenced_blobs_without_touching_referenced_blobs() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
     persist_repo(temp.path(), &repo).unwrap();
@@ -190,11 +190,11 @@ fn storage_gc_removes_unreferenced_blobs_without_touching_referenced_blobs() {
     let stale_blob = stale_blob_path(temp.path());
     fs::write(&stale_blob, b"stale").unwrap();
 
-    let gc = gc_storage(temp.path()).unwrap();
+    let cleanup = cleanup_storage(temp.path()).unwrap();
 
-    assert_eq!(gc.blobs_removed, 1);
-    assert_eq!(gc.bytes_removed, 5);
-    assert_eq!(gc.blobs_remaining, 1);
+    assert_eq!(cleanup.blobs_removed, 1);
+    assert_eq!(cleanup.bytes_removed, 5);
+    assert_eq!(cleanup.blobs_remaining, 1);
     assert!(referenced_blob.exists());
     assert!(!stale_blob.exists());
 
@@ -205,12 +205,12 @@ fn storage_gc_removes_unreferenced_blobs_without_touching_referenced_blobs() {
 }
 
 #[test]
-fn storage_gc_rejects_missing_manifest_without_deleting_blobs() {
+fn storage_cleanup_rejects_missing_manifest_without_deleting_blobs() {
     let temp = TempStorage::new();
     let stale_blob = stale_blob_path(temp.path());
     fs::write(&stale_blob, b"stale").unwrap();
 
-    let error = gc_storage(temp.path()).unwrap_err();
+    let error = cleanup_storage(temp.path()).unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("without repo.json"));
@@ -218,7 +218,7 @@ fn storage_gc_rejects_missing_manifest_without_deleting_blobs() {
 }
 
 #[test]
-fn storage_gc_rejects_corrupt_manifest_without_deleting_blobs() {
+fn storage_cleanup_rejects_corrupt_manifest_without_deleting_blobs() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
     persist_repo(temp.path(), &repo).unwrap();
@@ -227,16 +227,16 @@ fn storage_gc_rejects_corrupt_manifest_without_deleting_blobs() {
     fs::write(&stale_blob, b"stale").unwrap();
     fs::write(temp.path().join("repo.json"), b"not json").unwrap();
 
-    let error = gc_storage(temp.path()).unwrap_err();
+    let error = cleanup_storage(temp.path()).unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("cannot gc unhealthy"));
+    assert!(error.to_string().contains("cannot clean unhealthy"));
     assert!(referenced_blob.exists());
     assert!(stale_blob.exists());
 }
 
 #[test]
-fn storage_gc_rejects_invalid_blob_file_without_deleting_blobs() {
+fn storage_cleanup_rejects_invalid_blob_file_without_deleting_blobs() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
     persist_repo(temp.path(), &repo).unwrap();
@@ -246,7 +246,7 @@ fn storage_gc_rejects_invalid_blob_file_without_deleting_blobs() {
     fs::write(&stale_blob, b"stale").unwrap();
     fs::write(&invalid_blob, b"invalid").unwrap();
 
-    let error = gc_storage(temp.path()).unwrap_err();
+    let error = cleanup_storage(temp.path()).unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("invalid blob files"));

@@ -12,16 +12,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::{LaneExecState, ensure_user_lane, path_label};
+use crate::{LaneRunState, ensure_user_lane, path_label};
 
 use git::prepare_git_view;
 use mount::start_mount;
-use observer::ExecObserver;
+use observer::RunObserver;
 use support::elapsed_ms;
-pub(crate) use types::{
-    VirtualExecError, VirtualExecOptions, VirtualExecOutput, VirtualExecRecord,
-};
-use types::{VirtualExecTimings, VirtualExecWarning, VirtualFsMetrics};
+use types::{VirtualFsMetrics, VirtualRunTimings, VirtualRunWarning};
+pub(crate) use types::{VirtualRunError, VirtualRunOptions, VirtualRunOutput, VirtualRunRecord};
 use worker::{command_label, run_virtual_worker};
 
 const STORAGE_PATH: &str = ".lane";
@@ -30,21 +28,21 @@ pub(crate) fn run_virtual_lane(
     repo_root: &Path,
     lane: &str,
     command: &[String],
-    options: VirtualExecOptions,
-) -> Result<VirtualExecOutput, VirtualExecError> {
+    options: VirtualRunOptions,
+) -> Result<VirtualRunOutput, VirtualRunError> {
     let total_start = Instant::now();
-    ensure_user_lane(lane).map_err(|error| VirtualExecError::message(format!("{error:?}")))?;
+    ensure_user_lane(lane).map_err(|error| VirtualRunError::message(format!("{error:?}")))?;
     let (program, args) = command
         .split_first()
-        .ok_or_else(|| VirtualExecError::message("missing command for lane exec"))?;
+        .ok_or_else(|| VirtualRunError::message("missing command for lane run"))?;
     let storage_path = repo_root.join(STORAGE_PATH);
     let metrics = Arc::new(VirtualFsMetrics::default());
-    let observer = ExecObserver::new(lane, options.observe);
+    let observer = RunObserver::new(lane, options.observe);
 
     let setup_start = Instant::now();
     observer.event("preparing git view");
     let git_view = prepare_git_view(repo_root)?;
-    winfsp_wrs::init().map_err(|error| VirtualExecError::message(error.to_string()))?;
+    winfsp_wrs::init().map_err(|error| VirtualRunError::message(error.to_string()))?;
     let mount_start = Instant::now();
     observer.event("mounting virtual lane view");
     let (mount_point, mount, state) = start_mount(repo_root, &storage_path, lane, metrics.clone())?;
@@ -91,7 +89,7 @@ pub(crate) fn run_virtual_lane(
         state.flush()?;
     }
     let changes = state.collect_changes()?;
-    let exec_state = LaneExecState::new(
+    let run_state = LaneRunState::new(
         worker.exit_code,
         worker.worker_error.clone(),
         &worker.stdout,
@@ -99,7 +97,7 @@ pub(crate) fn run_virtual_lane(
         changed_paths.clone(),
     );
     let warnings = if options.persist_changes {
-        last_exec_warnings(state.record_last_exec(exec_state))
+        last_run_warnings(state.record_last_run(run_state))
     } else {
         Vec::new()
     };
@@ -109,7 +107,7 @@ pub(crate) fn run_virtual_lane(
         "storage done in {post_worker_lock_ms}ms; lock wait {}ms, lock held {}ms, writes {}",
         snapshot.storage_lock_wait_ms, snapshot.storage_lock_held_ms, snapshot.storage_write_ops
     ));
-    let output = VirtualExecOutput {
+    let output = VirtualRunOutput {
         lane: lane.to_owned(),
         repo_root: path_label(repo_root),
         storage_path: path_label(&storage_path),
@@ -122,7 +120,7 @@ pub(crate) fn run_virtual_lane(
         stderr: worker.stderr,
         worker_error: worker.worker_error,
         changed_paths,
-        timings: VirtualExecTimings {
+        timings: VirtualRunTimings {
             total_ms: elapsed_ms(total_start),
             storage_lock_wait_ms: snapshot.storage_lock_wait_ms,
             storage_lock_held_ms: snapshot.storage_lock_held_ms,
@@ -140,12 +138,12 @@ pub(crate) fn run_virtual_lane(
     Ok(output)
 }
 
-fn last_exec_warnings(result: Result<(), VirtualExecError>) -> Vec<VirtualExecWarning> {
+fn last_run_warnings(result: Result<(), VirtualRunError>) -> Vec<VirtualRunWarning> {
     match result {
         Ok(()) => Vec::new(),
-        Err(error) => vec![VirtualExecWarning {
-            kind: "last_exec_not_recorded",
-            message: format!("failed to record advisory last_exec metadata: {error}"),
+        Err(error) => vec![VirtualRunWarning {
+            kind: "last_run_not_recorded",
+            message: format!("failed to record advisory last_run metadata: {error}"),
         }],
     }
 }

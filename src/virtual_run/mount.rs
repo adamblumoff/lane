@@ -13,7 +13,7 @@ use winfsp_wrs::{
 
 use super::fs::VirtualLaneFs;
 use super::state::{VirtualLaneState, prepare_session_fs};
-use super::types::{VirtualExecError, VirtualFsMetrics};
+use super::types::{VirtualFsMetrics, VirtualRunError};
 
 const MOUNT_READY_ATTEMPTS: usize = 40;
 const MOUNT_READY_DELAY: Duration = Duration::from_millis(25);
@@ -23,10 +23,10 @@ pub(super) fn start_mount(
     storage_path: &Path,
     lane: &str,
     metrics: Arc<VirtualFsMetrics>,
-) -> Result<(MountPoint, FileSystem, Arc<VirtualLaneState>), VirtualExecError> {
+) -> Result<(MountPoint, FileSystem, Arc<VirtualLaneState>), VirtualRunError> {
     let security =
         SecurityDescriptor::from_wstr(u16cstr!("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)"))
-            .map_err(VirtualExecError::message)?;
+            .map_err(VirtualRunError::message)?;
     let session_fs = prepare_session_fs(repo_root, storage_path, lane, &metrics)?;
     let state = Arc::new(VirtualLaneState::new(
         repo_root,
@@ -52,7 +52,7 @@ pub(super) fn start_mount(
                 last_unavailable = Some(letter);
             }
             Err(status) => {
-                return Err(VirtualExecError::message(format!(
+                return Err(VirtualRunError::message(format!(
                     "WinFsp mount failed: {status:#x}"
                 )));
             }
@@ -62,12 +62,12 @@ pub(super) fn start_mount(
     let suffix = last_unavailable
         .map(|letter| format!("; last unavailable candidate was {letter}:"))
         .unwrap_or_default();
-    Err(VirtualExecError::message(format!(
+    Err(VirtualRunError::message(format!(
         "no free drive letter available for virtual lane mount{suffix}"
     )))
 }
 
-fn winfsp_params() -> Result<Params, VirtualExecError> {
+fn winfsp_params() -> Result<Params, VirtualRunError> {
     let mut params = Params {
         guard_strategy: OperationGuardStrategy::Fine,
         ..Params::default()
@@ -82,18 +82,18 @@ fn winfsp_params() -> Result<Params, VirtualExecError> {
         .set_dir_info_timeout(0)
         .set_security_timeout(0)
         .set_file_system_name(u16cstr!("Lane"))
-        .map_err(|_| VirtualExecError::message("WinFsp filesystem name is too long"))?;
+        .map_err(|_| VirtualRunError::message("WinFsp filesystem name is too long"))?;
     Ok(params)
 }
 
-fn wait_for_mount_ready(workspace_path: &Path) -> Result<(), VirtualExecError> {
+fn wait_for_mount_ready(workspace_path: &Path) -> Result<(), VirtualRunError> {
     for _ in 0..MOUNT_READY_ATTEMPTS {
         match workspace_path.try_exists() {
             Ok(true) => return Ok(()),
             Ok(false) | Err(_) => thread::sleep(MOUNT_READY_DELAY),
         }
     }
-    Err(VirtualExecError::message(format!(
+    Err(VirtualRunError::message(format!(
         "WinFsp mount {} did not become visible",
         workspace_path.display()
     )))

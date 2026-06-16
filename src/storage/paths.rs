@@ -7,13 +7,11 @@ pub(super) fn manifest_path(storage_root: &Path) -> PathBuf {
     storage_root.join(MANIFEST_FILE)
 }
 
-pub(super) fn last_exec_path(storage_root: &Path, lane: &str) -> PathBuf {
-    storage_root
-        .join("last_exec")
-        .join(last_exec_file_name(lane))
+pub(super) fn last_run_path(storage_root: &Path, lane: &str) -> PathBuf {
+    storage_root.join("last_run").join(last_run_file_name(lane))
 }
 
-pub(super) fn last_exec_file_name(lane: &str) -> String {
+pub(super) fn last_run_file_name(lane: &str) -> String {
     format!("{}.json", encode_path_component(lane))
 }
 

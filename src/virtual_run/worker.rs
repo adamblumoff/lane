@@ -8,7 +8,7 @@ use crate::path_label;
 use crate::storage::encode_path_component;
 
 use super::git::{GitView, git_path_label};
-use super::observer::ExecObserver;
+use super::observer::RunObserver;
 
 pub(super) struct WorkerOutput {
     pub(super) exit_code: Option<i32>,
@@ -24,7 +24,7 @@ pub(super) fn run_virtual_worker(
     git_view: Option<&GitView>,
     repo_root: &Path,
     mount_path: &Path,
-    observer: ExecObserver,
+    observer: RunObserver,
 ) -> WorkerOutput {
     let mut command = virtual_command(program, args, lane, git_view, repo_root, mount_path);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -58,7 +58,7 @@ struct WorkerStreamCaptures {
 }
 
 impl WorkerStreamCaptures {
-    fn start(child: &mut std::process::Child, observer: ExecObserver) -> Self {
+    fn start(child: &mut std::process::Child, observer: RunObserver) -> Self {
         Self {
             stdout: child
                 .stdout
@@ -87,7 +87,7 @@ struct CapturedWorkerOutput {
 fn capture_worker_stream<R: Read + Send + 'static>(
     mut stream: R,
     stream_name: &'static str,
-    observer: ExecObserver,
+    observer: RunObserver,
 ) -> thread::JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut captured = Vec::new();
@@ -131,9 +131,9 @@ fn virtual_command<'a>(
     let git_work_tree = git_path_label(mount_path);
     let cargo_target_dir = repo_root
         .join("target")
-        .join("lane-exec")
+        .join("lane-run")
         .join(encode_path_component(lane));
-    let mut command = ProcessCommand::new(resolve_program(program));
+    let mut command = ProcessCommand::new(program_path(program));
     command
         .args(args)
         .current_dir(mount_path)
@@ -173,7 +173,7 @@ pub(super) fn command_label(program: &str, args: &[String]) -> String {
         .join(" ")
 }
 
-fn resolve_program(program: &str) -> PathBuf {
+fn program_path(program: &str) -> PathBuf {
     let path = Path::new(program);
     if path.components().any(|component| {
         matches!(

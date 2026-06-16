@@ -59,7 +59,7 @@ fn overlay_paths_report_lane_overlays() {
 }
 
 #[test]
-fn selected_ops_promote_every_changed_path_for_lane() {
+fn selected_ops_accept_every_changed_path_for_lane() {
     let mut repo = seeded_repo();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
         .unwrap();
@@ -74,13 +74,13 @@ fn selected_ops_promote_every_changed_path_for_lane() {
     repo.write(PATH, "agent-b", BASE, 21..25, b"safe".to_vec())
         .unwrap();
 
-    let promoted_path = repo.promote_all_ops(PATH, "agent-a", BASE).unwrap();
-    let promoted_settings = repo
-        .promote_all_ops(SETTINGS_PATH, "agent-a", SETTINGS_BASE)
+    let accepted_path = repo.accept_all_ops(PATH, "agent-a", BASE).unwrap();
+    let accepted_settings = repo
+        .accept_all_ops(SETTINGS_PATH, "agent-a", SETTINGS_BASE)
         .unwrap();
 
-    assert_eq!(promoted_path, b"export const mode = 'fast';\n");
-    assert_eq!(promoted_settings, b"{\"mode\":\"fast\"}\n");
+    assert_eq!(accepted_path, b"export const mode = 'fast';\n");
+    assert_eq!(accepted_settings, b"{\"mode\":\"fast\"}\n");
     assert_eq!(
         repo.read(PATH, "agent-b", b"export const mode = 'fast';\n")
             .unwrap(),
@@ -96,20 +96,20 @@ fn selected_ops_promote_every_changed_path_for_lane() {
 }
 
 #[test]
-fn promote_returns_new_base_and_preserves_other_lane_projections() {
+fn accept_returns_new_base_and_preserves_other_lane_projections() {
     let mut repo = seeded_repo();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
         .unwrap();
     repo.write(PATH, "agent-b", BASE, 21..25, b"safe".to_vec())
         .unwrap();
 
-    let promoted = repo.promote_all_ops(PATH, "agent-a", BASE).unwrap();
+    let accepted = repo.accept_all_ops(PATH, "agent-a", BASE).unwrap();
 
-    assert_eq!(promoted, b"export const mode = 'fast';\n");
-    assert_eq!(repo.read(PATH, "base", &promoted).unwrap(), promoted);
-    assert_eq!(repo.read(PATH, "agent-a", &promoted).unwrap(), promoted);
+    assert_eq!(accepted, b"export const mode = 'fast';\n");
+    assert_eq!(repo.read(PATH, "base", &accepted).unwrap(), accepted);
+    assert_eq!(repo.read(PATH, "agent-a", &accepted).unwrap(), accepted);
     assert_eq!(
-        repo.read(PATH, "agent-b", &promoted).unwrap(),
+        repo.read(PATH, "agent-b", &accepted).unwrap(),
         b"export const mode = 'safe';\n"
     );
     assert_eq!(repo.overlay_paths("agent-a").unwrap(), Vec::<&str>::new());
@@ -129,19 +129,19 @@ fn replacing_with_base_content_clears_lane_overlay() {
 }
 
 #[test]
-fn untouched_lanes_follow_promoted_base() {
+fn untouched_lanes_follow_accepted_base() {
     let mut repo = seeded_repo();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
         .unwrap();
 
-    let promoted = repo.promote_all_ops(PATH, "agent-a", BASE).unwrap();
+    let accepted = repo.accept_all_ops(PATH, "agent-a", BASE).unwrap();
 
-    assert_eq!(promoted, b"export const mode = 'fast';\n");
-    assert_eq!(repo.read(PATH, "agent-b", &promoted).unwrap(), promoted);
+    assert_eq!(accepted, b"export const mode = 'fast';\n");
+    assert_eq!(repo.read(PATH, "agent-b", &accepted).unwrap(), accepted);
 }
 
 #[test]
-fn non_overlapping_promoted_lanes_follow_later_base_changes() {
+fn non_overlapping_accepted_lanes_follow_later_base_changes() {
     let mut repo = seeded_repo();
     repo.create_lane("badabing").unwrap();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
@@ -155,14 +155,14 @@ fn non_overlapping_promoted_lanes_follow_later_base_changes() {
     )
     .unwrap();
 
-    let badabing = repo.promote_all_ops(PATH, "badabing", BASE).unwrap();
+    let badabing = repo.accept_all_ops(PATH, "badabing", BASE).unwrap();
     assert_eq!(badabing, b"export const mode = 'base';\nbadabing\n");
 
-    let promoted = repo.promote_all_ops(PATH, "agent-a", &badabing).unwrap();
+    let accepted = repo.accept_all_ops(PATH, "agent-a", &badabing).unwrap();
 
-    assert_eq!(promoted, b"export const mode = 'fast';\nbadabing\n");
-    assert_eq!(repo.read(PATH, "agent-a", &promoted).unwrap(), promoted);
-    assert_eq!(repo.read(PATH, "badabing", &promoted).unwrap(), promoted);
+    assert_eq!(accepted, b"export const mode = 'fast';\nbadabing\n");
+    assert_eq!(repo.read(PATH, "agent-a", &accepted).unwrap(), accepted);
+    assert_eq!(repo.read(PATH, "badabing", &accepted).unwrap(), accepted);
 }
 
 #[test]
@@ -313,7 +313,7 @@ fn many_independent_ops_keep_stable_increasing_order_keys() {
 }
 
 #[test]
-fn non_overlapping_same_file_ops_compose_after_promotion() {
+fn non_overlapping_same_file_ops_compose_after_accept() {
     let mut repo = seeded_repo();
     let base = b"alpha=1\nbeta=2\n";
     repo.write("src/math.txt", "agent-a", base, 6..7, b"10".to_vec())
@@ -321,17 +321,17 @@ fn non_overlapping_same_file_ops_compose_after_promotion() {
     repo.write("src/math.txt", "agent-b", base, 13..14, b"20".to_vec())
         .unwrap();
 
-    let promoted = repo
-        .promote_all_ops("src/math.txt", "agent-a", base)
+    let accepted = repo
+        .accept_all_ops("src/math.txt", "agent-a", base)
         .unwrap();
 
-    assert_eq!(promoted, b"alpha=10\nbeta=2\n");
+    assert_eq!(accepted, b"alpha=10\nbeta=2\n");
     assert_eq!(
-        repo.read("src/math.txt", "agent-b", &promoted).unwrap(),
+        repo.read("src/math.txt", "agent-b", &accepted).unwrap(),
         b"alpha=10\nbeta=20\n"
     );
     assert_eq!(
-        repo.change_ops("src/math.txt", "agent-b", Some(&promoted))
+        repo.change_ops("src/math.txt", "agent-b", Some(&accepted))
             .unwrap()
             .len(),
         1
@@ -339,7 +339,7 @@ fn non_overlapping_same_file_ops_compose_after_promotion() {
 }
 
 #[test]
-fn selected_ops_promote_without_promoting_the_whole_lane_file() {
+fn selected_ops_accept_without_accepting_the_whole_lane_file() {
     let mut repo = seeded_repo();
     let base = b"alpha=1\nbeta=2\ngamma=3\n";
     let edited = b"alpha=10\nbeta=2\ngamma=30\n";
@@ -352,27 +352,27 @@ fn selected_ops_promote_without_promoting_the_whole_lane_file() {
         .change_ops("src/math.txt", "agent-a", Some(base))
         .unwrap();
     assert_eq!(ops.len(), 2);
-    let promoted = repo
-        .promote_ops("src/math.txt", "agent-a", base, &[ops[0].op_id.clone()])
+    let accepted = repo
+        .accept_ops("src/math.txt", "agent-a", base, &[ops[0].op_id.clone()])
         .unwrap();
 
-    assert_eq!(promoted, b"alpha=10\nbeta=2\ngamma=3\n");
+    assert_eq!(accepted, b"alpha=10\nbeta=2\ngamma=3\n");
     assert_eq!(
-        repo.read("src/math.txt", "agent-a", &promoted).unwrap(),
+        repo.read("src/math.txt", "agent-a", &accepted).unwrap(),
         edited
     );
     assert_eq!(
-        repo.read("src/math.txt", "agent-b", &promoted).unwrap(),
+        repo.read("src/math.txt", "agent-b", &accepted).unwrap(),
         b"alpha=10\nbeta=20\ngamma=3\n"
     );
     assert_eq!(
-        repo.change_ops("src/math.txt", "agent-a", Some(&promoted))
+        repo.change_ops("src/math.txt", "agent-a", Some(&accepted))
             .unwrap()
             .len(),
         1
     );
     let remaining_a_ops = repo
-        .change_ops("src/math.txt", "agent-a", Some(&promoted))
+        .change_ops("src/math.txt", "agent-a", Some(&accepted))
         .unwrap();
     assert_eq!(remaining_a_ops[0].op_id, "agent-a:2");
     assert_eq!(remaining_a_ops[0].base_start, 23);
@@ -381,14 +381,14 @@ fn selected_ops_promote_without_promoting_the_whole_lane_file() {
         "00000000000000000023:j:agent-a:00000000000000000002"
     );
     let remaining_b_ops = repo
-        .change_ops("src/math.txt", "agent-b", Some(&promoted))
+        .change_ops("src/math.txt", "agent-b", Some(&accepted))
         .unwrap();
     assert_eq!(remaining_b_ops[0].op_id, "agent-b:1");
     assert_eq!(remaining_b_ops[0].base_start, 15);
 }
 
 #[test]
-fn selected_delete_promotion_preserves_other_lane_as_create() {
+fn selected_delete_acceptance_preserves_other_lane_as_create() {
     let mut repo = seeded_repo();
     let base = b"mode=base\n";
     repo.delete_path("src/mode.txt", "agent-a", Some(base))
@@ -396,8 +396,8 @@ fn selected_delete_promotion_preserves_other_lane_as_create() {
     repo.write("src/mode.txt", "agent-b", base, 5..9, b"safe".to_vec())
         .unwrap();
 
-    let promoted = repo
-        .promote_ops_path(
+    let accepted = repo
+        .accept_ops_path(
             "src/mode.txt",
             "agent-a",
             Some(base),
@@ -405,7 +405,7 @@ fn selected_delete_promotion_preserves_other_lane_as_create() {
         )
         .unwrap();
 
-    assert_eq!(promoted, None);
+    assert_eq!(accepted, None);
     assert_eq!(repo.read_path("src/mode.txt", "agent-a", None), Ok(None));
     assert_eq!(
         repo.read_path("src/mode.txt", "agent-b", None).unwrap(),
@@ -425,7 +425,7 @@ fn missing_selected_op_does_not_mutate_repo() {
         .unwrap();
 
     assert_eq!(
-        repo.promote_ops("src/math.txt", "agent-a", base, &["agent-a:999".to_owned()],),
+        repo.accept_ops("src/math.txt", "agent-a", base, &["agent-a:999".to_owned()],),
         Err(LaneError::OperationMissing {
             path: "src/math.txt".to_owned(),
             op_id: "agent-a:999".to_owned()
@@ -438,7 +438,7 @@ fn missing_selected_op_does_not_mutate_repo() {
 }
 
 #[test]
-fn resolve_op_promotes_replacement_bytes_and_preserves_other_lane_alternative() {
+fn accept_replacement_op_accepts_replacement_bytes_and_preserves_other_lane_alternative() {
     let mut repo = seeded_repo();
     let base = b"a=1\nb=2\nc=3\n";
     repo.replace("src/vars.txt", "agent-a", base, b"a=A\nb=B\nc=C\n".to_vec())
@@ -451,16 +451,16 @@ fn resolve_op_promotes_replacement_bytes_and_preserves_other_lane_alternative() 
         .unwrap();
     assert_eq!(agent_a_ops.len(), 3);
     let clean_op_ids = vec![agent_a_ops[0].op_id.clone(), agent_a_ops[2].op_id.clone()];
-    let promoted_clean = repo
-        .promote_ops("src/vars.txt", "agent-a", base, &clean_op_ids)
+    let accepted_clean = repo
+        .accept_ops("src/vars.txt", "agent-a", base, &clean_op_ids)
         .unwrap();
-    assert_eq!(promoted_clean, b"a=A\nb=2\nc=C\n");
+    assert_eq!(accepted_clean, b"a=A\nb=2\nc=C\n");
 
     let detail = repo
         .op_detail(
             "src/vars.txt",
             "agent-a",
-            Some(&promoted_clean),
+            Some(&accepted_clean),
             "agent-a:2",
         )
         .unwrap();
@@ -468,27 +468,27 @@ fn resolve_op_promotes_replacement_bytes_and_preserves_other_lane_alternative() 
     assert_eq!(detail.inserted, b"B");
     assert_eq!(detail.summary.conflicts_with, vec!["agent-b".to_owned()]);
 
-    let resolved = repo
-        .resolve_op_path(
+    let accepted = repo
+        .accept_replacement_op_path(
             "src/vars.txt",
             "agent-a",
-            Some(&promoted_clean),
+            Some(&accepted_clean),
             "agent-a:2",
             b"Y".to_vec(),
         )
         .unwrap()
         .unwrap();
 
-    assert_eq!(resolved, b"a=A\nb=Y\nc=C\n");
+    assert_eq!(accepted, b"a=A\nb=Y\nc=C\n");
     assert_eq!(repo.overlay_paths("agent-a").unwrap(), Vec::<&str>::new());
     assert_eq!(
-        repo.read("src/vars.txt", "agent-b", &resolved).unwrap(),
+        repo.read("src/vars.txt", "agent-b", &accepted).unwrap(),
         b"a=A\nb=X\nc=C\n"
     );
 }
 
 #[test]
-fn resolve_ops_combines_conflicting_replacements_and_consumes_selected_lanes() {
+fn accept_replacement_ops_combines_conflicting_replacements_and_consumes_selected_lanes() {
     let mut repo = seeded_repo();
     repo.create_lane("agent-c").unwrap();
     let base = b"TODO";
@@ -515,20 +515,20 @@ fn resolve_ops_combines_conflicting_replacements_and_consumes_selected_lanes() {
         .collect::<Vec<_>>();
     let replacement = b"function a() {}\n\nfunction b() {}\n\nfunction c() {}".to_vec();
 
-    let resolved = repo
-        .resolve_ops_path(path, Some(base), &selections, replacement.clone())
+    let accepted = repo
+        .accept_replacement_ops_path(path, Some(base), &selections, replacement.clone())
         .unwrap()
         .unwrap();
 
-    assert_eq!(resolved, replacement);
-    assert_eq!(repo.read(path, "base", &resolved).unwrap(), replacement);
+    assert_eq!(accepted, replacement);
+    assert_eq!(repo.read(path, "base", &accepted).unwrap(), replacement);
     assert_eq!(repo.overlay_paths("agent-a").unwrap(), Vec::<&str>::new());
     assert_eq!(repo.overlay_paths("agent-b").unwrap(), Vec::<&str>::new());
     assert_eq!(repo.overlay_paths("agent-c").unwrap(), Vec::<&str>::new());
 }
 
 #[test]
-fn resolve_ops_rejects_unrelated_clean_ops_without_mutating_repo() {
+fn accept_replacement_ops_rejects_unrelated_clean_ops_without_mutating_repo() {
     let mut repo = seeded_repo();
     let base = b"alpha=1\nbeta=2\n";
     let path = "src/math.txt";
@@ -552,7 +552,7 @@ fn resolve_ops_rejects_unrelated_clean_ops_without_mutating_repo() {
     assert!(agent_a_op.conflicts_with.is_empty());
     assert!(agent_b_op.conflicts_with.is_empty());
 
-    let result = repo.resolve_ops_path(
+    let result = repo.accept_replacement_ops_path(
         path,
         Some(base),
         &[
@@ -579,7 +579,8 @@ fn resolve_ops_rejects_unrelated_clean_ops_without_mutating_repo() {
 }
 
 #[test]
-fn resolve_ops_preserves_unselected_empty_file_insert_as_alternative_to_delete_resolution() {
+fn accept_replacement_ops_preserves_unselected_empty_file_insert_as_alternative_to_delete_replacement()
+ {
     let mut repo = seeded_repo();
     repo.create_lane("agent-c").unwrap();
     let base = b"";
@@ -605,8 +606,8 @@ fn resolve_ops_preserves_unselected_empty_file_insert_as_alternative_to_delete_r
     assert_eq!(delete_op.conflicts_with.len(), 2);
     assert_eq!(agent_b_op.conflicts_with, vec!["agent-a".to_owned()]);
 
-    let resolved = repo
-        .resolve_ops_path(
+    let accepted = repo
+        .accept_replacement_ops_path(
             path,
             Some(base),
             &[
@@ -618,14 +619,14 @@ fn resolve_ops_preserves_unselected_empty_file_insert_as_alternative_to_delete_r
         .unwrap()
         .unwrap();
 
-    assert_eq!(resolved, b"merged");
+    assert_eq!(accepted, b"merged");
     assert_eq!(repo.overlay_paths("agent-a").unwrap(), Vec::<&str>::new());
     assert_eq!(repo.overlay_paths("agent-b").unwrap(), Vec::<&str>::new());
-    assert_eq!(repo.read(path, "agent-c", &resolved).unwrap(), b"C");
+    assert_eq!(repo.read(path, "agent-c", &accepted).unwrap(), b"C");
 }
 
 #[test]
-fn overlapping_same_file_ops_remain_alternatives_after_promotion() {
+fn overlapping_same_file_ops_remain_alternatives_after_accept() {
     let mut repo = seeded_repo();
     let base = b"mode=base\n";
     repo.write("src/mode.txt", "agent-a", base, 5..9, b"fast".to_vec())
@@ -638,18 +639,18 @@ fn overlapping_same_file_ops_remain_alternatives_after_promotion() {
         .unwrap();
     assert_eq!(before[0].conflicts_with, vec!["agent-b".to_owned()]);
 
-    let promoted = repo
-        .promote_all_ops("src/mode.txt", "agent-a", base)
+    let accepted = repo
+        .accept_all_ops("src/mode.txt", "agent-a", base)
         .unwrap();
 
-    assert_eq!(promoted, b"mode=fast\n");
+    assert_eq!(accepted, b"mode=fast\n");
     assert_eq!(
-        repo.read("src/mode.txt", "agent-b", &promoted).unwrap(),
+        repo.read("src/mode.txt", "agent-b", &accepted).unwrap(),
         b"mode=safe\n"
     );
     assert!(
         !repo
-            .change_ops("src/mode.txt", "agent-b", Some(&promoted))
+            .change_ops("src/mode.txt", "agent-b", Some(&accepted))
             .unwrap()
             .is_empty()
     );
@@ -683,34 +684,34 @@ fn same_position_inserts_have_deterministic_order_without_conflict() {
             .is_empty()
     );
 
-    let promoted = repo
-        .promote_all_ops("src/imports.txt", "agent-a", base)
+    let accepted = repo
+        .accept_all_ops("src/imports.txt", "agent-a", base)
         .unwrap();
 
-    assert_eq!(promoted, b"use a;\ntail\n");
+    assert_eq!(accepted, b"use a;\ntail\n");
     assert_eq!(
-        repo.read("src/imports.txt", "agent-b", &promoted).unwrap(),
+        repo.read("src/imports.txt", "agent-b", &accepted).unwrap(),
         b"use a;\nuse b;\ntail\n"
     );
 }
 
 #[test]
-fn same_position_inserts_compose_in_stable_order_regardless_of_promotion_order() {
+fn same_position_inserts_compose_in_stable_order_regardless_of_acceptance_order() {
     let base = b"tail\n";
     let mut a_then_b = repo_with_same_position_inserts(base);
-    let promoted_a = a_then_b
-        .promote_all_ops("src/imports.txt", "agent-a", base)
+    let accepted_a = a_then_b
+        .accept_all_ops("src/imports.txt", "agent-a", base)
         .unwrap();
     let final_a_then_b = a_then_b
-        .promote_all_ops("src/imports.txt", "agent-b", &promoted_a)
+        .accept_all_ops("src/imports.txt", "agent-b", &accepted_a)
         .unwrap();
 
     let mut b_then_a = repo_with_same_position_inserts(base);
-    let promoted_b = b_then_a
-        .promote_all_ops("src/imports.txt", "agent-b", base)
+    let accepted_b = b_then_a
+        .accept_all_ops("src/imports.txt", "agent-b", base)
         .unwrap();
     let final_b_then_a = b_then_a
-        .promote_all_ops("src/imports.txt", "agent-a", &promoted_b)
+        .accept_all_ops("src/imports.txt", "agent-a", &accepted_b)
         .unwrap();
 
     assert_eq!(final_a_then_b, b"use a;\nuse b;\ntail\n");
@@ -718,21 +719,21 @@ fn same_position_inserts_compose_in_stable_order_regardless_of_promotion_order()
 }
 
 #[test]
-fn three_same_position_inserts_compose_in_stable_order_across_promotion_orders() {
+fn three_same_position_inserts_compose_in_stable_order_across_acceptance_orders() {
     let base = b"tail\n";
-    let promotion_orders = [
+    let acceptance_orders = [
         ["agent-a", "agent-b", "agent-c"],
         ["agent-c", "agent-b", "agent-a"],
         ["agent-b", "agent-a", "agent-c"],
     ];
     let mut final_versions = Vec::new();
 
-    for promotion_order in promotion_orders {
+    for acceptance_order in acceptance_orders {
         let mut repo = repo_with_three_same_position_inserts(base);
         let mut current_base = base.to_vec();
-        for lane in promotion_order {
+        for lane in acceptance_order {
             current_base = repo
-                .promote_all_ops("src/imports.txt", lane, &current_base)
+                .accept_all_ops("src/imports.txt", lane, &current_base)
                 .unwrap();
         }
         final_versions.push(current_base);
@@ -762,13 +763,13 @@ fn same_position_inserts_into_empty_file_are_not_create_conflicts() {
             .is_empty()
     );
 
-    let promoted = repo
-        .promote_all_ops("src/empty.txt", "agent-a", base)
+    let accepted = repo
+        .accept_all_ops("src/empty.txt", "agent-a", base)
         .unwrap();
 
-    assert_eq!(promoted, b"a");
+    assert_eq!(accepted, b"a");
     assert_eq!(
-        repo.read("src/empty.txt", "agent-b", &promoted).unwrap(),
+        repo.read("src/empty.txt", "agent-b", &accepted).unwrap(),
         b"ab"
     );
 }
@@ -836,13 +837,9 @@ trait RepoTestExt {
         base: &[u8],
         content: Vec<u8>,
     ) -> Result<(), LaneError>;
-    fn promote_all_ops(
-        &mut self,
-        path: &str,
-        lane: &str,
-        base: &[u8],
-    ) -> Result<Vec<u8>, LaneError>;
-    fn promote_ops(
+    fn accept_all_ops(&mut self, path: &str, lane: &str, base: &[u8])
+    -> Result<Vec<u8>, LaneError>;
+    fn accept_ops(
         &mut self,
         path: &str,
         lane: &str,
@@ -883,7 +880,7 @@ impl RepoTestExt for LaneRepo {
         self.replace_path(path, lane, Some(base), Some(content))
     }
 
-    fn promote_all_ops(
+    fn accept_all_ops(
         &mut self,
         path: &str,
         lane: &str,
@@ -894,10 +891,10 @@ impl RepoTestExt for LaneRepo {
             .into_iter()
             .map(|op| op.op_id)
             .collect::<Vec<_>>();
-        self.promote_ops(path, lane, base, &op_ids)
+        self.accept_ops(path, lane, base, &op_ids)
     }
 
-    fn promote_ops(
+    fn accept_ops(
         &mut self,
         path: &str,
         lane: &str,
@@ -905,7 +902,7 @@ impl RepoTestExt for LaneRepo {
         op_ids: &[String],
     ) -> Result<Vec<u8>, LaneError> {
         Ok(self
-            .promote_ops_path(path, lane, Some(base), op_ids)?
-            .expect("test expected promoted file bytes"))
+            .accept_ops_path(path, lane, Some(base), op_ids)?
+            .expect("test expected accepted file bytes"))
     }
 }

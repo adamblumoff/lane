@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::ops::{
     FileOp, ParsedOpId, RebaseOpSet, base_slice_for_op, delete_op_id_for, diff_to_ops,
     ensure_delete_selection, entries_conflict, next_file_op_id, normalize_ops_checked, op_id_for,
-    op_kind, operation_missing, ops_conflict, order_key, parse_lane_op_id,
-    rebase_ops_after_promotion, render_ops, selected_present_ops, validate_ops,
+    op_kind, operation_missing, ops_conflict, order_key, parse_lane_op_id, rebase_ops_after_accept,
+    render_ops, selected_present_ops, validate_ops,
 };
 use super::types::base_fingerprint;
 use super::{
@@ -42,21 +42,21 @@ struct LaneView {
     ops: Vec<FileOp>,
 }
 
-struct LanePromotionSnapshot {
+struct LaneAcceptSnapshot {
     lane: LaneId,
     entry: LaneEntry,
     bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
-struct SelectedResolveOp {
+struct SelectedReplacementOp {
     lane: LaneId,
     op_id: String,
-    kind: SelectedResolveOpKind,
+    kind: SelectedReplacementOpKind,
 }
 
 #[derive(Clone, Debug)]
-enum SelectedResolveOpKind {
+enum SelectedReplacementOpKind {
     Present(FileOp),
     Delete,
 }
@@ -173,7 +173,7 @@ impl LaneRepo {
         self.replace_path(path, lane, base, None)
     }
 
-    pub fn promote_ops_path(
+    pub fn accept_ops_path(
         &mut self,
         path: &str,
         lane: &str,
@@ -191,14 +191,14 @@ impl LaneRepo {
             });
         };
 
-        let promoted = file.promote_ops(path, lane, base, op_ids)?;
+        let accepted = file.accept_ops(path, lane, base, op_ids)?;
         if file.is_empty() {
             self.files.remove(path);
         }
-        Ok(promoted)
+        Ok(accepted)
     }
 
-    pub fn resolve_op_path(
+    pub fn accept_replacement_op_path(
         &mut self,
         path: &str,
         lane: &str,
@@ -211,14 +211,14 @@ impl LaneRepo {
             return Err(operation_missing(path, op_id));
         };
 
-        let promoted = file.resolve_op(path, lane, base, op_id, replacement.into())?;
+        let accepted = file.accept_replacement_op(path, lane, base, op_id, replacement.into())?;
         if file.is_empty() {
             self.files.remove(path);
         }
-        Ok(promoted)
+        Ok(accepted)
     }
 
-    pub fn resolve_ops_path(
+    pub fn accept_replacement_ops_path(
         &mut self,
         path: &str,
         base: Option<&[u8]>,
@@ -235,11 +235,11 @@ impl LaneRepo {
             return Err(operation_missing(path, &selections[0].1));
         };
 
-        let promoted = file.resolve_ops(path, base, selections, replacement.into())?;
+        let accepted = file.accept_replacement_ops(path, base, selections, replacement.into())?;
         if file.is_empty() {
             self.files.remove(path);
         }
-        Ok(promoted)
+        Ok(accepted)
     }
 
     pub fn storage_snapshot(&self) -> LaneRepoStorageSnapshot {
@@ -407,7 +407,7 @@ impl LaneFile {
         Ok(())
     }
 
-    fn promote_ops(
+    fn accept_ops(
         &mut self,
         path: &str,
         lane: &str,
@@ -429,14 +429,14 @@ impl LaneFile {
             LaneEntry::Present(view) => selected_present_ops(path, lane, &view.ops, op_ids)?,
             LaneEntry::Deleted => {
                 ensure_delete_selection(path, lane, op_ids)?;
-                return self.promote_resolved_content(path, lane, base, None);
+                return self.accept_replacement_content(path, lane, base, None);
             }
         };
         let selected_ids = selected_ops.iter().map(|op| op.id).collect::<BTreeSet<_>>();
-        self.promote_selected_present_ops(path, lane, base, selected_ops, &selected_ids)
+        self.accept_selected_present_ops(path, lane, base, selected_ops, &selected_ids)
     }
 
-    fn resolve_op(
+    fn accept_replacement_op(
         &mut self,
         path: &str,
         lane: &str,
@@ -452,7 +452,7 @@ impl LaneFile {
             if parse_lane_op_id(lane, op_id) != Some(ParsedOpId::Delete) {
                 return Err(operation_missing(path, op_id));
             }
-            return self.promote_resolved_content(path, lane, base, Some(replacement));
+            return self.accept_replacement_content(path, lane, base, Some(replacement));
         };
         let Some(ParsedOpId::Present(id)) = parse_lane_op_id(lane, op_id) else {
             return Err(operation_missing(path, op_id));
@@ -461,15 +461,15 @@ impl LaneFile {
             return Err(operation_missing(path, op_id));
         };
 
-        let mut resolved = target;
-        resolved.id = next_file_op_id(&view.ops);
-        resolved.inserted = replacement;
+        let mut replacement_op = target;
+        replacement_op.id = next_file_op_id(&view.ops);
+        replacement_op.inserted = replacement;
 
         let selected_ids = [id].into_iter().collect::<BTreeSet<_>>();
-        self.promote_selected_present_ops(path, lane, base, vec![resolved], &selected_ids)
+        self.accept_selected_present_ops(path, lane, base, vec![replacement_op], &selected_ids)
     }
 
-    fn resolve_ops(
+    fn accept_replacement_ops(
         &mut self,
         path: &str,
         base: Option<&[u8]>,
@@ -480,7 +480,7 @@ impl LaneFile {
         if selections.is_empty() {
             return Err(LaneError::EmptyOperationSelection);
         }
-        let selected_ops = self.selected_resolve_ops(path, selections)?;
+        let selected_ops = self.selected_replacement_ops(path, selections)?;
         ensure_conflict_connected_selection(path, base, &selected_ops)?;
 
         let mut selected_present = BTreeMap::<LaneId, BTreeSet<u64>>::new();
@@ -491,7 +491,7 @@ impl LaneFile {
 
         for selected in &selected_ops {
             match &selected.kind {
-                SelectedResolveOpKind::Present(op) => {
+                SelectedReplacementOpKind::Present(op) => {
                     selected_present
                         .entry(selected.lane.clone())
                         .or_default()
@@ -503,7 +503,7 @@ impl LaneFile {
                     }));
                     synthetic_order_key.get_or_insert_with(|| op.order_key.clone());
                 }
-                SelectedResolveOpKind::Delete => {
+                SelectedReplacementOpKind::Delete => {
                     selected_deletes.insert(selected.lane.clone());
                     span_start = Some(0);
                     span_end = Some(base.map(|bytes| bytes.len() as u64).unwrap_or(0));
@@ -513,26 +513,26 @@ impl LaneFile {
 
         let span_start = span_start.unwrap_or(0);
         let span_end = span_end.unwrap_or(span_start);
-        let promoted_ops = vec![FileOp {
+        let accepted_ops = vec![FileOp {
             id: 0,
             base_start: span_start,
             base_len: span_end - span_start,
             order_key: synthetic_order_key.unwrap_or_else(|| "U".to_owned()),
             inserted: replacement,
         }];
-        let promoted = Some(render_ops(path, base.unwrap_or_default(), &promoted_ops)?);
-        let promotion_lane = selected_ops
+        let accepted = Some(render_ops(path, base.unwrap_or_default(), &accepted_ops)?);
+        let accepted_lane = selected_ops
             .iter()
             .map(|op| op.lane.as_str())
             .min()
-            .expect("resolve-ops validates a nonempty selection");
+            .expect("accept validates a nonempty selection");
         let selected_delete_conflicts_with_present = !selected_deletes.is_empty() && base.is_some();
 
-        self.rebuild_after_base_promotion(
+        self.rebuild_after_base_accept(
             path,
             base,
-            promoted,
-            |lane_id, entry, old_bytes, promoted_base| {
+            accepted,
+            |lane_id, entry, old_bytes, accepted_base| {
                 if selected_deletes.contains(lane_id) {
                     return Ok(None);
                 }
@@ -552,16 +552,16 @@ impl LaneFile {
                         if retained_ops.is_empty() {
                             Ok(None)
                         } else if selected_delete_conflicts_with_present {
-                            Ok(entry_for_content(promoted_base, old_bytes))
+                            Ok(entry_for_content(accepted_base, old_bytes))
                         } else {
                             rebased_entry_for_present_ops(
                                 path,
                                 base,
-                                promoted_base,
+                                accepted_base,
                                 old_bytes,
                                 RebaseOpSet {
-                                    lane: promotion_lane,
-                                    ops: &promoted_ops,
+                                    lane: accepted_lane,
+                                    ops: &accepted_ops,
                                 },
                                 RebaseOpSet {
                                     lane: lane_id,
@@ -570,17 +570,17 @@ impl LaneFile {
                             )
                         }
                     }
-                    LaneEntry::Deleted => Ok(entry_for_content(promoted_base, old_bytes)),
+                    LaneEntry::Deleted => Ok(entry_for_content(accepted_base, old_bytes)),
                 }
             },
         )
     }
 
-    fn selected_resolve_ops(
+    fn selected_replacement_ops(
         &self,
         path: &str,
         selections: &[(LaneId, String)],
-    ) -> Result<Vec<SelectedResolveOp>, LaneError> {
+    ) -> Result<Vec<SelectedReplacementOp>, LaneError> {
         let mut seen = BTreeSet::new();
         let mut selected_ops = Vec::new();
 
@@ -602,16 +602,16 @@ impl LaneFile {
                     let Some(op) = view.ops.iter().find(|op| op.id == id) else {
                         return Err(operation_missing(path, op_id));
                     };
-                    SelectedResolveOpKind::Present(op.clone())
+                    SelectedReplacementOpKind::Present(op.clone())
                 }
                 LaneEntry::Deleted => {
                     if parse_lane_op_id(lane, op_id) != Some(ParsedOpId::Delete) {
                         return Err(operation_missing(path, op_id));
                     }
-                    SelectedResolveOpKind::Delete
+                    SelectedReplacementOpKind::Delete
                 }
             };
-            selected_ops.push(SelectedResolveOp {
+            selected_ops.push(SelectedReplacementOp {
                 lane: lane.clone(),
                 op_id: op_id.clone(),
                 kind,
@@ -621,28 +621,28 @@ impl LaneFile {
         Ok(selected_ops)
     }
 
-    fn promote_resolved_content(
+    fn accept_replacement_content(
         &mut self,
         path: &str,
         lane: &str,
         base: Option<&[u8]>,
-        promoted: Option<Vec<u8>>,
+        accepted: Option<Vec<u8>>,
     ) -> Result<Option<Vec<u8>>, LaneError> {
-        self.rebuild_after_base_promotion(
+        self.rebuild_after_base_accept(
             path,
             base,
-            promoted,
-            |lane_id, _entry, old_bytes, promoted_base| {
+            accepted,
+            |lane_id, _entry, old_bytes, accepted_base| {
                 if lane_id == lane {
                     Ok(None)
                 } else {
-                    Ok(entry_for_content(promoted_base, old_bytes))
+                    Ok(entry_for_content(accepted_base, old_bytes))
                 }
             },
         )
     }
 
-    fn promote_selected_present_ops(
+    fn accept_selected_present_ops(
         &mut self,
         path: &str,
         lane: &str,
@@ -650,12 +650,12 @@ impl LaneFile {
         selected_ops: Vec<FileOp>,
         selected_ids: &BTreeSet<u64>,
     ) -> Result<Option<Vec<u8>>, LaneError> {
-        let promoted = Some(render_ops(path, base.unwrap_or_default(), &selected_ops)?);
-        self.rebuild_after_base_promotion(
+        let accepted = Some(render_ops(path, base.unwrap_or_default(), &selected_ops)?);
+        self.rebuild_after_base_accept(
             path,
             base,
-            promoted,
-            |lane_id, entry, old_bytes, promoted_base| match entry {
+            accepted,
+            |lane_id, entry, old_bytes, accepted_base| match entry {
                 LaneEntry::Present(view) if lane_id == lane => {
                     let retained_ops = view
                         .ops
@@ -669,7 +669,7 @@ impl LaneFile {
                         rebased_entry_for_present_ops(
                             path,
                             base,
-                            promoted_base,
+                            accepted_base,
                             old_bytes,
                             RebaseOpSet {
                                 lane,
@@ -685,7 +685,7 @@ impl LaneFile {
                 LaneEntry::Present(view) => rebased_entry_for_present_ops(
                     path,
                     base,
-                    promoted_base,
+                    accepted_base,
                     old_bytes,
                     RebaseOpSet {
                         lane,
@@ -696,16 +696,16 @@ impl LaneFile {
                         ops: &view.ops,
                     },
                 ),
-                LaneEntry::Deleted => Ok(entry_for_content(promoted_base, old_bytes)),
+                LaneEntry::Deleted => Ok(entry_for_content(accepted_base, old_bytes)),
             },
         )
     }
 
-    fn rebuild_after_base_promotion(
+    fn rebuild_after_base_accept(
         &mut self,
         path: &str,
         base: Option<&[u8]>,
-        promoted: Option<Vec<u8>>,
+        accepted: Option<Vec<u8>>,
         mut next_entry: impl FnMut(
             &str,
             LaneEntry,
@@ -713,10 +713,10 @@ impl LaneFile {
             Option<&[u8]>,
         ) -> Result<Option<LaneEntry>, LaneError>,
     ) -> Result<Option<Vec<u8>>, LaneError> {
-        let snapshots = self.promotion_snapshots(path, base)?;
-        let promoted_base = promoted.as_deref();
+        let snapshots = self.accept_snapshots(path, base)?;
+        let accepted_base = accepted.as_deref();
 
-        self.base = BaseState::for_content(promoted_base);
+        self.base = BaseState::for_content(accepted_base);
         self.lanes.clear();
 
         for snapshot in snapshots {
@@ -724,29 +724,28 @@ impl LaneFile {
                 &snapshot.lane,
                 snapshot.entry,
                 snapshot.bytes,
-                promoted_base,
+                accepted_base,
             )? {
                 self.lanes.insert(snapshot.lane, entry);
             }
         }
 
-        Ok(promoted)
+        Ok(accepted)
     }
 
-    fn promotion_snapshots(
+    fn accept_snapshots(
         &self,
         path: &str,
         base: Option<&[u8]>,
-    ) -> Result<Vec<LanePromotionSnapshot>, LaneError> {
+    ) -> Result<Vec<LaneAcceptSnapshot>, LaneError> {
         self.lanes
             .iter()
             .map(|(lane, entry)| {
-                self.read(path, lane, base)
-                    .map(|bytes| LanePromotionSnapshot {
-                        lane: lane.clone(),
-                        entry: entry.clone(),
-                        bytes,
-                    })
+                self.read(path, lane, base).map(|bytes| LaneAcceptSnapshot {
+                    lane: lane.clone(),
+                    entry: entry.clone(),
+                    bytes,
+                })
             })
             .collect()
     }
@@ -925,23 +924,23 @@ fn entry_for_content(base: Option<&[u8]>, content: Option<Vec<u8>>) -> Option<La
 fn rebased_entry_for_present_ops(
     path: &str,
     old_base: Option<&[u8]>,
-    promoted_base: Option<&[u8]>,
+    accepted_base: Option<&[u8]>,
     fallback_bytes: Option<Vec<u8>>,
-    promoted: RebaseOpSet<'_>,
+    accepted: RebaseOpSet<'_>,
     retained: RebaseOpSet<'_>,
 ) -> Result<Option<LaneEntry>, LaneError> {
-    let Some(promoted_base) = promoted_base else {
-        return Ok(entry_for_content(promoted_base, fallback_bytes));
+    let Some(accepted_base) = accepted_base else {
+        return Ok(entry_for_content(accepted_base, fallback_bytes));
     };
     if old_base.is_none()
         || retained.ops.is_empty()
-        || entries_conflict(promoted.ops, retained.ops, false)
+        || entries_conflict(accepted.ops, retained.ops, false)
     {
-        return Ok(entry_for_content(Some(promoted_base), fallback_bytes));
+        return Ok(entry_for_content(Some(accepted_base), fallback_bytes));
     }
 
-    let rebased_ops = rebase_ops_after_promotion(path, retained, promoted)?;
-    render_ops(path, promoted_base, &rebased_ops)?;
+    let rebased_ops = rebase_ops_after_accept(path, retained, accepted)?;
+    render_ops(path, accepted_base, &rebased_ops)?;
 
     Ok(Some(LaneEntry::Present(LaneView { ops: rebased_ops })))
 }
@@ -966,12 +965,12 @@ fn entry_conflicts_with_delete(entry: &LaneEntry, base: Option<&[u8]>) -> bool {
 fn ensure_conflict_connected_selection(
     path: &str,
     base: Option<&[u8]>,
-    selected_ops: &[SelectedResolveOp],
+    selected_ops: &[SelectedReplacementOp],
 ) -> Result<(), LaneError> {
     if selected_ops.len() < 2 {
         return Err(invalid_operation_selection(
             path,
-            "resolve-ops requires at least two operations from one conflict group",
+            "accept requires at least two operations from one conflict group",
         ));
     }
 
@@ -981,7 +980,7 @@ fn ensure_conflict_connected_selection(
     while let Some(current) = stack.pop() {
         for candidate in 0..selected_ops.len() {
             if visited[candidate]
-                || !selected_resolve_ops_conflict(
+                || !selected_replacement_ops_conflict(
                     &selected_ops[current],
                     &selected_ops[candidate],
                     base.is_none(),
@@ -1012,19 +1011,21 @@ fn ensure_conflict_connected_selection(
     }
 }
 
-fn selected_resolve_ops_conflict(
-    left: &SelectedResolveOp,
-    right: &SelectedResolveOp,
+fn selected_replacement_ops_conflict(
+    left: &SelectedReplacementOp,
+    right: &SelectedReplacementOp,
     base_missing: bool,
 ) -> bool {
     match (&left.kind, &right.kind) {
-        (SelectedResolveOpKind::Present(left), SelectedResolveOpKind::Present(right)) => {
+        (SelectedReplacementOpKind::Present(left), SelectedReplacementOpKind::Present(right)) => {
             ops_conflict(left, right, base_missing)
         }
-        (SelectedResolveOpKind::Delete, SelectedResolveOpKind::Present(_))
-        | (SelectedResolveOpKind::Present(_), SelectedResolveOpKind::Delete) => !base_missing,
+        (SelectedReplacementOpKind::Delete, SelectedReplacementOpKind::Present(_))
+        | (SelectedReplacementOpKind::Present(_), SelectedReplacementOpKind::Delete) => {
+            !base_missing
+        }
         // Identical delete selections do not form a review conflict group; resolving one delete is enough.
-        (SelectedResolveOpKind::Delete, SelectedResolveOpKind::Delete) => false,
+        (SelectedReplacementOpKind::Delete, SelectedReplacementOpKind::Delete) => false,
     }
 }
 

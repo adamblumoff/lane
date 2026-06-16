@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::types::VirtualExecError;
+use super::types::VirtualRunError;
 use crate::path_label;
 
 static NEXT_TEMP_GIT_ID: AtomicU64 = AtomicU64::new(1);
@@ -30,8 +30,8 @@ impl Drop for TempGitDir {
     }
 }
 
-pub(super) fn prepare_git_view(repo_root: &Path) -> Result<Option<GitView>, VirtualExecError> {
-    let Some(source_git_dir) = resolve_git_dir(repo_root)? else {
+pub(super) fn prepare_git_view(repo_root: &Path) -> Result<Option<GitView>, VirtualRunError> {
+    let Some(source_git_dir) = find_git_dir(repo_root)? else {
         return Ok(None);
     };
     if !source_git_dir.is_dir() {
@@ -43,7 +43,7 @@ pub(super) fn prepare_git_view(repo_root: &Path) -> Result<Option<GitView>, Virt
     Ok(Some(GitView { temp_dir }))
 }
 
-fn resolve_git_dir(repo_root: &Path) -> Result<Option<PathBuf>, VirtualExecError> {
+fn find_git_dir(repo_root: &Path) -> Result<Option<PathBuf>, VirtualRunError> {
     let dot_git = repo_root.join(".git");
     if dot_git.is_dir() {
         return Ok(Some(dot_git));
@@ -53,7 +53,7 @@ fn resolve_git_dir(repo_root: &Path) -> Result<Option<PathBuf>, VirtualExecError
     }
 
     let contents = fs::read_to_string(&dot_git).map_err(|error| {
-        VirtualExecError::message(format!(
+        VirtualRunError::message(format!(
             "failed to read git metadata pointer {}: {error}",
             dot_git.display()
         ))
@@ -72,10 +72,10 @@ fn resolve_git_dir(repo_root: &Path) -> Result<Option<PathBuf>, VirtualExecError
     }
 }
 
-fn create_temp_git_dir() -> Result<TempGitDir, VirtualExecError> {
+fn create_temp_git_dir() -> Result<TempGitDir, VirtualRunError> {
     let root = env::temp_dir().join("lane").join("git");
     fs::create_dir_all(&root).map_err(|error| {
-        VirtualExecError::message(format!(
+        VirtualRunError::message(format!(
             "failed to create temporary git metadata directory {}: {error}",
             root.display()
         ))
@@ -91,19 +91,19 @@ fn create_temp_git_dir() -> Result<TempGitDir, VirtualExecError> {
             Ok(()) => return Ok(TempGitDir { path }),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
-                return Err(VirtualExecError::message(format!(
+                return Err(VirtualRunError::message(format!(
                     "failed to create temporary git metadata directory {}: {error}",
                     path.display()
                 )));
             }
         }
     }
-    Err(VirtualExecError::message(
+    Err(VirtualRunError::message(
         "failed to allocate temporary git metadata directory after 100 attempts",
     ))
 }
 
-fn snapshot_git_metadata(source: &Path, target: &Path) -> Result<(), VirtualExecError> {
+fn snapshot_git_metadata(source: &Path, target: &Path) -> Result<(), VirtualRunError> {
     for file in ["HEAD", "config", "index", "packed-refs", "shallow"] {
         copy_file_if_exists(&source.join(file), &target.join(file))?;
     }
@@ -112,7 +112,7 @@ fn snapshot_git_metadata(source: &Path, target: &Path) -> Result<(), VirtualExec
 
     let objects_info = target.join("objects").join("info");
     fs::create_dir_all(&objects_info).map_err(|error| {
-        VirtualExecError::message(format!(
+        VirtualRunError::message(format!(
             "failed to create temporary git object metadata {}: {error}",
             objects_info.display()
         ))
@@ -122,27 +122,27 @@ fn snapshot_git_metadata(source: &Path, target: &Path) -> Result<(), VirtualExec
         format!("{}\n", git_path_label(source.join("objects"))),
     )
     .map_err(|error| {
-        VirtualExecError::message(format!(
+        VirtualRunError::message(format!(
             "failed to write temporary git alternates for {}: {error}",
             source.display()
         ))
     })
 }
 
-fn copy_file_if_exists(source: &Path, target: &Path) -> Result<(), VirtualExecError> {
+fn copy_file_if_exists(source: &Path, target: &Path) -> Result<(), VirtualRunError> {
     if !source.is_file() {
         return Ok(());
     }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|error| {
-            VirtualExecError::message(format!(
+            VirtualRunError::message(format!(
                 "failed to create temporary git metadata directory {}: {error}",
                 parent.display()
             ))
         })?;
     }
     fs::copy(source, target).map(|_| ()).map_err(|error| {
-        VirtualExecError::message(format!(
+        VirtualRunError::message(format!(
             "failed to copy git metadata {} to {}: {error}",
             source.display(),
             target.display()
@@ -150,34 +150,34 @@ fn copy_file_if_exists(source: &Path, target: &Path) -> Result<(), VirtualExecEr
     })
 }
 
-fn copy_dir_if_exists(source: &Path, target: &Path) -> Result<(), VirtualExecError> {
+fn copy_dir_if_exists(source: &Path, target: &Path) -> Result<(), VirtualRunError> {
     if !source.is_dir() {
         return Ok(());
     }
     copy_dir(source, target)
 }
 
-fn copy_dir(source: &Path, target: &Path) -> Result<(), VirtualExecError> {
+fn copy_dir(source: &Path, target: &Path) -> Result<(), VirtualRunError> {
     fs::create_dir_all(target).map_err(|error| {
-        VirtualExecError::message(format!(
+        VirtualRunError::message(format!(
             "failed to create temporary git metadata directory {}: {error}",
             target.display()
         ))
     })?;
     for entry in fs::read_dir(source).map_err(|error| {
-        VirtualExecError::message(format!(
+        VirtualRunError::message(format!(
             "failed to read git metadata directory {}: {error}",
             source.display()
         ))
     })? {
         let entry = entry.map_err(|error| {
-            VirtualExecError::message(format!(
+            VirtualRunError::message(format!(
                 "failed to read git metadata entry in {}: {error}",
                 source.display()
             ))
         })?;
         let file_type = entry.file_type().map_err(|error| {
-            VirtualExecError::message(format!(
+            VirtualRunError::message(format!(
                 "failed to inspect git metadata entry {}: {error}",
                 entry.path().display()
             ))

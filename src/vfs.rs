@@ -438,7 +438,7 @@ impl LaneFs {
             .collect())
     }
 
-    pub(crate) fn promote_ops_files(
+    pub(crate) fn accept_ops_files(
         &mut self,
         lane: &str,
         path_ops: &[(FilePath, Vec<String>)],
@@ -459,19 +459,19 @@ impl LaneFs {
             .collect::<Result<BTreeMap<_, _>, _>>()?;
 
         let mut draft = self.repo.clone();
-        let mut promoted = Vec::new();
+        let mut accepted = Vec::new();
         for (path, ops) in path_ops {
             let base = bases.get(&path).and_then(Option::as_deref);
             let bytes = draft
-                .promote_ops_path(&path, lane, base, ops)
+                .accept_ops_path(&path, lane, base, ops)
                 .map_err(LaneFsError::Lane)?;
-            promoted.push((path, bytes));
+            accepted.push((path, bytes));
         }
 
-        self.commit_promoted_files(draft, &promoted, persist)
+        self.commit_accepted_files(draft, &accepted, persist)
     }
 
-    pub(crate) fn resolve_op_file(
+    pub(crate) fn accept_replacement_op_file(
         &mut self,
         lane: &str,
         path: &str,
@@ -482,13 +482,13 @@ impl LaneFs {
         let path = normalize_repo_path(path)?;
         let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
         let mut draft = self.repo.clone();
-        let promoted = draft
-            .resolve_op_path(&path, lane, base.as_deref(), op_id, replacement)
+        let accepted = draft
+            .accept_replacement_op_path(&path, lane, base.as_deref(), op_id, replacement)
             .map_err(LaneFsError::Lane)?;
-        self.commit_promoted_files(draft, &[(path, promoted)], persist)
+        self.commit_accepted_files(draft, &[(path, accepted)], persist)
     }
 
-    pub(crate) fn resolve_ops_file(
+    pub(crate) fn accept_replacement_ops_file(
         &mut self,
         path: &str,
         selections: &[(String, String)],
@@ -498,30 +498,30 @@ impl LaneFs {
         let path = normalize_repo_path(path)?;
         let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
         let mut draft = self.repo.clone();
-        let promoted = draft
-            .resolve_ops_path(&path, base.as_deref(), selections, replacement)
+        let accepted = draft
+            .accept_replacement_ops_path(&path, base.as_deref(), selections, replacement)
             .map_err(LaneFsError::Lane)?;
-        self.commit_promoted_files(draft, &[(path, promoted)], persist)
+        self.commit_accepted_files(draft, &[(path, accepted)], persist)
     }
 
-    fn commit_promoted_files(
+    fn commit_accepted_files(
         &mut self,
         draft: LaneRepo,
-        promoted: &[(FilePath, Option<Vec<u8>>)],
+        accepted: &[(FilePath, Option<Vec<u8>>)],
         persist: impl FnOnce(&LaneRepo) -> Result<(), LaneFsError>,
     ) -> Result<(), LaneFsError> {
-        let promoted_paths = promoted
+        let accepted_paths = accepted
             .iter()
             .map(|(path, _)| path.clone())
             .collect::<Vec<_>>();
         let transaction = self
             .worktree
-            .transaction(&promoted_paths)
+            .transaction(&accepted_paths)
             .map_err(LaneFsError::Io)?;
 
         let old_repo = self.repo.clone();
         let result = (|| {
-            let mut deletes = promoted
+            let mut deletes = accepted
                 .iter()
                 .filter_map(|(path, bytes)| bytes.is_none().then_some(path.as_str()))
                 .collect::<Vec<_>>();
@@ -534,7 +534,7 @@ impl LaneFs {
                 self.worktree.remove_file(path).map_err(LaneFsError::Io)?;
             }
 
-            let mut writes = promoted
+            let mut writes = accepted
                 .iter()
                 .filter_map(|(path, bytes)| bytes.as_deref().map(|bytes| (path.as_str(), bytes)))
                 .collect::<Vec<_>>();
@@ -557,7 +557,7 @@ impl LaneFs {
             self.repo = old_repo;
             if let Err(rollback_error) = transaction.rollback() {
                 return Err(LaneFsError::Io(io::Error::other(format!(
-                    "failed to commit promoted files: {error}; rollback failed: {rollback_error}"
+                    "failed to commit accepted files: {error}; rollback failed: {rollback_error}"
                 ))));
             }
             return Err(error);
@@ -739,7 +739,7 @@ mod tests {
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(1);
 
     #[test]
-    fn promotion_rolls_back_worktree_when_persist_fails() {
+    fn acceptance_rolls_back_worktree_when_persist_fails() {
         let root = temp_dir();
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/example.txt"), b"base").unwrap();
@@ -762,7 +762,7 @@ mod tests {
         let mut fs = LaneFs::new(repo, FileWorktree::new(&root));
 
         let result =
-            fs.promote_ops_files("agent-a", &[("src/example.txt".to_owned(), op_ids)], |_| {
+            fs.accept_ops_files("agent-a", &[("src/example.txt".to_owned(), op_ids)], |_| {
                 Err(LaneFsError::Io(io::Error::other(
                     "synthetic persist failure",
                 )))

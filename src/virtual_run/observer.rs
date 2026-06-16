@@ -5,13 +5,13 @@ use std::time::Instant;
 use super::support::elapsed_ms;
 
 #[derive(Clone)]
-pub(super) struct ExecObserver {
+pub(super) struct RunObserver {
     enabled: bool,
     lane: String,
     started: Instant,
 }
 
-impl ExecObserver {
+impl RunObserver {
     pub(super) fn new(lane: &str, enabled: bool) -> Self {
         Self {
             enabled,
@@ -23,7 +23,7 @@ impl ExecObserver {
     pub(super) fn event(&self, message: impl fmt::Display) {
         if self.enabled {
             eprintln!(
-                "[lane exec {} +{}ms] {message}",
+                "[lane run {} +{}ms] {message}",
                 self.lane,
                 elapsed_ms(self.started)
             );
@@ -38,7 +38,7 @@ impl ExecObserver {
         let text = String::from_utf8_lossy(bytes);
         let mut stderr = io::stderr().lock();
         for segment in text.split_inclusive('\n') {
-            let _ = write!(stderr, "[lane exec {} {stream}] {segment}", self.lane);
+            let _ = write!(stderr, "[lane run {} {stream}] {segment}", self.lane);
             if !segment.ends_with('\n') {
                 let _ = writeln!(stderr);
             }

@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::storage::{RepoLock, acquire_repo_lock, load_last_exec, load_repo, persist_repo};
+use crate::storage::{RepoLock, acquire_repo_lock, load_last_run, load_repo, persist_repo};
 use crate::vfs::{FileWorktree, LaneFs, LaneFsError};
-use crate::{LaneExecState, LaneId, LaneRepo};
+use crate::{LaneId, LaneRepo, LaneRunState};
 
 use super::error::{CliError, CliResult};
 
@@ -17,7 +17,7 @@ pub(super) use crate::path_label;
 pub(super) struct LockedLaneFs {
     pub(super) storage_path: PathBuf,
     pub(super) fs: LaneFs,
-    pub(super) last_exec: BTreeMap<LaneId, LaneExecState>,
+    pub(super) last_run: BTreeMap<LaneId, LaneRunState>,
     _lock: RepoLock,
 }
 
@@ -39,11 +39,11 @@ pub(super) fn open_locked_lane_fs(repo_root: &Path) -> CliResult<LockedLaneFs> {
     let lock = acquire_repo_lock(&storage_path)?;
     let repo = load_lane_repo(&storage_path)?;
     let lanes = repo.lane_ids().map(str::to_owned).collect::<BTreeSet<_>>();
-    let last_exec = load_last_exec(&storage_path, &lanes);
+    let last_run = load_last_run(&storage_path, &lanes);
     Ok(LockedLaneFs {
         storage_path,
         fs: LaneFs::new(repo, FileWorktree::new(repo_root)),
-        last_exec,
+        last_run,
         _lock: lock,
     })
 }

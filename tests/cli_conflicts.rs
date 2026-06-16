@@ -5,12 +5,12 @@ mod common;
 use common::*;
 
 #[test]
-fn cli_resolve_op_handles_delete_conflict_with_replacement_file() {
+fn cli_accept_replacement_op_handles_delete_conflict_with_replacement_file() {
     let repo = TempRepo::new();
     repo.write("src/mode.txt", b"mode=base\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -19,7 +19,7 @@ fn cli_resolve_op_handles_delete_conflict_with_replacement_file() {
         "$ErrorActionPreference = \"Stop\"; Remove-Item -LiteralPath 'src/mode.txt'",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -37,20 +37,20 @@ fn cli_resolve_op_handles_delete_conflict_with_replacement_file() {
     assert_eq!(conflict["ops"][0]["base"]["utf8"], "mode=base\n");
     assert_eq!(conflict["ops"][0]["inserted"]["len"], 0);
 
-    let resolution = repo.path().join("delete-resolution.txt");
-    fs::write(&resolution, b"mode=merged\n").unwrap();
-    let resolved = output_json(&repo.run_vec(vec![
-        "resolve-op".to_owned(),
+    let replacement = repo.path().join("delete-replacement.txt");
+    fs::write(&replacement, b"mode=merged\n").unwrap();
+    let accepted = output_json(&repo.run_vec(vec![
+        "accept".to_owned(),
         "agent-a".to_owned(),
         "src/mode.txt".to_owned(),
         "agent-a:delete".to_owned(),
         "--with-file".to_owned(),
-        resolution.display().to_string(),
+        replacement.display().to_string(),
     ]));
 
-    assert_eq!(resolved["resolved_op"]["op_id"], "agent-a:delete");
-    assert_eq!(resolved["replacement"]["utf8"], "mode=merged\n");
-    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    assert_eq!(accepted["accepted_op"]["op_id"], "agent-a:delete");
+    assert_eq!(accepted["replacement"]["utf8"], "mode=merged\n");
+    assert!(accepted["remaining"].as_array().unwrap().is_empty());
     assert_eq!(
         fs::read(repo.path().join("src/mode.txt")).unwrap(),
         b"mode=merged\n"
@@ -68,7 +68,7 @@ fn cli_review_keeps_whole_file_delete_conflict_grouped_with_boundary_insert() {
     repo.write("src/list.txt", b"one\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -77,7 +77,7 @@ fn cli_review_keeps_whole_file_delete_conflict_grouped_with_boundary_insert() {
         "$ErrorActionPreference = \"Stop\"; Remove-Item -LiteralPath 'src/list.txt'",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -101,7 +101,7 @@ fn cli_review_keeps_empty_file_delete_conflicted_with_insert() {
     repo.write("src/empty.txt", b"");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -110,7 +110,7 @@ fn cli_review_keeps_empty_file_delete_conflicted_with_insert() {
         "$ErrorActionPreference = \"Stop\"; Remove-Item -LiteralPath 'src/empty.txt'",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -128,10 +128,10 @@ fn cli_review_keeps_empty_file_delete_conflicted_with_insert() {
         vec!["agent-a:delete", "agent-b:1"]
     );
 
-    let promoted = repo.run_json(["promote-clean", "agent-a"]);
-    assert!(promoted["promoted_ops"].as_array().unwrap().is_empty());
+    let accepted = repo.run_json(["accept", "agent-a"]);
+    assert!(accepted["accepted_ops"].as_array().unwrap().is_empty());
     assert_eq!(
-        promoted["conflicts"][0]["ops"][0]["op_id"],
+        accepted["conflicts"][0]["ops"][0]["op_id"],
         "agent-a:delete"
     );
     assert!(repo.path().join("src/empty.txt").exists());
@@ -139,11 +139,11 @@ fn cli_review_keeps_empty_file_delete_conflicted_with_insert() {
 }
 
 #[test]
-fn cli_resolve_op_handles_create_conflict_with_custom_winner() {
+fn cli_accept_replacement_op_handles_create_conflict_with_custom_winner() {
     let repo = TempRepo::new();
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -152,7 +152,7 @@ fn cli_resolve_op_handles_create_conflict_with_custom_winner() {
         "$ErrorActionPreference = \"Stop\"; New-Item -ItemType Directory -Force -Path src | Out-Null; [IO.File]::WriteAllText('src/new.txt', \"from-a`n\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -172,19 +172,19 @@ fn cli_resolve_op_handles_create_conflict_with_custom_winner() {
     assert_eq!(conflict["ops"][0]["op"]["kind"], "create");
     assert_eq!(conflict["ops"][0]["base"]["len"], 0);
 
-    let resolution = repo.path().join("create-resolution.txt");
-    fs::write(&resolution, b"winner\n").unwrap();
-    let resolved = output_json(&repo.run_vec(vec![
-        "resolve-op".to_owned(),
+    let replacement = repo.path().join("create-replacement.txt");
+    fs::write(&replacement, b"winner\n").unwrap();
+    let accepted = output_json(&repo.run_vec(vec![
+        "accept".to_owned(),
         "agent-a".to_owned(),
         "src/new.txt".to_owned(),
         "agent-a:1".to_owned(),
         "--with-file".to_owned(),
-        resolution.display().to_string(),
+        replacement.display().to_string(),
     ]));
 
-    assert_eq!(resolved["resolved_op"]["op_id"], "agent-a:1");
-    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    assert_eq!(accepted["accepted_op"]["op_id"], "agent-a:1");
+    assert!(accepted["remaining"].as_array().unwrap().is_empty());
     assert_eq!(
         fs::read(repo.path().join("src/new.txt")).unwrap(),
         b"winner\n"
@@ -194,7 +194,7 @@ fn cli_resolve_op_handles_create_conflict_with_custom_winner() {
     let agent_b_path = review_path(&agent_b, "src/new.txt");
     assert_eq!(review_clean_ops(agent_b_path)[0]["op"]["kind"], "replace");
     assert!(agent_b_path["conflicts"].as_array().unwrap().is_empty());
-    repo.run_json(["promote-clean", "agent-b"]);
+    repo.run_json(["accept", "agent-b"]);
     assert_eq!(
         fs::read(repo.path().join("src/new.txt")).unwrap(),
         b"from-b\n"
@@ -202,12 +202,12 @@ fn cli_resolve_op_handles_create_conflict_with_custom_winner() {
 }
 
 #[test]
-fn cli_resolve_ops_combines_conflicting_replacements_and_consumes_selected_ops() {
+fn cli_accept_replacement_ops_combines_conflicting_replacements_and_consumes_selected_ops() {
     let repo = TempRepo::new();
     repo.write("src/tasks.ts", b"TODO");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -216,7 +216,7 @@ fn cli_resolve_ops_combines_conflicting_replacements_and_consumes_selected_ops()
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/tasks.ts', \"function a() {}\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -225,7 +225,7 @@ fn cli_resolve_ops_combines_conflicting_replacements_and_consumes_selected_ops()
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/tasks.ts', \"function b() {}\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-c",
         "--",
         "pwsh",
@@ -257,7 +257,11 @@ fn cli_resolve_ops_combines_conflicting_replacements_and_consumes_selected_ops()
         .as_array()
         .unwrap()
         .iter()
-        .find(|action| action["kind"] == "resolve_ops")
+        .find(|action| {
+            action["kind"] == "accept"
+                && action["op_ids"].as_array().unwrap().len() > 1
+                && !action["required_inputs"].as_array().unwrap().is_empty()
+        })
         .unwrap();
     assert_eq!(
         string_array(&combine_action["op_ids"]),
@@ -266,7 +270,7 @@ fn cli_resolve_ops_combines_conflicting_replacements_and_consumes_selected_ops()
     assert_eq!(
         string_array(&combine_action["command"]),
         vec![
-            "resolve-ops",
+            "accept",
             "src/tasks.ts",
             "--op",
             "agent-a:1",
@@ -279,20 +283,20 @@ fn cli_resolve_ops_combines_conflicting_replacements_and_consumes_selected_ops()
         ]
     );
 
-    let resolution = repo.path().join("combined-resolution.txt");
+    let replacement = repo.path().join("combined-replacement.txt");
     fs::write(
-        &resolution,
+        &replacement,
         b"function a() {}\n\nfunction b() {}\n\nfunction c() {}",
     )
     .unwrap();
-    let resolved = run_review_action_with_replacement_json(&repo, combine_action, &resolution);
+    let accepted = run_review_action_with_replacement_json(&repo, combine_action, &replacement);
 
     assert_eq!(
-        string_array(&resolved["ops"]),
+        string_array(&accepted["ops"]),
         vec!["agent-a:1", "agent-b:1", "agent-c:1"]
     );
-    assert_eq!(resolved["resolved_ops"].as_array().unwrap().len(), 3);
-    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    assert_eq!(accepted["accepted_ops"].as_array().unwrap().len(), 3);
+    assert!(accepted["remaining"].as_array().unwrap().is_empty());
     assert_eq!(
         fs::read(repo.path().join("src/tasks.ts")).unwrap(),
         b"function a() {}\n\nfunction b() {}\n\nfunction c() {}"
@@ -318,12 +322,12 @@ fn cli_resolve_ops_combines_conflicting_replacements_and_consumes_selected_ops()
 }
 
 #[test]
-fn cli_resolve_ops_rejects_unrelated_clean_ops() {
+fn cli_accept_replacement_ops_rejects_unrelated_clean_ops() {
     let repo = TempRepo::new();
     repo.write("src/math.txt", b"alpha=1\nbeta=2\n");
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -332,7 +336,7 @@ fn cli_resolve_ops_rejects_unrelated_clean_ops() {
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/math.txt', \"alpha=10`nbeta=2`n\")",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -346,22 +350,22 @@ fn cli_resolve_ops_rejects_unrelated_clean_ops() {
     assert_eq!(review_clean_op_ids(path), vec!["agent-a:1", "agent-b:1"]);
     assert!(path["conflicts"].as_array().unwrap().is_empty());
 
-    let resolution = repo.path().join("bad-combined-resolution.txt");
-    fs::write(&resolution, b"bad").unwrap();
+    let replacement = repo.path().join("bad-combined-replacement.txt");
+    fs::write(&replacement, b"bad").unwrap();
     let output = repo.run_vec_unchecked(vec![
-        "resolve-ops".to_owned(),
+        "accept".to_owned(),
         "src/math.txt".to_owned(),
         "--op".to_owned(),
         "agent-a:1".to_owned(),
         "--op".to_owned(),
         "agent-b:1".to_owned(),
         "--with-file".to_owned(),
-        resolution.display().to_string(),
+        replacement.display().to_string(),
     ]);
 
     assert_command_fails_with(
         &output,
-        "resolve-ops can only combine ops from one conflict group",
+        "accept can only combine ops from one conflict group",
     );
     assert_eq!(
         fs::read(repo.path().join("src/math.txt")).unwrap(),
@@ -374,12 +378,12 @@ fn cli_resolve_ops_rejects_unrelated_clean_ops() {
 }
 
 #[test]
-fn cli_review_and_resolve_op_cover_binary_replacement_conflicts() {
+fn cli_review_and_accept_replacement_op_cover_binary_replacement_conflicts() {
     let repo = TempRepo::new();
     repo.write("src/blob.bin", &[0, 1, 2, 3]);
 
     repo.run_json([
-        "exec",
+        "run",
         "agent-a",
         "--",
         "pwsh",
@@ -388,7 +392,7 @@ fn cli_review_and_resolve_op_cover_binary_replacement_conflicts() {
         "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllBytes('src/blob.bin', [byte[]](0,1,9,255))",
     ]);
     repo.run_json([
-        "exec",
+        "run",
         "agent-b",
         "--",
         "pwsh",
@@ -414,24 +418,24 @@ fn cli_review_and_resolve_op_cover_binary_replacement_conflicts() {
         64
     );
 
-    let resolution = repo.path().join("binary-resolution.bin");
-    fs::write(&resolution, [0, 1, 7, 255]).unwrap();
-    let resolved = output_json(&repo.run_vec(vec![
-        "resolve-op".to_owned(),
+    let replacement = repo.path().join("binary-replacement.bin");
+    fs::write(&replacement, [0, 1, 7, 255]).unwrap();
+    let accepted = output_json(&repo.run_vec(vec![
+        "accept".to_owned(),
         "agent-a".to_owned(),
         "src/blob.bin".to_owned(),
         "agent-a:1".to_owned(),
         "--with-file".to_owned(),
-        resolution.display().to_string(),
+        replacement.display().to_string(),
     ]));
 
-    assert_eq!(resolved["resolved_op"]["op_id"], "agent-a:1");
-    assert_eq!(resolved["replacement"]["utf8"], Value::Null);
+    assert_eq!(accepted["accepted_op"]["op_id"], "agent-a:1");
+    assert_eq!(accepted["replacement"]["utf8"], Value::Null);
     assert_eq!(
-        resolved["replacement"]["sha256"].as_str().unwrap().len(),
+        accepted["replacement"]["sha256"].as_str().unwrap().len(),
         64
     );
-    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    assert!(accepted["remaining"].as_array().unwrap().is_empty());
     assert_eq!(
         fs::read(repo.path().join("src/blob.bin")).unwrap(),
         [0, 1, 7, 255]

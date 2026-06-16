@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use similar::TextDiff;
 
 use crate::vfs::LaneFs;
-use crate::{FilePath, LaneExecState, LaneId, LaneOpSummary};
+use crate::{FilePath, LaneId, LaneOpSummary, LaneRunState};
 
 use super::error::{CliError, CliResult};
 use super::output::{
@@ -33,7 +33,7 @@ pub(super) fn review_lanes(fs: &LaneFs, lane: Option<&str>) -> CliResult<Vec<Str
 
 pub(super) fn collect_review(
     fs: &LaneFs,
-    last_exec: &BTreeMap<LaneId, LaneExecState>,
+    last_run: &BTreeMap<LaneId, LaneRunState>,
     lanes: &[String],
 ) -> CliResult<(ReviewSummary, Vec<ReviewLaneSummary>, Vec<ReviewPathOutput>)> {
     let mut by_path = BTreeMap::<FilePath, ReviewPathDraft>::new();
@@ -44,7 +44,7 @@ pub(super) fn collect_review(
                 lane.clone(),
                 ReviewLaneSummaryDraft {
                     lane: lane.clone(),
-                    last_exec: last_exec.get(lane).cloned(),
+                    last_run: last_run.get(lane).cloned(),
                     ..ReviewLaneSummaryDraft::default()
                 },
             )
@@ -99,7 +99,7 @@ pub(super) fn collect_review(
         .into_iter()
         .map(|(path, draft)| {
             let mut clean_ops = draft.clean_ops;
-            clean_ops.sort_by(compare_review_ops);
+            clean_ops.sort_by(order_review_ops);
             let conflicts = conflict_groups_for_path(draft.conflicted_ops);
             let ops = ordered_ops_for_path(&clean_ops, &conflicts);
             conflict_groups += conflicts.len();
@@ -164,7 +164,7 @@ fn conflict_groups_for_path(ops: Vec<ReviewOpOutput>) -> Vec<ReviewConflictOutpu
             .into_iter()
             .map(|index| ops[index].clone())
             .collect::<Vec<_>>();
-        group_ops.sort_by(compare_review_ops);
+        group_ops.sort_by(order_review_ops);
         groups.push(review_conflict_output(group_ops));
     }
 
@@ -188,11 +188,11 @@ fn review_conflict_output(ops: Vec<ReviewOpOutput>) -> ReviewConflictOutput {
         .collect();
     let mut actions = Vec::new();
     if ops.len() > 1 {
-        actions.push(resolve_ops_action(&ops));
+        actions.push(accept_replacement_ops_action(&ops));
     }
     actions.extend(
         ops.iter()
-            .flat_map(|op| [show_op_action(op), resolve_op_action(op)]),
+            .flat_map(|op| [detail_action(op), accept_replacement_op_action(op)]),
     );
 
     ReviewConflictOutput {
@@ -204,10 +204,10 @@ fn review_conflict_output(ops: Vec<ReviewOpOutput>) -> ReviewConflictOutput {
     }
 }
 
-pub(super) fn promote_clean_action(lane: &str) -> ReviewActionOutput {
+pub(super) fn accept_clean_action(lane: &str) -> ReviewActionOutput {
     ReviewActionOutput {
-        kind: ReviewActionKind::PromoteClean,
-        command: vec!["promote-clean".to_owned(), lane.to_owned()],
+        kind: ReviewActionKind::Accept,
+        command: vec!["accept".to_owned(), lane.to_owned()],
         lane: Some(lane.to_owned()),
         path: None,
         op_ids: Vec::new(),
@@ -215,11 +215,11 @@ pub(super) fn promote_clean_action(lane: &str) -> ReviewActionOutput {
     }
 }
 
-pub(super) fn show_op_action(op: &ReviewOpOutput) -> ReviewActionOutput {
+pub(super) fn detail_action(op: &ReviewOpOutput) -> ReviewActionOutput {
     ReviewActionOutput {
-        kind: ReviewActionKind::ShowOp,
+        kind: ReviewActionKind::Detail,
         command: vec![
-            "show-op".to_owned(),
+            "review".to_owned(),
             op.op.lane.clone(),
             op.op.path.clone(),
             op.op.op_id.clone(),
@@ -231,11 +231,11 @@ pub(super) fn show_op_action(op: &ReviewOpOutput) -> ReviewActionOutput {
     }
 }
 
-pub(super) fn resolve_op_action(op: &ReviewOpOutput) -> ReviewActionOutput {
+pub(super) fn accept_replacement_op_action(op: &ReviewOpOutput) -> ReviewActionOutput {
     ReviewActionOutput {
-        kind: ReviewActionKind::ResolveOp,
+        kind: ReviewActionKind::Accept,
         command: vec![
-            "resolve-op".to_owned(),
+            "accept".to_owned(),
             op.op.lane.clone(),
             op.op.path.clone(),
             op.op.op_id.clone(),
@@ -252,10 +252,10 @@ pub(super) fn resolve_op_action(op: &ReviewOpOutput) -> ReviewActionOutput {
     }
 }
 
-fn resolve_ops_action(ops: &[ReviewOpOutput]) -> ReviewActionOutput {
+fn accept_replacement_ops_action(ops: &[ReviewOpOutput]) -> ReviewActionOutput {
     let path = ops.first().map(|op| op.op.path.clone()).unwrap_or_default();
     let op_ids = ops.iter().map(|op| op.op.op_id.clone()).collect::<Vec<_>>();
-    let mut command = vec!["resolve-ops".to_owned(), path.clone()];
+    let mut command = vec!["accept".to_owned(), path.clone()];
     for op_id in &op_ids {
         command.push("--op".to_owned());
         command.push(op_id.clone());
@@ -264,7 +264,7 @@ fn resolve_ops_action(ops: &[ReviewOpOutput]) -> ReviewActionOutput {
     command.push("<replacement-file>".to_owned());
 
     ReviewActionOutput {
-        kind: ReviewActionKind::ResolveOps,
+        kind: ReviewActionKind::Accept,
         command,
         lane: None,
         path: Some(path),
@@ -319,15 +319,15 @@ fn ordered_ops_for_path(
             }
         })
         .collect::<Vec<_>>();
-    ops.sort_by(|left, right| compare_lane_op_summaries(&left.op, &right.op));
+    ops.sort_by(|left, right| order_lane_op_summaries(&left.op, &right.op));
     ops
 }
 
-fn compare_review_ops(left: &ReviewOpOutput, right: &ReviewOpOutput) -> Ordering {
-    compare_lane_op_summaries(&left.op, &right.op)
+fn order_review_ops(left: &ReviewOpOutput, right: &ReviewOpOutput) -> Ordering {
+    order_lane_op_summaries(&left.op, &right.op)
 }
 
-fn compare_lane_op_summaries(left: &LaneOpSummary, right: &LaneOpSummary) -> Ordering {
+fn order_lane_op_summaries(left: &LaneOpSummary, right: &LaneOpSummary) -> Ordering {
     left.order_key
         .cmp(&right.order_key)
         .then(left.base_start.cmp(&right.base_start))
@@ -454,14 +454,14 @@ struct ReviewLaneSummaryDraft {
     changed_paths: usize,
     clean_ops: usize,
     conflicted_ops: usize,
-    last_exec: Option<LaneExecState>,
+    last_run: Option<LaneRunState>,
 }
 
 impl ReviewLaneSummaryDraft {
     fn into_output(self) -> ReviewLaneSummary {
         let mut actions = Vec::new();
         if self.clean_ops > 0 {
-            actions.push(promote_clean_action(&self.lane));
+            actions.push(accept_clean_action(&self.lane));
         }
         actions.push(discard_action(&self.lane));
 
@@ -470,7 +470,7 @@ impl ReviewLaneSummaryDraft {
             changed_paths: self.changed_paths,
             clean_ops: self.clean_ops,
             conflicted_ops: self.conflicted_ops,
-            last_exec: self.last_exec,
+            last_run: self.last_run,
             actions,
         }
     }

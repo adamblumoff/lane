@@ -1,4 +1,4 @@
 interface:
   display_name: "Lane Orchestrate"
-  short_description: "Run, compare, and promote Lane-backed agent attempts."
-  default_prompt: "Use Lane to run multiple isolated implementation attempts, verify them, compare the evidence, promote the selected work, and clean up the losing lanes."
+  short_description: "Run, review, and accept Lane-backed agent attempts."
+  default_prompt: "Use Lane to run multiple isolated implementation attempts, verify them, review the evidence, accept the selected work, and clean up the losing lanes."

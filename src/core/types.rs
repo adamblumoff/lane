@@ -27,7 +27,7 @@ const EXEC_OUTPUT_PREVIEW_LIMIT: usize = 4096;
 pub type BaseFingerprint = [u8; BASE_FINGERPRINT_LEN];
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct LaneExecState {
+pub struct LaneRunState {
     pub exit_code: Option<i32>,
     pub worker_error: Option<String>,
     pub stdout: LaneTextPreview,
@@ -115,7 +115,7 @@ pub enum LaneError {
     OperationMissing { path: FilePath, op_id: String },
 }
 
-impl LaneExecState {
+impl LaneRunState {
     pub fn new(
         exit_code: Option<i32>,
         worker_error: Option<String>,
