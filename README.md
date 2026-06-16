@@ -77,7 +77,7 @@ the check output without keeping check-generated file changes as attempt edits.
 `lane compare` combines attempt output, check results, and the normal operation
 review into one neutral evidence surface. It does not rank attempts or choose a
 winner. Promotion remains explicit through the emitted `promote-clean`,
-`promote-ops`, and `resolve-op` commands.
+`promote-ops`, `resolve-op`, and `resolve-ops` commands.
 
 ## Single-Lane Flow
 
@@ -111,6 +111,7 @@ lane discard agent-a
 | `promote-ops <lane> <path> <ops...>` | Promote specific operations. |
 | `show-op <lane> <path> <op-id>` | Inspect one operation with byte previews. |
 | `resolve-op <lane> <path> <op-id> --with-file <path>` | Replace one operation with resolved bytes. |
+| `resolve-ops <path> --op <lane:op>... --with-file <path>` | Replace a selected group of operations with one resolved byte sequence and consume the selected source ops. |
 | `discard <lane>` | Remove a lane and its private changes. |
 | `gc` | Delete unreferenced blobs from lane storage. |
 | `doctor` | Validate Lane storage and report repairable state. |
@@ -128,8 +129,9 @@ against that base.
 and stores those changes in `.lane`.
 
 `lane review` and `lane compare` are decision points. Clean operations can be
-promoted automatically. Conflicting operations can be inspected, resolved,
-promoted selectively, or discarded.
+promoted automatically. Conflicting operations can be inspected, resolved as a
+single winner, combined into one explicit `resolve-ops` replacement, promoted
+selectively, or discarded.
 
 ## Development
 

@@ -85,6 +85,14 @@ enum Command {
         #[arg(long = "with-file", value_name = "PATH")]
         with_file: PathBuf,
     },
+    #[command(about = "Resolve and promote multiple lane operations from replacement bytes")]
+    ResolveOps {
+        path: String,
+        #[arg(long = "op", required = true)]
+        ops: Vec<String>,
+        #[arg(long = "with-file", value_name = "PATH")]
+        with_file: PathBuf,
+    },
     #[command(about = "Show a text diff for a lane")]
     Diff { lane: String, paths: Vec<String> },
     #[command(about = "Promote selected lane operations into the normal repo")]
@@ -145,6 +153,11 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
             with_file,
         } => commands::resolve_op(&repo_root, &lane, &path, &op_id, &with_file)
             .map(|()| ExitCode::SUCCESS),
+        Command::ResolveOps {
+            path,
+            ops,
+            with_file,
+        } => commands::resolve_ops(&repo_root, &path, &ops, &with_file).map(|()| ExitCode::SUCCESS),
         Command::Diff { lane, paths } => {
             commands::diff(&repo_root, &lane, paths).map(|()| ExitCode::SUCCESS)
         }

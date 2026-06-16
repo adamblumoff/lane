@@ -387,11 +387,19 @@ pub(crate) fn review_change_statuses(review: &Value, lane: &str) -> BTreeMap<Str
 }
 
 #[allow(dead_code)]
-pub(crate) fn review_clean_op_ids(path: &Value) -> Vec<String> {
-    path["clean_ops"]
+pub(crate) fn review_clean_ops(path: &Value) -> Vec<&Value> {
+    path["ops"]
         .as_array()
         .unwrap()
         .iter()
+        .filter(|op| op["state"] == "clean")
+        .collect()
+}
+
+#[allow(dead_code)]
+pub(crate) fn review_clean_op_ids(path: &Value) -> Vec<String> {
+    review_clean_ops(path)
+        .into_iter()
         .map(|op| op["op"]["op_id"].as_str().unwrap().to_owned())
         .collect()
 }

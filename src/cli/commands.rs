@@ -3,12 +3,14 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
+use crate::LaneError;
 use crate::storage::{doctor_storage, gc_storage};
+use crate::vfs::LaneFsError;
 
 use super::error::{CliError, CliResult};
 use super::output::{
     DiscardOutput, DoctorOutput, GcOutput, PromoteCleanOutput, PromoteOpsOutput, ResolveOpOutput,
-    ReviewOutput, ShowOpOutput,
+    ResolveOpsOutput, ReviewOutput, ShowOpOutput,
 };
 use super::preview::byte_preview;
 use super::repo::{open_locked_lane_fs, path_label, persist_lane_repo, print_json, storage_path};
@@ -156,6 +158,87 @@ pub(super) fn resolve_op(
     };
     print_json(&output)?;
     Ok(())
+}
+
+pub(super) fn resolve_ops(
+    repo_root: &Path,
+    path: &str,
+    ops: &[String],
+    with_file: &Path,
+) -> CliResult<()> {
+    let selections = parse_lane_op_selections(ops)?;
+    let replacement = fs::read(with_file)?;
+    let replacement_file = fs::canonicalize(with_file).unwrap_or_else(|_| with_file.to_path_buf());
+    let mut locked = open_locked_lane_fs(repo_root)?;
+    let details = selections
+        .iter()
+        .map(|(lane, op_id)| locked.fs.op_detail(lane, path, op_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    locked
+        .fs
+        .resolve_ops_file(
+            path,
+            &selections,
+            replacement.clone(),
+            persist_lane_repo(&locked.storage_path),
+        )
+        .map_err(resolve_ops_cli_error)?;
+
+    let affected_lanes = selections
+        .iter()
+        .map(|(lane, _)| lane.clone())
+        .collect::<BTreeSet<_>>();
+    let mut remaining = Vec::new();
+    for lane in affected_lanes {
+        remaining.extend(collect_changes(&locked.fs, &lane)?);
+    }
+
+    let output = ResolveOpsOutput {
+        path: path.to_owned(),
+        ops: ops.to_vec(),
+        repo_root: path_label(repo_root),
+        storage_path: path_label(&locked.storage_path),
+        replacement_file: path_label(replacement_file),
+        resolved_ops: details.into_iter().map(|detail| detail.summary).collect(),
+        replacement: byte_preview(&replacement),
+        remaining,
+    };
+    print_json(&output)?;
+    Ok(())
+}
+
+fn parse_lane_op_selections(ops: &[String]) -> CliResult<Vec<(String, String)>> {
+    if ops.len() < 2 {
+        return Err(CliError::message(
+            "resolve-ops requires at least two --op values from one conflict group".to_owned(),
+        ));
+    }
+    ops.iter()
+        .map(|op_id| {
+            let Some((lane, suffix)) = op_id.rsplit_once(':') else {
+                return Err(CliError::message(format!(
+                    "resolve-ops op must be lane-qualified: {op_id}"
+                )));
+            };
+            if lane.is_empty() || suffix.is_empty() {
+                return Err(CliError::message(format!(
+                    "resolve-ops op must be lane-qualified: {op_id}"
+                )));
+            }
+            Ok((lane.to_owned(), op_id.clone()))
+        })
+        .collect()
+}
+
+fn resolve_ops_cli_error(error: LaneFsError) -> CliError {
+    match error {
+        LaneFsError::Lane(LaneError::InvalidOperationSelection { reason, .. }) => {
+            CliError::message(format!(
+                "resolve-ops can only combine ops from one conflict group: {reason}"
+            ))
+        }
+        error => CliError::from(error),
+    }
 }
 
 pub(super) fn diff(repo_root: &Path, lane: &str, paths: Vec<String>) -> CliResult<()> {
