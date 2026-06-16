@@ -579,6 +579,52 @@ fn resolve_ops_rejects_unrelated_clean_ops_without_mutating_repo() {
 }
 
 #[test]
+fn resolve_ops_preserves_unselected_empty_file_insert_as_alternative_to_delete_resolution() {
+    let mut repo = seeded_repo();
+    repo.create_lane("agent-c").unwrap();
+    let base = b"";
+    let path = "src/empty.txt";
+    repo.delete_path(path, "agent-a", Some(base)).unwrap();
+    repo.write(path, "agent-b", base, 0..0, b"B".to_vec())
+        .unwrap();
+    repo.write(path, "agent-c", base, 0..0, b"C".to_vec())
+        .unwrap();
+
+    let delete_op = repo
+        .change_ops(path, "agent-a", Some(base))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let agent_b_op = repo
+        .change_ops(path, "agent-b", Some(base))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(delete_op.conflicts_with.len(), 2);
+    assert_eq!(agent_b_op.conflicts_with, vec!["agent-a".to_owned()]);
+
+    let resolved = repo
+        .resolve_ops_path(
+            path,
+            Some(base),
+            &[
+                ("agent-a".to_owned(), delete_op.op_id),
+                ("agent-b".to_owned(), agent_b_op.op_id),
+            ],
+            b"merged".to_vec(),
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(resolved, b"merged");
+    assert_eq!(repo.overlay_paths("agent-a").unwrap(), Vec::<&str>::new());
+    assert_eq!(repo.overlay_paths("agent-b").unwrap(), Vec::<&str>::new());
+    assert_eq!(repo.read(path, "agent-c", &resolved).unwrap(), b"C");
+}
+
+#[test]
 fn overlapping_same_file_ops_remain_alternatives_after_promotion() {
     let mut repo = seeded_repo();
     let base = b"mode=base\n";

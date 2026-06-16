@@ -107,7 +107,6 @@ pub(super) fn collect_review(
                 path,
                 lanes: draft.lanes.into_values().collect(),
                 ops,
-                clean_ops,
                 conflicts,
             }
         })

@@ -54,7 +54,6 @@ pub(super) struct ReviewPathOutput {
     pub(super) path: FilePath,
     pub(super) lanes: Vec<ReviewLaneOutput>,
     pub(super) ops: Vec<ReviewOrderedOpOutput>,
-    pub(super) clean_ops: Vec<ReviewOpOutput>,
     pub(super) conflicts: Vec<ReviewConflictOutput>,
 }
 

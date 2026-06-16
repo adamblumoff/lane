@@ -158,7 +158,7 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     );
 
     let app_review = review_path(&review, "src/app.ts");
-    assert!(app_review["clean_ops"].as_array().unwrap().is_empty());
+    assert!(review_clean_ops(app_review).is_empty());
     let app_conflict = &app_review["conflicts"][0];
     assert_eq!(
         string_array(&app_conflict["lanes"]),

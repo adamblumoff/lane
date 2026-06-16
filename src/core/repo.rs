@@ -521,7 +521,12 @@ impl LaneFile {
             inserted: replacement,
         }];
         let promoted = Some(render_ops(path, base.unwrap_or_default(), &promoted_ops)?);
-        let promotion_lane = selected_ops[0].lane.as_str();
+        let promotion_lane = selected_ops
+            .iter()
+            .map(|op| op.lane.as_str())
+            .min()
+            .expect("resolve-ops validates a nonempty selection");
+        let selected_delete_conflicts_with_present = !selected_deletes.is_empty() && base.is_some();
 
         self.rebuild_after_base_promotion(
             path,
@@ -546,6 +551,8 @@ impl LaneFile {
                             .unwrap_or(view.ops);
                         if retained_ops.is_empty() {
                             Ok(None)
+                        } else if selected_delete_conflicts_with_present {
+                            Ok(entry_for_content(promoted_base, old_bytes))
                         } else {
                             rebased_entry_for_present_ops(
                                 path,
@@ -1016,6 +1023,7 @@ fn selected_resolve_ops_conflict(
         }
         (SelectedResolveOpKind::Delete, SelectedResolveOpKind::Present(_))
         | (SelectedResolveOpKind::Present(_), SelectedResolveOpKind::Delete) => !base_missing,
+        // Identical delete selections do not form a review conflict group; resolving one delete is enough.
         (SelectedResolveOpKind::Delete, SelectedResolveOpKind::Delete) => false,
     }
 }

@@ -132,9 +132,8 @@ fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops()
     ]);
 
     let review = repo.run_json(["review", "agent-a"]);
-    let ops = review_path(&review, "src/math.txt")["clean_ops"]
-        .as_array()
-        .unwrap();
+    let math_path = review_path(&review, "src/math.txt");
+    let ops = review_clean_ops(math_path);
     assert_eq!(ops.len(), 2);
     let op_id = ops[0]["op"]["op_id"].as_str().unwrap().to_owned();
 
@@ -148,9 +147,8 @@ fn cli_promote_ops_promotes_selected_same_file_op_and_preserves_other_lane_ops()
     );
 
     let remaining_a = repo.run_json(["review", "agent-a"]);
-    let remaining_a_ops = review_path(&remaining_a, "src/math.txt")["clean_ops"]
-        .as_array()
-        .unwrap();
+    let remaining_a_path = review_path(&remaining_a, "src/math.txt");
+    let remaining_a_ops = review_clean_ops(remaining_a_path);
     assert_eq!(remaining_a_ops.len(), 1);
     assert_eq!(remaining_a_ops[0]["op"]["op_id"], "agent-a:2");
     let remaining_b = repo.run_json(["review", "agent-b"]);
@@ -352,7 +350,7 @@ fn cli_review_groups_clean_ops_and_conflict_decisions_json_first() {
     assert_eq!(path["path"], "src/vars.txt");
     assert_eq!(path["lanes"].as_array().unwrap().len(), 3);
     assert_eq!(
-        review_op_ids(&path["clean_ops"]),
+        review_clean_op_ids(path),
         vec!["agent-a:1", "agent-b:2", "agent-c:1"]
     );
     assert_eq!(
@@ -524,7 +522,7 @@ fn cli_review_human_compacts_many_clean_only_paths_and_keeps_conflict_commands()
     assert_eq!(json_before["summary"]["clean_ops"], 26);
     assert_eq!(json_before["summary"]["conflicted_ops"], 2);
     assert_eq!(
-        review_path(&json_before, "generated/file-000.txt")["clean_ops"][0]["op"]["op_id"],
+        review_clean_ops(review_path(&json_before, "generated/file-000.txt"))[0]["op"]["op_id"],
         "clean-lane:1"
     );
 
@@ -581,7 +579,7 @@ fn cli_review_human_compacts_many_clean_ops_on_one_conflicted_path() {
 
     let review = repo.run_json(["review"]);
     let path = review_path(&review, "src/many.txt");
-    assert!(path["clean_ops"].as_array().unwrap().len() > 12);
+    assert!(review_clean_ops(path).len() > 12);
     assert_eq!(path["conflicts"].as_array().unwrap().len(), 1);
 
     let human = repo.run_text(["review", "--human"]);
@@ -684,7 +682,7 @@ fn cli_show_op_and_resolve_op_complete_conflicted_operation_flow() {
 
     let agent_b = repo.run_json(["review", "agent-b"]);
     let agent_b_path = review_path(&agent_b, "src/vars.txt");
-    let agent_b_ops = agent_b_path["clean_ops"].as_array().unwrap();
+    let agent_b_ops = review_clean_ops(agent_b_path);
     assert_eq!(agent_b_ops.len(), 1);
     assert_eq!(agent_b_ops[0]["op"]["inserted_len"], 1);
     assert!(agent_b_path["conflicts"].as_array().unwrap().is_empty());

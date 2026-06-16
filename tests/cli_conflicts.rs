@@ -58,7 +58,7 @@ fn cli_resolve_op_handles_delete_conflict_with_replacement_file() {
 
     let agent_b = repo.run_json(["review", "agent-b"]);
     let agent_b_path = review_path(&agent_b, "src/mode.txt");
-    assert!(!agent_b_path["clean_ops"].as_array().unwrap().is_empty());
+    assert!(!review_clean_ops(agent_b_path).is_empty());
     assert!(agent_b_path["conflicts"].as_array().unwrap().is_empty());
 }
 
@@ -192,7 +192,7 @@ fn cli_resolve_op_handles_create_conflict_with_custom_winner() {
 
     let agent_b = repo.run_json(["review", "agent-b"]);
     let agent_b_path = review_path(&agent_b, "src/new.txt");
-    assert_eq!(agent_b_path["clean_ops"][0]["op"]["kind"], "replace");
+    assert_eq!(review_clean_ops(agent_b_path)[0]["op"]["kind"], "replace");
     assert!(agent_b_path["conflicts"].as_array().unwrap().is_empty());
     repo.run_json(["promote-clean", "agent-b"]);
     assert_eq!(
@@ -343,10 +343,7 @@ fn cli_resolve_ops_rejects_unrelated_clean_ops() {
 
     let review = repo.run_json(["review"]);
     let path = review_path(&review, "src/math.txt");
-    assert_eq!(
-        review_op_ids(&path["clean_ops"]),
-        vec!["agent-a:1", "agent-b:1"]
-    );
+    assert_eq!(review_clean_op_ids(path), vec!["agent-a:1", "agent-b:1"]);
     assert!(path["conflicts"].as_array().unwrap().is_empty());
 
     let resolution = repo.path().join("bad-combined-resolution.txt");
@@ -371,7 +368,7 @@ fn cli_resolve_ops_rejects_unrelated_clean_ops() {
         b"alpha=1\nbeta=2\n"
     );
     assert_eq!(
-        review_op_ids(&repo.run_json(["review"])["paths"][0]["clean_ops"]),
+        review_clean_op_ids(&repo.run_json(["review"])["paths"][0]),
         vec!["agent-a:1", "agent-b:1"]
     );
 }
@@ -442,6 +439,6 @@ fn cli_review_and_resolve_op_cover_binary_replacement_conflicts() {
 
     let agent_b = repo.run_json(["review", "agent-b"]);
     let agent_b_path = review_path(&agent_b, "src/blob.bin");
-    assert_eq!(agent_b_path["clean_ops"][0]["op"]["inserted_len"], 4);
+    assert_eq!(review_clean_ops(agent_b_path)[0]["op"]["inserted_len"], 4);
     assert!(agent_b_path["conflicts"].as_array().unwrap().is_empty());
 }

@@ -5,8 +5,8 @@ use crate::LaneOpSummary;
 use crate::vfs::LaneFileChangeStatus;
 
 use super::output::{
-    BytePreview, ReviewActionKind, ReviewActionOutput, ReviewLaneSummary, ReviewOpOutput,
-    ReviewOutput, ReviewPathOutput,
+    BytePreview, ReviewActionKind, ReviewActionOutput, ReviewLaneSummary, ReviewOpState,
+    ReviewOrderedOpOutput, ReviewOutput, ReviewPathOutput,
 };
 use super::review::resolve_op_action;
 
@@ -84,13 +84,14 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
     }
 
     writeln!(text, "  |- clean ops")?;
-    if path.clean_ops.is_empty() {
+    let clean_ops = clean_ops_for_path(path).collect::<Vec<_>>();
+    if clean_ops.is_empty() {
         writeln!(text, "  |  - none")?;
     } else {
-        let detailed_count = path.clean_ops.len().min(CLEAN_OP_DETAIL_LIMIT_PER_PATH);
-        for op in path.clean_ops.iter().take(detailed_count) {
+        let detailed_count = clean_ops.len().min(CLEAN_OP_DETAIL_LIMIT_PER_PATH);
+        for op in clean_ops.iter().take(detailed_count) {
             writeln!(text, "  |  - {}", op_label(&op.op))?;
-            write_op_previews(text, "  |    ", op)?;
+            write_op_previews(text, "  |    ", &op.base, &op.inserted)?;
             writeln!(
                 text,
                 "  |    promote: {}",
@@ -102,8 +103,8 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
                 ])
             )?;
         }
-        if path.clean_ops.len() > detailed_count {
-            write_omitted_clean_ops(text, path, &path.clean_ops[detailed_count..])?;
+        if clean_ops.len() > detailed_count {
+            write_omitted_clean_ops(text, path, &clean_ops[detailed_count..])?;
         }
     }
 
@@ -129,7 +130,7 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
             }
             for op in &conflict.ops {
                 writeln!(text, "       - {}", op_label(&op.op))?;
-                write_op_previews(text, "         ", op)?;
+                write_op_previews(text, "         ", &op.base, &op.inserted)?;
                 writeln!(
                     text,
                     "         resolve: {}",
@@ -146,7 +147,7 @@ fn should_compact_clean_only_paths(paths: &[ReviewPathOutput]) -> bool {
 }
 
 fn is_clean_only_path(path: &ReviewPathOutput) -> bool {
-    !path.clean_ops.is_empty() && path.conflicts.is_empty()
+    clean_ops_for_path(path).next().is_some() && path.conflicts.is_empty()
 }
 
 fn write_clean_only_paths(text: &mut String, output: &ReviewOutput) -> fmt::Result {
@@ -168,7 +169,8 @@ fn write_clean_only_paths(text: &mut String, output: &ReviewOutput) -> fmt::Resu
     for lane in &output.lanes {
         let clean_ops = clean_only_paths
             .iter()
-            .flat_map(|path| &path.clean_ops)
+            .copied()
+            .flat_map(clean_ops_for_path)
             .filter(|op| op.op.lane == lane.lane)
             .count();
         if clean_ops == 0 {
@@ -176,18 +178,18 @@ fn write_clean_only_paths(text: &mut String, output: &ReviewOutput) -> fmt::Resu
         }
         let path_count = clean_only_paths
             .iter()
-            .filter(|path| path.clean_ops.iter().any(|op| op.op.lane == lane.lane))
+            .filter(|path| clean_ops_for_path(path).any(|op| op.op.lane == lane.lane))
             .count();
         let total_clean_ops = output
             .paths
             .iter()
-            .flat_map(|path| &path.clean_ops)
+            .flat_map(clean_ops_for_path)
             .filter(|op| op.op.lane == lane.lane)
             .count();
         let total_path_count = output
             .paths
             .iter()
-            .filter(|path| path.clean_ops.iter().any(|op| op.op.lane == lane.lane))
+            .filter(|path| clean_ops_for_path(path).any(|op| op.op.lane == lane.lane))
             .count();
         if total_clean_ops == clean_ops {
             writeln!(
@@ -242,7 +244,7 @@ fn write_clean_only_paths(text: &mut String, output: &ReviewOutput) -> fmt::Resu
 fn write_omitted_clean_ops(
     text: &mut String,
     path: &ReviewPathOutput,
-    omitted: &[ReviewOpOutput],
+    omitted: &[&ReviewOrderedOpOutput],
 ) -> fmt::Result {
     writeln!(
         text,
@@ -332,7 +334,7 @@ fn write_promotable_now(
 fn promotable_path_count(paths: &[ReviewPathOutput], lane: &str) -> usize {
     paths
         .iter()
-        .filter(|path| path.clean_ops.iter().any(|op| op.op.lane == lane))
+        .filter(|path| clean_ops_for_path(path).any(|op| op.op.lane == lane))
         .count()
 }
 
@@ -379,9 +381,20 @@ fn write_discard_actions(text: &mut String, lanes: &[ReviewLaneSummary]) -> fmt:
     Ok(())
 }
 
-fn write_op_previews(text: &mut String, indent: &str, op: &ReviewOpOutput) -> fmt::Result {
-    writeln!(text, "{indent}base: {}", preview_label(&op.base))?;
-    writeln!(text, "{indent}inserted: {}", preview_label(&op.inserted))
+fn clean_ops_for_path(path: &ReviewPathOutput) -> impl Iterator<Item = &ReviewOrderedOpOutput> {
+    path.ops
+        .iter()
+        .filter(|op| matches!(op.state, ReviewOpState::Clean))
+}
+
+fn write_op_previews(
+    text: &mut String,
+    indent: &str,
+    base: &BytePreview,
+    inserted: &BytePreview,
+) -> fmt::Result {
+    writeln!(text, "{indent}base: {}", preview_label(base))?;
+    writeln!(text, "{indent}inserted: {}", preview_label(inserted))
 }
 
 fn op_label(op: &LaneOpSummary) -> String {
