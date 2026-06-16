@@ -1,3 +1,5 @@
+THIS APPLICATION IS MADE FOR AGENTS, NOT HUMANS. THE ONLY THING THE HUMAN IS DOING IS DOWNLOADING THE CLI AND ENVOKING THE LANE SKILL, THE AGENT HANDLES THE REST. 
+
 The goal of this application is to allow agents to work on the same file at the same time in different "lanes" asynchronously without making multiple copies of the same file.
 
 This is intended to replace the git worktree flow that is very annoying and cumbersome. 

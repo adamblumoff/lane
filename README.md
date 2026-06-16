@@ -1,50 +1,90 @@
 # lane
 
-Lane lets multiple agents work on the same repo files at the same time without
-copying the repo or creating git worktrees.
+[![CI](https://github.com/adamblumoff/lane/actions/workflows/ci.yml/badge.svg)](https://github.com/adamblumoff/lane/actions/workflows/ci.yml)
 
-It is a file-level isolation layer for agent work. Each agent writes into its own
-lane, Lane records the file operations, and the base repo stays untouched until
-you explicitly promote selected work.
+Lane is a Windows-first CLI and Codex skill for file-level isolation between AI
+coding agents. It lets multiple agents edit the same repo files in parallel
+without copying the repo or creating git worktrees.
+
+Lane is for agent workflows, not a human project-management UI. The human
+installs the CLI, enables the bundled skill, and asks the agent to use Lane; the
+agent handles attempts, checks, comparison, promotion, and cleanup.
 
 ## Status
 
-Pre-alpha. Expect breaking changes.
+Pre-alpha. Expect destructive changes and breaking command contracts.
 
-Development currently targets Windows. `lane exec` requires the WinFsp virtual
-filesystem so agents can run inside a mounted lane view.
+`lane exec`, `lane try`, and `lane check` currently target Windows and require
+the WinFsp virtual filesystem so each agent can run inside a mounted lane view.
 
-## Why
+## Why Lane Exists
 
-Git worktrees isolate whole repos. That is too coarse when several agents are
-trying different edits against the same files.
+Git worktrees isolate whole repos. That is too coarse when several AI coding
+agents are trying different edits against the same files.
 
-Lane moves the isolation boundary down to the file operation level:
+Lane moves the isolation boundary down to file operations:
 
-- run agents asynchronously in separate lanes
-- compare their edits against the same base files
+- run asynchronous agent attempts in separate lanes
+- compare edits against the same base files
 - promote clean operations directly
 - resolve conflicts per operation instead of per copied repo
+- keep the base repo untouched until a parent agent explicitly promotes work
 
-## Build
+If you are looking for an AI agent workflow tool, multi-agent coding CLI,
+file-level version control experiment, git worktree alternative, virtual
+filesystem overlay, or Codex orchestration skill, Lane is that experiment.
+
+## Agent-First Quickstart
+
+Build and test the CLI:
 
 ```powershell
 cargo build
 cargo test
 ```
 
-To put the `lane` binary on your path while developing:
+Install the development binary on your path:
 
 ```powershell
 cargo install --path .
 ```
 
-## Basic AX Flow
+Install the bundled Codex skill by copying it into your Codex skills directory:
+
+```powershell
+$dest = Join-Path $env:USERPROFILE ".codex\skills\lane-orchestrate"
+New-Item -ItemType Directory -Force $dest | Out-Null
+Copy-Item .\skills\lane-orchestrate\* $dest -Recurse -Force
+```
+
+Then ask Codex to use the Lane Orchestrate skill. The normal agent flow is:
+
+```powershell
+lane try --name login --attempts 5 -- codex exec --prompt "Implement the login page."
+lane check login --name test -- pnpm test
+lane compare login --human
+lane promote-clean login-3
+lane discard-run login
+```
+
+`lane try` reserves fresh attempt lanes named `<run>-1`, `<run>-2`, and so on,
+runs the same command in each lane, captures changed bytes, and stores attempt
+output under `.lane/runs`.
+
+`lane check` runs a verification command inside every attempt lane and records
+the check output without keeping check-generated file changes as attempt edits.
+
+`lane compare` combines attempt output, check results, and the normal operation
+review into one neutral evidence surface. It does not rank attempts or choose a
+winner. Promotion remains explicit through the emitted `promote-clean`,
+`promote-ops`, and `resolve-op` commands.
+
+## Single-Lane Flow
 
 ```powershell
 lane exec agent-a -- codex exec --prompt "Implement the change."
 lane diff agent-a
-lane review --human
+lane review --human agent-a
 lane promote-clean agent-a
 ```
 
@@ -54,38 +94,13 @@ If the lane is not worth keeping:
 lane discard agent-a
 ```
 
-## N-Attempt Flow
-
-```powershell
-lane try --name login --attempts 5 -- codex exec --prompt "Implement the login page."
-lane check login --name test -- pnpm test
-lane compare login --human
-lane runs
-lane discard-run login
-```
-
-`lane try` reserves fresh attempt lanes named `<run>-1`, `<run>-2`, and so on,
-runs the same command in each lane, and stores attempt output under `.lane/runs`.
-
-`lane check` runs a verification command inside every attempt lane and records
-the check output without keeping check-generated file changes as attempt edits.
-
-`lane compare` combines attempt output, check results, and the normal operation
-review into one neutral evidence surface. It does not rank attempts or choose a
-winner. Promotion is still explicit through the copyable `promote-clean`,
-`promote-ops`, and `resolve-op` commands it reports.
-
-`lane runs` lists stored attempt runs, `lane compare <name>` shows detailed
-attempt, check, and review evidence, and `lane discard-run <name>` removes every
-attempt lane recorded for that run plus `.lane/runs/<name>.json`.
-
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
 | `exec <lane> -- <command>` | Run a command inside a mounted lane view. |
 | `try --name <run> --attempts <N> -- <command>` | Run N isolated attempts for the same command. |
-| `check <run> -- <command>` | Run a verification command across every attempt without keeping check artifacts as attempt edits. |
+| `check <run> --name <name> -- <command>` | Run a verification command across every attempt without keeping check artifacts as attempt edits. |
 | `runs` | List stored attempt runs and their check counts. |
 | `compare <run> [--human]` | Compare attempts, checks, and review state for a run. |
 | `discard-run <run>` | Remove a run and every recorded attempt lane. |
@@ -97,26 +112,32 @@ attempt lane recorded for that run plus `.lane/runs/<name>.json`.
 | `show-op <lane> <path> <op-id>` | Inspect one operation with byte previews. |
 | `resolve-op <lane> <path> <op-id> --with-file <path>` | Replace one operation with resolved bytes. |
 | `discard <lane>` | Remove a lane and its private changes. |
-| `doctor` | Validate Lane storage. |
+| `gc` | Delete unreferenced blobs from lane storage. |
+| `doctor` | Validate Lane storage and report repairable state. |
+
+Most commands emit JSON by default so parent agents can make deterministic
+decisions. `diff`, `review --human`, and `compare --human` are the main
+human-readable surfaces.
 
 ## Mental Model
 
-The repo on disk is the base.
-
-A lane is a private overlay of file operations against that base.
+The repo on disk is the base. A lane is a private overlay of file operations
+against that base.
 
 `lane exec` gives a worker a normal-looking mounted repo, captures what changed,
 and stores those changes in `.lane`.
 
-`lane review` is the decision point. Clean operations can be promoted
-automatically. Conflicting operations can be inspected, resolved, promoted
-selectively, or discarded.
+`lane review` and `lane compare` are decision points. Clean operations can be
+promoted automatically. Conflicting operations can be inspected, resolved,
+promoted selectively, or discarded.
 
 ## Development
 
 ```powershell
+cargo fmt
 cargo test
+lane doctor
 ```
 
 Tests live outside `src/` and should preserve real manual workflows that are
-important enough to keep running.
+important enough to keep running in the future.

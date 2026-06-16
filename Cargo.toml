@@ -3,6 +3,11 @@ name = "lane"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
+description = "File-level isolation for AI coding agents without git worktrees"
+repository = "https://github.com/adamblumoff/lane"
+readme = "README.md"
+keywords = ["ai-agents", "cli", "vfs", "workflow", "worktrees"]
+categories = ["command-line-utilities", "development-tools", "filesystem"]
 
 [lib]
 name = "lane"
