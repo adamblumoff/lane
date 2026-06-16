@@ -53,6 +53,7 @@ pub(super) struct ReviewLaneSummary {
 pub(super) struct ReviewPathOutput {
     pub(super) path: FilePath,
     pub(super) lanes: Vec<ReviewLaneOutput>,
+    pub(super) ops: Vec<ReviewOrderedOpOutput>,
     pub(super) clean_ops: Vec<ReviewOpOutput>,
     pub(super) conflicts: Vec<ReviewConflictOutput>,
 }
@@ -85,8 +86,8 @@ pub(super) struct ReviewActionOutput {
     pub(super) lane: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) path: Option<FilePath>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) op_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) op_ids: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) required_inputs: Vec<ReviewActionInput>,
 }
@@ -97,6 +98,7 @@ pub(super) enum ReviewActionKind {
     PromoteClean,
     ShowOp,
     ResolveOp,
+    ResolveOps,
     Discard,
 }
 
@@ -111,6 +113,23 @@ pub(super) struct ReviewOpOutput {
     pub(super) op: LaneOpSummary,
     pub(super) base: BytePreview,
     pub(super) inserted: BytePreview,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct ReviewOrderedOpOutput {
+    pub(super) state: ReviewOpState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) conflict_group: Option<usize>,
+    pub(super) op: LaneOpSummary,
+    pub(super) base: BytePreview,
+    pub(super) inserted: BytePreview,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ReviewOpState {
+    Clean,
+    Conflicted,
 }
 
 #[derive(Serialize)]
@@ -133,6 +152,18 @@ pub(super) struct ResolveOpOutput<'a> {
     pub(super) storage_path: String,
     pub(super) replacement_file: String,
     pub(super) resolved_op: LaneOpSummary,
+    pub(super) replacement: BytePreview,
+    pub(super) remaining: Vec<ChangeOutput>,
+}
+
+#[derive(Serialize)]
+pub(super) struct ResolveOpsOutput {
+    pub(super) path: FilePath,
+    pub(super) ops: Vec<String>,
+    pub(super) repo_root: String,
+    pub(super) storage_path: String,
+    pub(super) replacement_file: String,
+    pub(super) resolved_ops: Vec<LaneOpSummary>,
     pub(super) replacement: BytePreview,
     pub(super) remaining: Vec<ChangeOutput>,
 }

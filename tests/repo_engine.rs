@@ -488,6 +488,97 @@ fn resolve_op_promotes_replacement_bytes_and_preserves_other_lane_alternative() 
 }
 
 #[test]
+fn resolve_ops_combines_conflicting_replacements_and_consumes_selected_lanes() {
+    let mut repo = seeded_repo();
+    repo.create_lane("agent-c").unwrap();
+    let base = b"TODO";
+    let path = "src/tasks.ts";
+    repo.replace(path, "agent-a", base, b"function a() {}".to_vec())
+        .unwrap();
+    repo.replace(path, "agent-b", base, b"function b() {}".to_vec())
+        .unwrap();
+    repo.replace(path, "agent-c", base, b"function c() {}".to_vec())
+        .unwrap();
+
+    let selections = ["agent-a", "agent-b", "agent-c"]
+        .into_iter()
+        .map(|lane| {
+            let op = repo
+                .change_ops(path, lane, Some(base))
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+            assert_eq!(op.conflicts_with.len(), 2);
+            (lane.to_owned(), op.op_id)
+        })
+        .collect::<Vec<_>>();
+    let replacement = b"function a() {}\n\nfunction b() {}\n\nfunction c() {}".to_vec();
+
+    let resolved = repo
+        .resolve_ops_path(path, Some(base), &selections, replacement.clone())
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(resolved, replacement);
+    assert_eq!(repo.read(path, "base", &resolved).unwrap(), replacement);
+    assert_eq!(repo.overlay_paths("agent-a").unwrap(), Vec::<&str>::new());
+    assert_eq!(repo.overlay_paths("agent-b").unwrap(), Vec::<&str>::new());
+    assert_eq!(repo.overlay_paths("agent-c").unwrap(), Vec::<&str>::new());
+}
+
+#[test]
+fn resolve_ops_rejects_unrelated_clean_ops_without_mutating_repo() {
+    let mut repo = seeded_repo();
+    let base = b"alpha=1\nbeta=2\n";
+    let path = "src/math.txt";
+    repo.write(path, "agent-a", base, 6..7, b"10".to_vec())
+        .unwrap();
+    repo.write(path, "agent-b", base, 13..14, b"20".to_vec())
+        .unwrap();
+
+    let agent_a_op = repo
+        .change_ops(path, "agent-a", Some(base))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let agent_b_op = repo
+        .change_ops(path, "agent-b", Some(base))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(agent_a_op.conflicts_with.is_empty());
+    assert!(agent_b_op.conflicts_with.is_empty());
+
+    let result = repo.resolve_ops_path(
+        path,
+        Some(base),
+        &[
+            ("agent-a".to_owned(), agent_a_op.op_id),
+            ("agent-b".to_owned(), agent_b_op.op_id),
+        ],
+        b"bad".to_vec(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(LaneError::InvalidOperationSelection { path: failed_path, reason })
+            if failed_path == path && reason.contains("not one conflict-connected group")
+    ));
+    assert_eq!(
+        repo.read(path, "agent-a", base).unwrap(),
+        b"alpha=10\nbeta=2\n"
+    );
+    assert_eq!(
+        repo.read(path, "agent-b", base).unwrap(),
+        b"alpha=1\nbeta=20\n"
+    );
+    assert_eq!(repo.read(path, "base", base).unwrap(), base);
+}
+
+#[test]
 fn overlapping_same_file_ops_remain_alternatives_after_promotion() {
     let mut repo = seeded_repo();
     let base = b"mode=base\n";

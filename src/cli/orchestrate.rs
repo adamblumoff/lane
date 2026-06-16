@@ -703,6 +703,16 @@ fn format_compare(output: &CompareOutput) -> String {
                     conflict.range_end,
                     conflict.lanes.join(", "),
                 ));
+                if let Some(action) = conflict
+                    .actions
+                    .iter()
+                    .find(|action| matches!(action.kind, ReviewActionKind::ResolveOps))
+                {
+                    text.push_str(&format!(
+                        "    combine: {}\n",
+                        format_command(action.command.iter().map(String::as_str))
+                    ));
+                }
                 for action in conflict
                     .actions
                     .iter()

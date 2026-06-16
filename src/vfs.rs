@@ -488,6 +488,22 @@ impl LaneFs {
         self.commit_promoted_files(draft, &[(path, promoted)], persist)
     }
 
+    pub(crate) fn resolve_ops_file(
+        &mut self,
+        path: &str,
+        selections: &[(String, String)],
+        replacement: impl Into<Vec<u8>>,
+        persist: impl FnOnce(&LaneRepo) -> Result<(), LaneFsError>,
+    ) -> Result<(), LaneFsError> {
+        let path = normalize_repo_path(path)?;
+        let base = self.worktree.read_file(&path).map_err(LaneFsError::Io)?;
+        let mut draft = self.repo.clone();
+        let promoted = draft
+            .resolve_ops_path(&path, base.as_deref(), selections, replacement)
+            .map_err(LaneFsError::Lane)?;
+        self.commit_promoted_files(draft, &[(path, promoted)], persist)
+    }
+
     fn commit_promoted_files(
         &mut self,
         draft: LaneRepo,

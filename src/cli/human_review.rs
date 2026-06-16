@@ -120,6 +120,13 @@ fn write_path(text: &mut String, path: &ReviewPathOutput) -> fmt::Result {
                 conflict.range_end,
                 conflict.lanes.join(", "),
             )?;
+            if let Some(action) = conflict
+                .actions
+                .iter()
+                .find(|action| matches!(action.kind, ReviewActionKind::ResolveOps))
+            {
+                writeln!(text, "       combine: {}", format_action_command(action))?;
+            }
             for op in &conflict.ops {
                 writeln!(text, "       - {}", op_label(&op.op))?;
                 write_op_previews(text, "         ", op)?;

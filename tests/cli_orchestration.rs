@@ -355,6 +355,16 @@ fn cli_review_groups_clean_ops_and_conflict_decisions_json_first() {
         review_op_ids(&path["clean_ops"]),
         vec!["agent-a:1", "agent-b:2", "agent-c:1"]
     );
+    assert_eq!(
+        review_op_ids(&path["ops"]),
+        vec![
+            "agent-a:1",
+            "agent-b:1",
+            "agent-a:2",
+            "agent-b:2",
+            "agent-c:1"
+        ]
+    );
 
     let conflict = &path["conflicts"][0];
     assert_eq!(conflict["range_start"], 6);
@@ -362,11 +372,11 @@ fn cli_review_groups_clean_ops_and_conflict_decisions_json_first() {
     assert_eq!(string_array(&conflict["lanes"]), vec!["agent-a", "agent-b"]);
     assert_eq!(
         review_op_ids(&conflict["ops"]),
-        vec!["agent-a:2", "agent-b:1"]
+        vec!["agent-b:1", "agent-a:2"]
     );
     assert_eq!(conflict["ops"][0]["base"]["utf8"], "2");
-    assert_eq!(conflict["ops"][0]["inserted"]["utf8"], "B");
-    assert_eq!(conflict["ops"][1]["inserted"]["utf8"], "X");
+    assert_eq!(conflict["ops"][0]["inserted"]["utf8"], "X");
+    assert_eq!(conflict["ops"][1]["inserted"]["utf8"], "B");
 
     let agent_a_review = repo.run_json(["review", "agent-a"]);
     assert_eq!(agent_a_review["lane"], "agent-a");
@@ -791,6 +801,9 @@ fn cli_try_check_compare_lists_attempt_evidence_without_ranking() {
     assert!(human.contains("  - login-2: attempt ok, checks 1/1"));
     assert!(human.contains("promote_clean: lane promote-clean login-2"));
     assert!(human.contains("  - pick-second\n    login-1: exit 9\n    login-2: ok"));
+    assert!(human.contains(
+        "combine: lane resolve-ops src/login.tsx --op login-1:1 --op login-2:1 --op login-3:1 --with-file <replacement-file>"
+    ));
 
     let discarded = repo.run_json(["discard-run", "login"]);
     assert_eq!(discarded["removed_attempt_lanes"], 3);

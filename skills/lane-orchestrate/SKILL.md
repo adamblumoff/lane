@@ -18,7 +18,7 @@ Use Lane as the file-versioning layer, not as a planning-file format. The normal
 7. If `lane try` or `lane check` returns non-zero because one attempt failed, inspect the JSON and continue to `lane compare` unless every attempt is unusable or Lane itself failed to produce run records.
 8. Use `lane compare <run>` for the JSON evidence graph or `lane compare <run> --human` for the human-readable review.
 9. Judge attempts from evidence: checks, build output, screenshots, diffs, conflicts, operation previews, and fit to the user request. Do not blindly choose by displayed order or metrics.
-10. Use the commands emitted by `lane compare` and `lane review` to apply the judgment: run `promote-clean` for clean ops, `show-op` and `resolve-op --with-file <replacement-file>` for conflicted ops, and `promote-ops <lane> <path> <op-id>...` only when deliberately selecting exact clean ops.
+10. Use the commands emitted by `lane compare` and `lane review` to apply the judgment: run `promote-clean` for clean ops, `show-op` plus `resolve-op --with-file <replacement-file>` when choosing one conflicted op as the winner, `resolve-ops <path> --op <lane:op>... --with-file <replacement-file>` when deliberately combining multiple conflicting candidate chunks into one accepted replacement, and `promote-ops <lane> <path> <op-id>...` only when deliberately selecting exact clean ops.
 11. Discard losing lanes by running their `discard` action, or remove the whole run with `discard-run`, once useful evidence has been reported and selected work has been promoted.
 
 ## Guardrails
@@ -28,7 +28,7 @@ Use Lane as the file-versioning layer, not as a planning-file format. The normal
 - If an attempt returns a non-zero `exit_code` or `worker_error`, inspect its JSON output before comparing or promoting that lane.
 - When a check fails for some attempts, treat that as comparison evidence rather than an automatic reason to abandon the run.
 - Structured commands are JSON by default; `lane diff` is the text review command.
-- Use `lane review` to compare clean ops and conflict groups before choosing `promote-clean`, `promote-ops`, or `resolve-op`. Prefer executing the command arrays emitted by `review` so the parent workflow dogfoods the same contract it presents to agents.
+- Use `lane review` to compare the ordered per-file `ops` list, clean ops, and conflict groups before choosing `promote-clean`, `promote-ops`, `resolve-op`, or `resolve-ops`. Prefer executing the command arrays emitted by `review` so the parent workflow dogfoods the same contract it presents to agents.
 - Keep the parent agent responsible for comparison and promotion. Subagents should implement their assigned variant, run local checks when asked, and summarize what changed.
 - Preserve the normal repo until promotion. Before promotion, base files changing is a product failure unless the user explicitly made those edits outside Lane.
 - Expect `changed_paths` to include temporary files a worker touched. Use `lane review [lane]` for the effective structured lane state and `lane diff <lane>` for the human-readable patch.
@@ -54,9 +54,11 @@ Finally:
 
 ```powershell
 lane promote-clean login-3
-# For remaining conflicts, inspect the emitted actions and resolve only the selected op:
+# For one-winner conflicts, inspect the emitted actions and resolve only the selected op:
 lane show-op login-3 src/login.tsx login-3:1
 lane resolve-op login-3 src/login.tsx login-3:1 --with-file .\resolution.txt
+# When several conflicting chunks should all be kept, write the combined replacement bytes:
+lane resolve-ops src/login.tsx --op login-1:1 --op login-3:1 --with-file .\combined-resolution.txt
 lane discard login-1
 lane discard login-2
 lane discard login-4

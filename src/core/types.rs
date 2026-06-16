@@ -111,6 +111,7 @@ pub enum LaneError {
     OperationOutOfBounds { path: FilePath },
     OperationConflict { path: FilePath },
     EmptyOperationSelection,
+    InvalidOperationSelection { path: FilePath, reason: String },
     OperationMissing { path: FilePath, op_id: String },
 }
 

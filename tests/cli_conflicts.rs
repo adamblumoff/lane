@@ -202,6 +202,181 @@ fn cli_resolve_op_handles_create_conflict_with_custom_winner() {
 }
 
 #[test]
+fn cli_resolve_ops_combines_conflicting_replacements_and_consumes_selected_ops() {
+    let repo = TempRepo::new();
+    repo.write("src/tasks.ts", b"TODO");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/tasks.ts', \"function a() {}\")",
+    ]);
+    repo.run_json([
+        "exec",
+        "agent-b",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/tasks.ts', \"function b() {}\")",
+    ]);
+    repo.run_json([
+        "exec",
+        "agent-c",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/tasks.ts', \"function c() {}\")",
+    ]);
+
+    let review = repo.run_json(["review"]);
+    let path = review_path(&review, "src/tasks.ts");
+    assert_eq!(
+        review_op_ids(&path["ops"]),
+        vec!["agent-a:1", "agent-b:1", "agent-c:1"]
+    );
+    assert!(
+        path["ops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|op| op["state"] == "conflicted" && op["conflict_group"] == 1)
+    );
+
+    let conflict = &path["conflicts"][0];
+    assert_eq!(
+        review_op_ids(&conflict["ops"]),
+        vec!["agent-a:1", "agent-b:1", "agent-c:1"]
+    );
+    let combine_action = conflict["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["kind"] == "resolve_ops")
+        .unwrap();
+    assert_eq!(
+        string_array(&combine_action["op_ids"]),
+        vec!["agent-a:1", "agent-b:1", "agent-c:1"]
+    );
+    assert_eq!(
+        string_array(&combine_action["command"]),
+        vec![
+            "resolve-ops",
+            "src/tasks.ts",
+            "--op",
+            "agent-a:1",
+            "--op",
+            "agent-b:1",
+            "--op",
+            "agent-c:1",
+            "--with-file",
+            "<replacement-file>",
+        ]
+    );
+
+    let resolution = repo.path().join("combined-resolution.txt");
+    fs::write(
+        &resolution,
+        b"function a() {}\n\nfunction b() {}\n\nfunction c() {}",
+    )
+    .unwrap();
+    let resolved = run_review_action_with_replacement_json(&repo, combine_action, &resolution);
+
+    assert_eq!(
+        string_array(&resolved["ops"]),
+        vec!["agent-a:1", "agent-b:1", "agent-c:1"]
+    );
+    assert_eq!(resolved["resolved_ops"].as_array().unwrap().len(), 3);
+    assert!(resolved["remaining"].as_array().unwrap().is_empty());
+    assert_eq!(
+        fs::read(repo.path().join("src/tasks.ts")).unwrap(),
+        b"function a() {}\n\nfunction b() {}\n\nfunction c() {}"
+    );
+    assert!(
+        repo.run_json(["review", "agent-a"])["paths"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.run_json(["review", "agent-b"])["paths"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.run_json(["review", "agent-c"])["paths"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn cli_resolve_ops_rejects_unrelated_clean_ops() {
+    let repo = TempRepo::new();
+    repo.write("src/math.txt", b"alpha=1\nbeta=2\n");
+
+    repo.run_json([
+        "exec",
+        "agent-a",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/math.txt', \"alpha=10`nbeta=2`n\")",
+    ]);
+    repo.run_json([
+        "exec",
+        "agent-b",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "$ErrorActionPreference = \"Stop\"; [IO.File]::WriteAllText('src/math.txt', \"alpha=1`nbeta=20`n\")",
+    ]);
+
+    let review = repo.run_json(["review"]);
+    let path = review_path(&review, "src/math.txt");
+    assert_eq!(
+        review_op_ids(&path["clean_ops"]),
+        vec!["agent-a:1", "agent-b:1"]
+    );
+    assert!(path["conflicts"].as_array().unwrap().is_empty());
+
+    let resolution = repo.path().join("bad-combined-resolution.txt");
+    fs::write(&resolution, b"bad").unwrap();
+    let output = repo.run_vec_unchecked(vec![
+        "resolve-ops".to_owned(),
+        "src/math.txt".to_owned(),
+        "--op".to_owned(),
+        "agent-a:1".to_owned(),
+        "--op".to_owned(),
+        "agent-b:1".to_owned(),
+        "--with-file".to_owned(),
+        resolution.display().to_string(),
+    ]);
+
+    assert_command_fails_with(
+        &output,
+        "resolve-ops can only combine ops from one conflict group",
+    );
+    assert_eq!(
+        fs::read(repo.path().join("src/math.txt")).unwrap(),
+        b"alpha=1\nbeta=2\n"
+    );
+    assert_eq!(
+        review_op_ids(&repo.run_json(["review"])["paths"][0]["clean_ops"]),
+        vec!["agent-a:1", "agent-b:1"]
+    );
+}
+
+#[test]
 fn cli_review_and_resolve_op_cover_binary_replacement_conflicts() {
     let repo = TempRepo::new();
     repo.write("src/blob.bin", &[0, 1, 2, 3]);

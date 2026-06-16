@@ -142,6 +142,7 @@ fn status_from_lane_error(error: LaneError) -> i32 {
         LaneError::OperationOutOfBounds { .. }
         | LaneError::OperationConflict { .. }
         | LaneError::EmptyOperationSelection
+        | LaneError::InvalidOperationSelection { .. }
         | LaneError::OperationMissing { .. } => STATUS_INVALID_PARAMETER,
     }
 }

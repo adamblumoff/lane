@@ -170,11 +170,27 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
     );
     assert_eq!(
         review_action_kinds(&app_conflict["actions"]),
-        vec!["show_op", "resolve_op", "show_op", "resolve_op"]
+        vec![
+            "resolve_ops",
+            "show_op",
+            "resolve_op",
+            "show_op",
+            "resolve_op"
+        ]
     );
     assert_eq!(
         review_action_commands(&app_conflict["actions"]),
         vec![
+            vec![
+                "resolve-ops",
+                "src/app.ts",
+                "--op",
+                "title-grid:1",
+                "--op",
+                "title-loud:1",
+                "--with-file",
+                "<replacement-file>"
+            ],
             vec!["show-op", "title-grid", "src/app.ts", "title-grid:1"],
             vec![
                 "resolve-op",
@@ -196,11 +212,11 @@ fn cli_parent_dogfood_flow_reviews_promotes_resolves_and_discards_worker_lanes()
         ]
     );
     assert_eq!(
-        app_conflict["actions"][1]["required_inputs"][0]["name"],
+        app_conflict["actions"][0]["required_inputs"][0]["name"],
         "with_file"
     );
     assert_eq!(
-        app_conflict["actions"][1]["required_inputs"][0]["placeholder"],
+        app_conflict["actions"][0]["required_inputs"][0]["placeholder"],
         "<replacement-file>"
     );
 

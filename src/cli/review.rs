@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use similar::TextDiff;
@@ -8,8 +9,8 @@ use crate::{FilePath, LaneExecState, LaneId, LaneOpSummary};
 use super::error::{CliError, CliResult};
 use super::output::{
     ChangeOutput, PathOpsOutput, ReviewActionInput, ReviewActionKind, ReviewActionOutput,
-    ReviewConflictOutput, ReviewLaneOutput, ReviewLaneSummary, ReviewOpOutput, ReviewPathOutput,
-    ReviewSummary,
+    ReviewConflictOutput, ReviewLaneOutput, ReviewLaneSummary, ReviewOpOutput, ReviewOpState,
+    ReviewOrderedOpOutput, ReviewPathOutput, ReviewSummary,
 };
 use super::preview::byte_preview;
 
@@ -97,12 +98,16 @@ pub(super) fn collect_review(
     let paths = by_path
         .into_iter()
         .map(|(path, draft)| {
+            let mut clean_ops = draft.clean_ops;
+            clean_ops.sort_by(compare_review_ops);
             let conflicts = conflict_groups_for_path(draft.conflicted_ops);
+            let ops = ordered_ops_for_path(&clean_ops, &conflicts);
             conflict_groups += conflicts.len();
             ReviewPathOutput {
                 path,
                 lanes: draft.lanes.into_values().collect(),
-                clean_ops: draft.clean_ops,
+                ops,
+                clean_ops,
                 conflicts,
             }
         })
@@ -160,17 +165,16 @@ fn conflict_groups_for_path(ops: Vec<ReviewOpOutput>) -> Vec<ReviewConflictOutpu
             .into_iter()
             .map(|index| ops[index].clone())
             .collect::<Vec<_>>();
-        group_ops.sort_by(|left, right| {
-            left.op
-                .base_start
-                .cmp(&right.op.base_start)
-                .then(left.op.base_end.cmp(&right.op.base_end))
-                .then(left.op.lane.cmp(&right.op.lane))
-                .then(left.op.op_id.cmp(&right.op.op_id))
-        });
+        group_ops.sort_by(compare_review_ops);
         groups.push(review_conflict_output(group_ops));
     }
 
+    groups.sort_by(|left, right| {
+        left.range_start
+            .cmp(&right.range_start)
+            .then(left.range_end.cmp(&right.range_end))
+            .then_with(|| left.ops[0].op.order_key.cmp(&right.ops[0].op.order_key))
+    });
     groups
 }
 
@@ -183,10 +187,14 @@ fn review_conflict_output(ops: Vec<ReviewOpOutput>) -> ReviewConflictOutput {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let actions = ops
-        .iter()
-        .flat_map(|op| [show_op_action(op), resolve_op_action(op)])
-        .collect();
+    let mut actions = Vec::new();
+    if ops.len() > 1 {
+        actions.push(resolve_ops_action(&ops));
+    }
+    actions.extend(
+        ops.iter()
+            .flat_map(|op| [show_op_action(op), resolve_op_action(op)]),
+    );
 
     ReviewConflictOutput {
         range_start,
@@ -203,7 +211,7 @@ pub(super) fn promote_clean_action(lane: &str) -> ReviewActionOutput {
         command: vec!["promote-clean".to_owned(), lane.to_owned()],
         lane: Some(lane.to_owned()),
         path: None,
-        op_id: None,
+        op_ids: Vec::new(),
         required_inputs: Vec::new(),
     }
 }
@@ -219,7 +227,7 @@ pub(super) fn show_op_action(op: &ReviewOpOutput) -> ReviewActionOutput {
         ],
         lane: Some(op.op.lane.clone()),
         path: Some(op.op.path.clone()),
-        op_id: Some(op.op.op_id.clone()),
+        op_ids: vec![op.op.op_id.clone()],
         required_inputs: Vec::new(),
     }
 }
@@ -237,7 +245,31 @@ pub(super) fn resolve_op_action(op: &ReviewOpOutput) -> ReviewActionOutput {
         ],
         lane: Some(op.op.lane.clone()),
         path: Some(op.op.path.clone()),
-        op_id: Some(op.op.op_id.clone()),
+        op_ids: vec![op.op.op_id.clone()],
+        required_inputs: vec![ReviewActionInput {
+            name: "with_file",
+            placeholder: "<replacement-file>",
+        }],
+    }
+}
+
+fn resolve_ops_action(ops: &[ReviewOpOutput]) -> ReviewActionOutput {
+    let path = ops.first().map(|op| op.op.path.clone()).unwrap_or_default();
+    let op_ids = ops.iter().map(|op| op.op.op_id.clone()).collect::<Vec<_>>();
+    let mut command = vec!["resolve-ops".to_owned(), path.clone()];
+    for op_id in &op_ids {
+        command.push("--op".to_owned());
+        command.push(op_id.clone());
+    }
+    command.push("--with-file".to_owned());
+    command.push("<replacement-file>".to_owned());
+
+    ReviewActionOutput {
+        kind: ReviewActionKind::ResolveOps,
+        command,
+        lane: None,
+        path: Some(path),
+        op_ids,
         required_inputs: vec![ReviewActionInput {
             name: "with_file",
             placeholder: "<replacement-file>",
@@ -251,9 +283,58 @@ fn discard_action(lane: &str) -> ReviewActionOutput {
         command: vec!["discard".to_owned(), lane.to_owned()],
         lane: Some(lane.to_owned()),
         path: None,
-        op_id: None,
+        op_ids: Vec::new(),
         required_inputs: Vec::new(),
     }
+}
+
+fn ordered_ops_for_path(
+    clean_ops: &[ReviewOpOutput],
+    conflicts: &[ReviewConflictOutput],
+) -> Vec<ReviewOrderedOpOutput> {
+    let conflict_groups = conflicts
+        .iter()
+        .enumerate()
+        .flat_map(|(index, conflict)| {
+            conflict
+                .ops
+                .iter()
+                .map(move |op| (op.op.op_id.clone(), index + 1))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut ops = clean_ops
+        .iter()
+        .chain(conflicts.iter().flat_map(|conflict| conflict.ops.iter()))
+        .map(|op| {
+            let conflict_group = conflict_groups.get(&op.op.op_id).copied();
+            ReviewOrderedOpOutput {
+                state: if conflict_group.is_some() {
+                    ReviewOpState::Conflicted
+                } else {
+                    ReviewOpState::Clean
+                },
+                conflict_group,
+                op: op.op.clone(),
+                base: op.base.clone(),
+                inserted: op.inserted.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    ops.sort_by(|left, right| compare_lane_op_summaries(&left.op, &right.op));
+    ops
+}
+
+fn compare_review_ops(left: &ReviewOpOutput, right: &ReviewOpOutput) -> Ordering {
+    compare_lane_op_summaries(&left.op, &right.op)
+}
+
+fn compare_lane_op_summaries(left: &LaneOpSummary, right: &LaneOpSummary) -> Ordering {
+    left.order_key
+        .cmp(&right.order_key)
+        .then(left.base_start.cmp(&right.base_start))
+        .then(left.base_end.cmp(&right.base_end))
+        .then(left.lane.cmp(&right.lane))
+        .then(left.op_id.cmp(&right.op_id))
 }
 
 fn review_ops_conflict(left: &ReviewOpOutput, right: &ReviewOpOutput) -> bool {
