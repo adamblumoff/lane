@@ -112,7 +112,6 @@ pub(crate) fn run_virtual_lane(
         repo_root: path_label(repo_root),
         storage_path: path_label(&storage_path),
         workspace_root: path_label(&mount_point.workspace_path),
-        mount_path: path_label(&mount_point.workspace_path),
         mode: "virtual_mount",
         projected_paths,
         exit_code: worker.exit_code,

@@ -243,10 +243,9 @@ pub(crate) fn assert_run_contract(output: &Value) {
         "workspace_root must be a string: {output}"
     );
     assert!(
-        output["mount_path"].is_string(),
-        "mount_path must be a string: {output}"
+        output.get("mount_path").is_none(),
+        "mount_path should not be emitted because it duplicates workspace_root: {output}"
     );
-    assert_eq!(output["workspace_root"], output["mount_path"]);
     assert_eq!(output["mode"], "virtual_mount");
     assert!(
         output["projected_paths"].is_array(),

@@ -60,7 +60,6 @@ pub(crate) struct VirtualRunOutput {
     pub(super) repo_root: String,
     pub(super) storage_path: String,
     pub(super) workspace_root: String,
-    pub(super) mount_path: String,
     pub(super) mode: &'static str,
     pub(super) projected_paths: Vec<FilePath>,
     pub(super) exit_code: Option<i32>,

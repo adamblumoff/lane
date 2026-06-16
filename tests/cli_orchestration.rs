@@ -985,6 +985,61 @@ fn cli_run_rejects_existing_attempt_lanes() {
 }
 
 #[test]
+fn cli_run_rejects_run_and_lane_name_overlap() {
+    let repo = TempRepo::new();
+    repo.run_json([
+        "run",
+        "shared",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "exit 0",
+    ]);
+
+    assert_command_fails_with(
+        &repo.run_unchecked(&[
+            "run",
+            "shared",
+            "--attempts",
+            "1",
+            "--",
+            "pwsh",
+            "-NoProfile",
+            "-Command",
+            "exit 0",
+        ]),
+        "run name \"shared\" overlaps an existing lane",
+    );
+
+    let repo = TempRepo::new();
+    repo.run_json([
+        "run",
+        "shared",
+        "--attempts",
+        "1",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "exit 0",
+    ]);
+
+    assert_command_fails_with(
+        &repo.run_unchecked(&[
+            "run",
+            "shared",
+            "--",
+            "pwsh",
+            "-NoProfile",
+            "-Command",
+            "exit 0",
+        ]),
+        "lane name \"shared\" overlaps an existing run",
+    );
+}
+
+#[test]
 fn cli_run_records_failed_attempts_as_review_evidence() {
     let repo = TempRepo::new();
     repo.write("src/base.ts", b"export const base = true;");

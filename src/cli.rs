@@ -126,7 +126,14 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
             Some(attempts) => {
                 orchestrate::run_attempts(&repo_root, &name, attempts, observe, &command)
             }
-            None => commands::run_one(&repo_root, &name, observe, &command),
+            None => {
+                if orchestrate::run_exists(&repo_root, &name) {
+                    return Err(CliError::message(format!(
+                        "lane name {name:?} overlaps an existing run"
+                    )));
+                }
+                commands::run_one(&repo_root, &name, observe, &command)
+            }
         },
         Command::Check { run, name, command } => {
             orchestrate::check(&repo_root, &run, name.as_deref(), &command)

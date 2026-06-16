@@ -287,6 +287,11 @@ fn reserve_attempt_lanes(repo_root: &Path, name: &str, lanes: &[LaneId]) -> CliR
     let storage_path = storage_path(repo_root);
     let _lock = acquire_repo_lock(&storage_path)?;
     let mut repo = load_lane_repo(&storage_path)?;
+    if repo.lane_ids().any(|lane| lane == name) {
+        return Err(CliError::message(format!(
+            "run name {name:?} overlaps an existing lane"
+        )));
+    }
     let existing = repo
         .lane_ids()
         .filter(|lane| lanes.iter().any(|attempt_lane| attempt_lane == lane))

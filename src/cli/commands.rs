@@ -53,7 +53,7 @@ pub(super) fn run_one(
     _command: &[String],
 ) -> CliResult<ExitCode> {
     Err(CliError::message(
-        "lane run requires the WinFsp virtual filesystem on Windows".to_owned(),
+        "lane run is only supported on Windows (requires the WinFsp virtual filesystem)".to_owned(),
     ))
 }
 
