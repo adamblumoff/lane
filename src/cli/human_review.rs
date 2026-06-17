@@ -41,7 +41,7 @@ fn write_review(text: &mut String, output: &ReviewOutput) -> fmt::Result {
     )?;
 
     write_lane_status(text, &output.lanes)?;
-    write_promotable_now(text, &output.lanes, &output.paths)?;
+    write_acceptable_now(text, &output.lanes, &output.paths)?;
     write_decision_queue(text, &output.paths)?;
 
     if output.paths.is_empty() {
@@ -298,7 +298,7 @@ fn write_lane_status(text: &mut String, lanes: &[ReviewLaneSummary]) -> fmt::Res
     Ok(())
 }
 
-fn write_promotable_now(
+fn write_acceptable_now(
     text: &mut String,
     lanes: &[ReviewLaneSummary],
     paths: &[ReviewPathOutput],
@@ -312,7 +312,7 @@ fn write_promotable_now(
             "  - {}: {} across {}, {} total, {}",
             lane.lane,
             count_label(lane.clean_ops, "clean op"),
-            count_label(promotable_path_count(paths, &lane.lane), "path"),
+            count_label(acceptable_path_count(paths, &lane.lane), "path"),
             count_label(lane.changed_paths, "changed path"),
             last_run_label(lane.last_run.as_ref()),
         )?;
@@ -331,7 +331,7 @@ fn write_promotable_now(
     Ok(())
 }
 
-fn promotable_path_count(paths: &[ReviewPathOutput], lane: &str) -> usize {
+fn acceptable_path_count(paths: &[ReviewPathOutput], lane: &str) -> usize {
     paths
         .iter()
         .filter(|path| clean_ops_for_path(path).any(|op| op.op.lane == lane))

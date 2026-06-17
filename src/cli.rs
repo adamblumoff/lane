@@ -7,7 +7,7 @@ mod preview;
 mod repo;
 mod review;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -110,6 +110,11 @@ enum Command {
     },
 }
 
+enum RunOrLaneTarget {
+    Run,
+    Lane,
+}
+
 pub fn run() -> CliResult<ExitCode> {
     run_cli(Cli::parse())
 }
@@ -168,7 +173,7 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
 }
 
 fn review_target(
-    repo_root: &std::path::Path,
+    repo_root: &Path,
     human: bool,
     history: bool,
     diff: bool,
@@ -199,20 +204,10 @@ fn review_target(
     }
 
     match detail.as_slice() {
-        [] => {
-            let is_run = orchestrate::run_exists(repo_root, &target);
-            let is_lane = commands::lane_exists(repo_root, &target)?;
-            match (is_run, is_lane) {
-                (true, true) => Err(CliError::message(format!(
-                    "review target {target:?} is both a run and a lane"
-                ))),
-                (true, false) => orchestrate::review_run(repo_root, &target, human),
-                (false, true) => commands::review(repo_root, Some(&target), human),
-                (false, false) => Err(CliError::message(format!(
-                    "review target {target:?} is neither a run nor a lane"
-                ))),
-            }
-        }
+        [] => match resolve_run_or_lane_target(repo_root, "review", &target)? {
+            RunOrLaneTarget::Run => orchestrate::review_run(repo_root, &target, human),
+            RunOrLaneTarget::Lane => commands::review(repo_root, Some(&target), human),
+        },
         [path, op_id] => commands::review_op_detail(repo_root, &target, path, op_id),
         _ => Err(CliError::message(
             "review detail accepts either <target> or <lane> <path> <op-id>; use --diff for path diffs",
@@ -221,7 +216,7 @@ fn review_target(
 }
 
 fn accept_target(
-    repo_root: &std::path::Path,
+    repo_root: &Path,
     target: &str,
     path: Option<String>,
     ops: Vec<String>,
@@ -270,17 +265,28 @@ fn accept_target(
     }
 }
 
-fn discard_target(repo_root: &std::path::Path, target: &str) -> CliResult<()> {
+fn discard_target(repo_root: &Path, target: &str) -> CliResult<()> {
+    match resolve_run_or_lane_target(repo_root, "discard", target)? {
+        RunOrLaneTarget::Run => orchestrate::discard(repo_root, target),
+        RunOrLaneTarget::Lane => commands::discard(repo_root, target),
+    }
+}
+
+fn resolve_run_or_lane_target(
+    repo_root: &Path,
+    command: &str,
+    target: &str,
+) -> CliResult<RunOrLaneTarget> {
     let is_run = orchestrate::run_exists(repo_root, target);
     let is_lane = commands::lane_exists(repo_root, target)?;
     match (is_run, is_lane) {
         (true, true) => Err(CliError::message(format!(
-            "discard target {target:?} is both a run and a lane"
+            "{command} target {target:?} is both a run and a lane"
         ))),
-        (true, false) => orchestrate::discard(repo_root, target),
-        (false, true) => commands::discard(repo_root, target),
+        (true, false) => Ok(RunOrLaneTarget::Run),
+        (false, true) => Ok(RunOrLaneTarget::Lane),
         (false, false) => Err(CliError::message(format!(
-            "discard target {target:?} is neither a run nor a lane"
+            "{command} target {target:?} is neither a run nor a lane"
         ))),
     }
 }

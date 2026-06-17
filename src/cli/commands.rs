@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::LaneError;
@@ -18,6 +18,11 @@ use super::review::{
     change_for_path, collect_changes, collect_review, filter_change_ops, grouped_ops, print_diff,
     review_lanes,
 };
+
+struct ReplacementFile {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
 
 #[cfg(windows)]
 pub(super) fn run_one(
@@ -147,15 +152,14 @@ pub(super) fn accept_replacement_op(
     op_id: &str,
     with_file: &Path,
 ) -> CliResult<()> {
-    let replacement = fs::read(with_file)?;
-    let replacement_file = fs::canonicalize(with_file).unwrap_or_else(|_| with_file.to_path_buf());
+    let replacement = read_replacement_file(with_file)?;
     let mut locked = open_locked_lane_fs(repo_root)?;
     let detail = locked.fs.op_detail(lane, path, op_id)?;
     locked.fs.accept_replacement_op_file(
         lane,
         path,
         op_id,
-        replacement.clone(),
+        replacement.bytes.clone(),
         persist_lane_repo(&locked.storage_path),
     )?;
 
@@ -165,9 +169,9 @@ pub(super) fn accept_replacement_op(
         op_id,
         repo_root: path_label(repo_root),
         storage_path: path_label(&locked.storage_path),
-        replacement_file: path_label(replacement_file),
+        replacement_file: path_label(&replacement.path),
         accepted_op: detail.summary,
-        replacement: byte_preview(&replacement),
+        replacement: byte_preview(&replacement.bytes),
         remaining: collect_changes(&locked.fs, lane)?,
     };
     print_json(&output)?;
@@ -181,8 +185,7 @@ pub(super) fn accept_replacement_ops(
     with_file: &Path,
 ) -> CliResult<()> {
     let selections = parse_lane_op_selections(ops)?;
-    let replacement = fs::read(with_file)?;
-    let replacement_file = fs::canonicalize(with_file).unwrap_or_else(|_| with_file.to_path_buf());
+    let replacement = read_replacement_file(with_file)?;
     let mut locked = open_locked_lane_fs(repo_root)?;
     let details = selections
         .iter()
@@ -193,7 +196,7 @@ pub(super) fn accept_replacement_ops(
         .accept_replacement_ops_file(
             path,
             &selections,
-            replacement.clone(),
+            replacement.bytes.clone(),
             persist_lane_repo(&locked.storage_path),
         )
         .map_err(accept_replacement_ops_cli_error)?;
@@ -212,13 +215,19 @@ pub(super) fn accept_replacement_ops(
         ops: ops.to_vec(),
         repo_root: path_label(repo_root),
         storage_path: path_label(&locked.storage_path),
-        replacement_file: path_label(replacement_file),
+        replacement_file: path_label(&replacement.path),
         accepted_ops: details.into_iter().map(|detail| detail.summary).collect(),
-        replacement: byte_preview(&replacement),
+        replacement: byte_preview(&replacement.bytes),
         remaining,
     };
     print_json(&output)?;
     Ok(())
+}
+
+fn read_replacement_file(with_file: &Path) -> CliResult<ReplacementFile> {
+    let bytes = fs::read(with_file)?;
+    let path = fs::canonicalize(with_file).unwrap_or_else(|_| with_file.to_path_buf());
+    Ok(ReplacementFile { path, bytes })
 }
 
 fn parse_lane_op_selections(ops: &[String]) -> CliResult<Vec<(String, String)>> {
