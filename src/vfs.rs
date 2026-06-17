@@ -1,15 +1,12 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::storage::persist_bytes;
-use crate::{
-    FilePath, LaneError, LaneOpDetail, LaneOpSummary, LaneRepo, is_git_metadata_path,
-    is_lane_state_path,
-};
+use crate::{FilePath, LaneError, LaneId, LaneOpDetail, LaneOpSummary, LaneRepo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DirEntry {
@@ -237,23 +234,23 @@ impl FileWorktreeSnapshot {
 
     fn restore(&self, root_path: &Path) -> io::Result<()> {
         match self {
-            Self::Missing { path } => remove_path_if_exists(&root_path.join(path)),
+            Self::Missing { path } => remove_path_if_exists(&root_path.join(path.as_str())),
             Self::File { path, bytes } => {
-                remove_path_if_exists(&root_path.join(path))?;
-                persist_bytes(&root_path.join(path), bytes)
+                remove_path_if_exists(&root_path.join(path.as_str()))?;
+                persist_bytes(&root_path.join(path.as_str()), bytes)
             }
             Self::Directory {
                 path,
                 directories,
                 files,
             } => {
-                let directory = root_path.join(path);
+                let directory = root_path.join(path.as_str());
                 recreate_directory(&directory)?;
                 for relative_path in directories {
-                    fs::create_dir_all(directory.join(relative_path))?;
+                    fs::create_dir_all(directory.join(relative_path.as_str()))?;
                 }
                 for (relative_path, bytes) in files {
-                    persist_bytes(&directory.join(relative_path), bytes)?;
+                    persist_bytes(&directory.join(relative_path.as_str()), bytes)?;
                 }
                 Ok(())
             }
@@ -280,7 +277,7 @@ impl LaneFs {
         self.repo
             .overlay_paths(lane)
             .map_err(LaneFsError::Lane)
-            .map(|paths| paths.into_iter().map(str::to_owned).collect())
+            .map(|paths| paths.into_iter().cloned().collect())
     }
 
     pub(crate) fn change_for_path(
@@ -337,7 +334,7 @@ impl LaneFs {
         self.repo.discard_lane(lane)
     }
 
-    pub(crate) fn create_lane(&mut self, lane: impl Into<String>) -> Result<bool, LaneFsError> {
+    pub(crate) fn create_lane(&mut self, lane: impl AsRef<str>) -> Result<bool, LaneFsError> {
         self.repo.create_lane(lane).map_err(LaneFsError::Lane)
     }
 
@@ -411,7 +408,7 @@ impl LaneFs {
             let Some(tail) = path.strip_prefix(&prefix) else {
                 continue;
             };
-            if tail.is_empty() || tail == path && !directory.is_empty() {
+            if tail.is_empty() || tail == path.as_str() && !directory.is_empty() {
                 continue;
             }
             if self.read_file(lane, path)?.is_none() {
@@ -490,7 +487,7 @@ impl LaneFs {
     pub(crate) fn accept_replacement_ops_file(
         &mut self,
         path: &str,
-        selections: &[(String, String)],
+        selections: &[(LaneId, String)],
         replacement: impl Into<Vec<u8>>,
         persist: impl FnOnce(&LaneRepo) -> Result<(), LaneFsError>,
     ) -> Result<(), LaneFsError> {
@@ -567,11 +564,12 @@ impl LaneFs {
 }
 
 fn child_path(parent: &str, child: &str) -> FilePath {
-    if parent.is_empty() {
+    let label = if parent.is_empty() {
         child.to_owned()
     } else {
         format!("{parent}/{child}")
-    }
+    };
+    FilePath::from_normalized(label)
 }
 
 fn path_depth(path: &str) -> usize {
@@ -589,7 +587,7 @@ fn ancestor_paths(path: &str) -> Vec<FilePath> {
     let mut parts = path.split('/').collect::<Vec<_>>();
     while parts.len() > 1 {
         parts.pop();
-        ancestors.push(parts.join("/"));
+        ancestors.push(FilePath::from_normalized(parts.join("/")));
     }
     ancestors
 }
@@ -667,56 +665,21 @@ pub(crate) enum LaneFsError {
     Lane(LaneError),
 }
 
-fn normalize_repo_path(path: &str) -> Result<String, LaneFsError> {
-    let label = normalize_repo_label(path)?;
-    if label.is_empty() {
-        Err(LaneFsError::BadPath("missing path".to_owned()))
-    } else {
-        Ok(label)
-    }
+fn normalize_repo_path(path: &str) -> Result<FilePath, LaneFsError> {
+    FilePath::parse(path).map_err(path_error)
 }
 
 fn normalize_repo_dir(path: &str) -> Result<String, LaneFsError> {
-    normalize_repo_label(path)
+    FilePath::parse_label(path)
+        .map(FilePath::into_string)
+        .map_err(LaneFsError::BadPath)
 }
 
-fn normalize_repo_label(path: &str) -> Result<String, LaneFsError> {
-    if path.trim().is_empty() || path == "." {
-        return Ok(String::new());
+fn path_error(error: LaneError) -> LaneFsError {
+    match error {
+        LaneError::InvalidPath(message) => LaneFsError::BadPath(message),
+        error => LaneFsError::Lane(error),
     }
-
-    let raw_path = Path::new(path);
-    if raw_path.is_absolute() {
-        return Err(LaneFsError::BadPath(
-            "path must be repo-relative".to_owned(),
-        ));
-    }
-
-    let mut parts = Vec::new();
-    for component in raw_path.components() {
-        match component {
-            Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
-            Component::CurDir => {}
-            _ => {
-                return Err(LaneFsError::BadPath(
-                    "path must stay inside the repo".to_owned(),
-                ));
-            }
-        }
-    }
-
-    let label = parts.join("/");
-    if is_lane_state_path(&label) {
-        return Err(LaneFsError::BadPath(
-            "cannot project lane state files".to_owned(),
-        ));
-    }
-    if is_git_metadata_path(&label) {
-        return Err(LaneFsError::BadPath(
-            "cannot project git metadata files".to_owned(),
-        ));
-    }
-    Ok(label)
 }
 
 #[cfg(test)]
@@ -751,12 +714,15 @@ mod tests {
             .collect::<Vec<_>>();
         let mut fs = LaneFs::new(repo, FileWorktree::new(&root));
 
-        let result =
-            fs.accept_ops_files("agent-a", &[("src/example.txt".to_owned(), op_ids)], |_| {
+        let result = fs.accept_ops_files(
+            "agent-a",
+            &[(FilePath::parse("src/example.txt").unwrap(), op_ids)],
+            |_| {
                 Err(LaneFsError::Io(io::Error::other(
                     "synthetic persist failure",
                 )))
-            });
+            },
+        );
 
         assert!(result.is_err());
         assert_eq!(

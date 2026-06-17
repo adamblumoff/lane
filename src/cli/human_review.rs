@@ -171,25 +171,25 @@ fn write_clean_only_paths(text: &mut String, output: &ReviewOutput) -> fmt::Resu
             .iter()
             .copied()
             .flat_map(clean_ops_for_path)
-            .filter(|op| op.op.lane == lane.lane)
+            .filter(|op| op.op.lane.as_str() == lane.lane)
             .count();
         if clean_ops == 0 {
             continue;
         }
         let path_count = clean_only_paths
             .iter()
-            .filter(|path| clean_ops_for_path(path).any(|op| op.op.lane == lane.lane))
+            .filter(|path| clean_ops_for_path(path).any(|op| op.op.lane.as_str() == lane.lane))
             .count();
         let total_clean_ops = output
             .paths
             .iter()
             .flat_map(clean_ops_for_path)
-            .filter(|op| op.op.lane == lane.lane)
+            .filter(|op| op.op.lane.as_str() == lane.lane)
             .count();
         let total_path_count = output
             .paths
             .iter()
-            .filter(|path| clean_ops_for_path(path).any(|op| op.op.lane == lane.lane))
+            .filter(|path| clean_ops_for_path(path).any(|op| op.op.lane.as_str() == lane.lane))
             .count();
         if total_clean_ops == clean_ops {
             writeln!(

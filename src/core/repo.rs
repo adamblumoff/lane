@@ -10,7 +10,7 @@ use super::types::base_fingerprint;
 use super::{
     BaseFingerprint, BaseStorageSnapshot, DecodeError, FilePath, LaneEntryStorageSnapshot,
     LaneError, LaneFileStorageSnapshot, LaneId, LaneOpDetail, LaneOpKind, LaneOpSummary,
-    LaneRepoStorageSnapshot, ensure_user_lane,
+    LaneRepoStorageSnapshot,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,21 +70,20 @@ impl LaneRepo {
     }
 
     pub fn lane_ids(&self) -> impl Iterator<Item = &str> {
-        self.lanes.iter().map(String::as_str)
+        self.lanes.iter().map(LaneId::as_str)
     }
 
-    pub fn overlay_paths(&self, lane: &str) -> Result<Vec<&str>, LaneError> {
+    pub fn overlay_paths(&self, lane: &str) -> Result<Vec<&FilePath>, LaneError> {
         self.ensure_lane(lane)?;
         Ok(self
             .files
             .iter()
-            .filter_map(|(path, file)| file.has_lane(lane).then_some(path.as_str()))
+            .filter_map(|(path, file)| file.has_lane(lane).then_some(path))
             .collect())
     }
 
-    pub fn create_lane(&mut self, lane: impl Into<LaneId>) -> Result<bool, LaneError> {
-        let lane = lane.into();
-        ensure_user_lane(&lane)?;
+    pub fn create_lane(&mut self, lane: impl AsRef<str>) -> Result<bool, LaneError> {
+        let lane = LaneId::parse(lane.as_ref())?;
         Ok(self.lanes.insert(lane))
     }
 
@@ -103,12 +102,13 @@ impl LaneRepo {
         lane: &str,
         base: Option<&[u8]>,
     ) -> Result<Option<Vec<u8>>, LaneError> {
+        let path = FilePath::parse(path)?;
         if lane == "base" {
             return Ok(base.map(<[u8]>::to_vec));
         }
         self.ensure_lane(lane)?;
-        match self.files.get(path) {
-            Some(file) => file.read(path, lane, base),
+        match self.files.get(&path) {
+            Some(file) => file.read(path.as_str(), lane, base),
             None => Ok(base.map(<[u8]>::to_vec)),
         }
     }
@@ -119,11 +119,12 @@ impl LaneRepo {
         lane: &str,
         base: Option<&[u8]>,
     ) -> Result<Vec<LaneOpSummary>, LaneError> {
+        let path = FilePath::parse(path)?;
         self.ensure_lane(lane)?;
-        let Some(file) = self.files.get(path) else {
+        let Some(file) = self.files.get(&path) else {
             return Ok(Vec::new());
         };
-        file.change_ops(path, lane, base)
+        file.change_ops(path.as_str(), lane, base)
     }
 
     pub fn op_detail(
@@ -133,11 +134,12 @@ impl LaneRepo {
         base: Option<&[u8]>,
         op_id: &str,
     ) -> Result<LaneOpDetail, LaneError> {
+        let path = FilePath::parse(path)?;
         self.ensure_lane(lane)?;
-        let Some(file) = self.files.get(path) else {
-            return Err(operation_missing(path, op_id));
+        let Some(file) = self.files.get(&path) else {
+            return Err(operation_missing(path.as_str(), op_id));
         };
-        file.op_detail(path, lane, base, op_id)
+        file.op_detail(path.as_str(), lane, base, op_id)
     }
 
     pub fn replace_path(
@@ -147,19 +149,20 @@ impl LaneRepo {
         base: Option<&[u8]>,
         content: Option<Vec<u8>>,
     ) -> Result<(), LaneError> {
-        self.ensure_lane(lane)?;
-        if let Some(file) = self.files.get_mut(path) {
-            file.replace(path, lane, base, content)?;
+        let path = FilePath::parse(path)?;
+        let lane_id = self.ensure_lane(lane)?.clone();
+        if let Some(file) = self.files.get_mut(&path) {
+            file.replace(path.as_str(), &lane_id, base, content)?;
             if file.is_empty() {
-                self.files.remove(path);
+                self.files.remove(&path);
             }
             return Ok(());
         }
 
         let mut file = LaneFile::new(base);
-        file.replace(path, lane, base, content)?;
+        file.replace(path.as_str(), &lane_id, base, content)?;
         if !file.is_empty() {
-            self.files.insert(path.to_owned(), file);
+            self.files.insert(path, file);
         }
         Ok(())
     }
@@ -180,20 +183,21 @@ impl LaneRepo {
         base: Option<&[u8]>,
         op_ids: &[String],
     ) -> Result<Option<Vec<u8>>, LaneError> {
-        self.ensure_lane(lane)?;
+        let path = FilePath::parse(path)?;
+        let lane_id = self.ensure_lane(lane)?.clone();
         if op_ids.is_empty() {
             return Err(LaneError::EmptyOperationSelection);
         }
-        let Some(file) = self.files.get_mut(path) else {
+        let Some(file) = self.files.get_mut(&path) else {
             return Err(LaneError::OperationMissing {
-                path: path.to_owned(),
+                path: path.into_string(),
                 op_id: op_ids[0].clone(),
             });
         };
 
-        let accepted = file.accept_ops(path, lane, base, op_ids)?;
+        let accepted = file.accept_ops(path.as_str(), &lane_id, base, op_ids)?;
         if file.is_empty() {
-            self.files.remove(path);
+            self.files.remove(&path);
         }
         Ok(accepted)
     }
@@ -206,14 +210,16 @@ impl LaneRepo {
         op_id: &str,
         replacement: impl Into<Vec<u8>>,
     ) -> Result<Option<Vec<u8>>, LaneError> {
-        self.ensure_lane(lane)?;
-        let Some(file) = self.files.get_mut(path) else {
-            return Err(operation_missing(path, op_id));
+        let path = FilePath::parse(path)?;
+        let lane_id = self.ensure_lane(lane)?.clone();
+        let Some(file) = self.files.get_mut(&path) else {
+            return Err(operation_missing(path.as_str(), op_id));
         };
 
-        let accepted = file.accept_replacement_op(path, lane, base, op_id, replacement.into())?;
+        let accepted =
+            file.accept_replacement_op(path.as_str(), &lane_id, base, op_id, replacement.into())?;
         if file.is_empty() {
-            self.files.remove(path);
+            self.files.remove(&path);
         }
         Ok(accepted)
     }
@@ -225,19 +231,21 @@ impl LaneRepo {
         selections: &[(LaneId, String)],
         replacement: impl Into<Vec<u8>>,
     ) -> Result<Option<Vec<u8>>, LaneError> {
+        let path = FilePath::parse(path)?;
         if selections.is_empty() {
             return Err(LaneError::EmptyOperationSelection);
         }
         for (lane, _) in selections {
             self.ensure_lane(lane)?;
         }
-        let Some(file) = self.files.get_mut(path) else {
-            return Err(operation_missing(path, &selections[0].1));
+        let Some(file) = self.files.get_mut(&path) else {
+            return Err(operation_missing(path.as_str(), &selections[0].1));
         };
 
-        let accepted = file.accept_replacement_ops(path, base, selections, replacement.into())?;
+        let accepted =
+            file.accept_replacement_ops(path.as_str(), base, selections, replacement.into())?;
         if file.is_empty() {
-            self.files.remove(path);
+            self.files.remove(&path);
         }
         Ok(accepted)
     }
@@ -254,10 +262,6 @@ impl LaneRepo {
     }
 
     pub fn from_storage_snapshot(snapshot: LaneRepoStorageSnapshot) -> Result<Self, DecodeError> {
-        for lane in &snapshot.lanes {
-            ensure_user_lane(lane).map_err(|_| DecodeError::ReservedLane(lane.clone()))?;
-        }
-
         let repo = Self {
             lanes: snapshot.lanes,
             files: snapshot
@@ -270,12 +274,10 @@ impl LaneRepo {
         Ok(repo)
     }
 
-    fn ensure_lane(&self, lane: &str) -> Result<(), LaneError> {
-        if self.lanes.contains(lane) {
-            Ok(())
-        } else {
-            Err(LaneError::LaneMissing(lane.to_owned()))
-        }
+    fn ensure_lane(&self, lane: &str) -> Result<&LaneId, LaneError> {
+        self.lanes
+            .get(lane)
+            .ok_or_else(|| LaneError::LaneMissing(lane.to_owned()))
     }
 
     fn validate(&self) -> Result<(), DecodeError> {
@@ -337,7 +339,7 @@ impl LaneFile {
         base: Option<&[u8]>,
     ) -> Result<Vec<LaneOpSummary>, LaneError> {
         self.ensure_base(path, base)?;
-        let Some(entry) = self.lanes.get(lane) else {
+        let Some((lane, entry)) = self.lanes.get_key_value(lane) else {
             return Ok(Vec::new());
         };
         Ok(self.summarize_entry(path, lane, entry, base))
@@ -351,13 +353,13 @@ impl LaneFile {
         op_id: &str,
     ) -> Result<LaneOpDetail, LaneError> {
         self.ensure_base(path, base)?;
-        let Some(entry) = self.lanes.get(lane) else {
+        let Some((lane, entry)) = self.lanes.get_key_value(lane) else {
             return Err(operation_missing(path, op_id));
         };
 
         match entry {
             LaneEntry::Present(view) => {
-                let Some(ParsedOpId::Present(id)) = parse_lane_op_id(lane, op_id) else {
+                let Some(ParsedOpId::Present(id)) = parse_lane_op_id(lane.as_str(), op_id) else {
                     return Err(operation_missing(path, op_id));
                 };
                 let Some(op) = view.ops.iter().find(|op| op.id == id) else {
@@ -370,7 +372,7 @@ impl LaneFile {
                 })
             }
             LaneEntry::Deleted => {
-                if parse_lane_op_id(lane, op_id) != Some(ParsedOpId::Delete) {
+                if parse_lane_op_id(lane.as_str(), op_id) != Some(ParsedOpId::Delete) {
                     return Err(operation_missing(path, op_id));
                 }
                 let summary = self
@@ -390,7 +392,7 @@ impl LaneFile {
     fn replace(
         &mut self,
         path: &str,
-        lane: &str,
+        lane: &LaneId,
         base: Option<&[u8]>,
         content: Option<Vec<u8>>,
     ) -> Result<(), LaneError> {
@@ -398,10 +400,10 @@ impl LaneFile {
         let entry = entry_for_content(base, content);
         match entry {
             Some(entry) => {
-                self.lanes.insert(lane.to_owned(), entry);
+                self.lanes.insert(lane.clone(), entry);
             }
             None => {
-                self.lanes.remove(lane);
+                self.lanes.remove(lane.as_str());
             }
         };
         Ok(())
@@ -410,7 +412,7 @@ impl LaneFile {
     fn accept_ops(
         &mut self,
         path: &str,
-        lane: &str,
+        lane: &LaneId,
         base: Option<&[u8]>,
         op_ids: &[String],
     ) -> Result<Option<Vec<u8>>, LaneError> {
@@ -418,7 +420,7 @@ impl LaneFile {
         if op_ids.is_empty() {
             return Err(LaneError::EmptyOperationSelection);
         }
-        let Some(entry) = self.lanes.get(lane).cloned() else {
+        let Some(entry) = self.lanes.get(lane.as_str()).cloned() else {
             return Err(LaneError::OperationMissing {
                 path: path.to_owned(),
                 op_id: op_ids[0].clone(),
@@ -426,9 +428,11 @@ impl LaneFile {
         };
 
         let selected_ops = match entry {
-            LaneEntry::Present(view) => selected_present_ops(path, lane, &view.ops, op_ids)?,
+            LaneEntry::Present(view) => {
+                selected_present_ops(path, lane.as_str(), &view.ops, op_ids)?
+            }
             LaneEntry::Deleted => {
-                ensure_delete_selection(path, lane, op_ids)?;
+                ensure_delete_selection(path, lane.as_str(), op_ids)?;
                 return self.accept_replacement_content(path, lane, base, None);
             }
         };
@@ -439,22 +443,22 @@ impl LaneFile {
     fn accept_replacement_op(
         &mut self,
         path: &str,
-        lane: &str,
+        lane: &LaneId,
         base: Option<&[u8]>,
         op_id: &str,
         replacement: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, LaneError> {
         self.ensure_base(path, base)?;
-        let Some(entry) = self.lanes.get(lane).cloned() else {
+        let Some(entry) = self.lanes.get(lane.as_str()).cloned() else {
             return Err(operation_missing(path, op_id));
         };
         let LaneEntry::Present(view) = entry else {
-            if parse_lane_op_id(lane, op_id) != Some(ParsedOpId::Delete) {
+            if parse_lane_op_id(lane.as_str(), op_id) != Some(ParsedOpId::Delete) {
                 return Err(operation_missing(path, op_id));
             }
             return self.accept_replacement_content(path, lane, base, Some(replacement));
         };
-        let Some(ParsedOpId::Present(id)) = parse_lane_op_id(lane, op_id) else {
+        let Some(ParsedOpId::Present(id)) = parse_lane_op_id(lane.as_str(), op_id) else {
             return Err(operation_missing(path, op_id));
         };
         let Some(target) = view.ops.iter().find(|op| op.id == id).cloned() else {
@@ -596,7 +600,8 @@ impl LaneFile {
             };
             let kind = match entry {
                 LaneEntry::Present(view) => {
-                    let Some(ParsedOpId::Present(id)) = parse_lane_op_id(lane, op_id) else {
+                    let Some(ParsedOpId::Present(id)) = parse_lane_op_id(lane.as_str(), op_id)
+                    else {
                         return Err(operation_missing(path, op_id));
                     };
                     let Some(op) = view.ops.iter().find(|op| op.id == id) else {
@@ -605,7 +610,7 @@ impl LaneFile {
                     SelectedReplacementOpKind::Present(op.clone())
                 }
                 LaneEntry::Deleted => {
-                    if parse_lane_op_id(lane, op_id) != Some(ParsedOpId::Delete) {
+                    if parse_lane_op_id(lane.as_str(), op_id) != Some(ParsedOpId::Delete) {
                         return Err(operation_missing(path, op_id));
                     }
                     SelectedReplacementOpKind::Delete
@@ -624,7 +629,7 @@ impl LaneFile {
     fn accept_replacement_content(
         &mut self,
         path: &str,
-        lane: &str,
+        lane: &LaneId,
         base: Option<&[u8]>,
         accepted: Option<Vec<u8>>,
     ) -> Result<Option<Vec<u8>>, LaneError> {
@@ -633,7 +638,7 @@ impl LaneFile {
             base,
             accepted,
             |lane_id, _entry, old_bytes, accepted_base| {
-                if lane_id == lane {
+                if lane_id == lane.as_str() {
                     Ok(None)
                 } else {
                     Ok(entry_for_content(accepted_base, old_bytes))
@@ -645,7 +650,7 @@ impl LaneFile {
     fn accept_selected_present_ops(
         &mut self,
         path: &str,
-        lane: &str,
+        lane: &LaneId,
         base: Option<&[u8]>,
         selected_ops: Vec<FileOp>,
         selected_ids: &BTreeSet<u64>,
@@ -656,7 +661,7 @@ impl LaneFile {
             base,
             accepted,
             |lane_id, entry, old_bytes, accepted_base| match entry {
-                LaneEntry::Present(view) if lane_id == lane => {
+                LaneEntry::Present(view) if lane_id == lane.as_str() => {
                     let retained_ops = view
                         .ops
                         .iter()
@@ -672,7 +677,7 @@ impl LaneFile {
                             accepted_base,
                             old_bytes,
                             RebaseOpSet {
-                                lane,
+                                lane: lane.as_str(),
                                 ops: &selected_ops,
                             },
                             RebaseOpSet {
@@ -688,7 +693,7 @@ impl LaneFile {
                     accepted_base,
                     old_bytes,
                     RebaseOpSet {
-                        lane,
+                        lane: lane.as_str(),
                         ops: &selected_ops,
                     },
                     RebaseOpSet {
@@ -785,7 +790,7 @@ impl LaneFile {
     fn summarize_entry(
         &self,
         path: &str,
-        lane: &str,
+        lane: &LaneId,
         entry: &LaneEntry,
         base: Option<&[u8]>,
     ) -> Vec<LaneOpSummary> {
@@ -796,14 +801,14 @@ impl LaneFile {
                 .map(|op| self.summarize_op(path, lane, op, base))
                 .collect(),
             LaneEntry::Deleted => vec![LaneOpSummary {
-                op_id: delete_op_id_for(lane),
-                lane: lane.to_owned(),
-                path: path.to_owned(),
+                op_id: delete_op_id_for(lane.as_str()),
+                lane: lane.clone(),
+                path: FilePath::from_normalized(path),
                 kind: LaneOpKind::Delete,
                 base_start: 0,
                 base_end: base.map(|bytes| bytes.len() as u64).unwrap_or(0),
                 inserted_len: 0,
-                order_key: format!("00000000000000000000:0:{lane}:delete"),
+                order_key: format!("00000000000000000000:0:{}:delete", lane.as_str()),
                 conflicts_with: self
                     .lanes
                     .iter()
@@ -819,21 +824,21 @@ impl LaneFile {
     fn summarize_op(
         &self,
         path: &str,
-        lane: &str,
+        lane: &LaneId,
         op: &FileOp,
         base: Option<&[u8]>,
     ) -> LaneOpSummary {
         let base_missing = base.is_none();
         LaneOpSummary {
-            op_id: op_id_for(lane, op),
-            lane: lane.to_owned(),
-            path: path.to_owned(),
+            op_id: op_id_for(lane.as_str(), op),
+            lane: lane.clone(),
+            path: FilePath::from_normalized(path),
             kind: op_kind(op, base_missing),
             base_start: op.base_start,
             base_end: op.base_start + op.base_len,
             inserted_len: op.inserted.len() as u64,
-            order_key: order_key(lane, op),
-            conflicts_with: self.conflicts_for_op(lane, op, base_missing),
+            order_key: order_key(lane.as_str(), op),
+            conflicts_with: self.conflicts_for_op(lane.as_str(), op, base_missing),
         }
     }
 
@@ -841,7 +846,7 @@ impl LaneFile {
         self.lanes
             .iter()
             .filter_map(|(other_lane, other_entry)| {
-                if other_lane == lane {
+                if other_lane.as_str() == lane {
                     return None;
                 }
                 entry_conflicts_with_op(other_entry, op, base_missing).then_some(other_lane.clone())

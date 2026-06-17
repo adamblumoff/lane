@@ -7,7 +7,7 @@ use windows_sys::Win32::Foundation::{
 use winfsp_wrs::{FileAttributes, FileInfo, U16CStr, filetime_now};
 
 use crate::vfs::{LaneFs, LaneFsError};
-use crate::{FilePath, LaneError, is_git_metadata_path, is_lane_state_path};
+use crate::{FilePath, LaneError, is_git_metadata_path};
 
 use super::types::VirtualChangeOutput;
 
@@ -72,16 +72,7 @@ pub(super) fn path_from_winfsp(file_name: &U16CStr) -> Result<FilePath, i32> {
         .to_string_lossy()
         .trim_start_matches(['\\', '/'])
         .replace('\\', "/");
-    if is_lane_state_path(&label) || label.contains("/../") {
-        return Err(STATUS_ACCESS_DENIED);
-    }
-    if label
-        .split('/')
-        .any(|part| part == ".." || part.contains('\0'))
-    {
-        return Err(STATUS_ACCESS_DENIED);
-    }
-    Ok(label)
+    FilePath::parse_label(&label).map_err(|_| STATUS_ACCESS_DENIED)
 }
 
 pub(super) fn ensure_mutable_path(path: &str) -> Result<(), i32> {
@@ -94,16 +85,17 @@ pub(super) fn ensure_mutable_path(path: &str) -> Result<(), i32> {
 
 pub(super) fn child_path(parent: &str, child: &str) -> FilePath {
     let child = child.trim_start_matches(['\\', '/']).replace('\\', "/");
-    if parent.is_empty() {
+    let label = if parent.is_empty() {
         child
     } else {
         format!("{parent}/{child}")
-    }
+    };
+    FilePath::from_normalized(label)
 }
 
 pub(super) fn rename_target_path(from: &str, target: &str) -> FilePath {
     let Some((from_parent, _)) = from.rsplit_once('/') else {
-        return target.to_owned();
+        return FilePath::from_normalized(target);
     };
     if let Some((target_parent, target_name)) = target.rsplit_once('/')
         && target_parent.eq_ignore_ascii_case(from_parent)
@@ -111,7 +103,7 @@ pub(super) fn rename_target_path(from: &str, target: &str) -> FilePath {
         return child_path(from_parent, target_name);
     }
     if target.contains('/') {
-        return target.to_owned();
+        return FilePath::from_normalized(target);
     }
     child_path(from_parent, target)
 }
@@ -136,6 +128,7 @@ pub(super) fn status_from_lane_fs_error(error: LaneFsError) -> i32 {
 
 fn status_from_lane_error(error: LaneError) -> i32 {
     match error {
+        LaneError::InvalidPath(_) => STATUS_ACCESS_DENIED,
         LaneError::LaneMissing(_) => STATUS_OBJECT_NAME_NOT_FOUND,
         LaneError::BaseChanged { .. } => STATUS_ACCESS_DENIED,
         LaneError::ReservedLane(_) => STATUS_INVALID_PARAMETER,

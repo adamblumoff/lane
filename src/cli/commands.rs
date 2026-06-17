@@ -3,9 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::LaneError;
 use crate::storage::{cleanup_storage as cleanup_lane_storage, doctor_storage};
 use crate::vfs::LaneFsError;
+use crate::{FilePath, LaneError, LaneId};
 
 use super::error::{CliError, CliResult};
 use super::output::{
@@ -211,7 +211,7 @@ pub(super) fn accept_replacement_ops(
     }
 
     let output = AcceptReplacementOpsOutput {
-        path: path.to_owned(),
+        path: FilePath::parse(path)?,
         ops: ops.to_vec(),
         repo_root: path_label(repo_root),
         storage_path: path_label(&locked.storage_path),
@@ -230,7 +230,7 @@ fn read_replacement_file(with_file: &Path) -> CliResult<ReplacementFile> {
     Ok(ReplacementFile { path, bytes })
 }
 
-fn parse_lane_op_selections(ops: &[String]) -> CliResult<Vec<(String, String)>> {
+fn parse_lane_op_selections(ops: &[String]) -> CliResult<Vec<(LaneId, String)>> {
     if ops.len() < 2 {
         return Err(CliError::message(
             "accept requires at least two --op values from one conflict group".to_owned(),
@@ -248,7 +248,7 @@ fn parse_lane_op_selections(ops: &[String]) -> CliResult<Vec<(String, String)>> 
                     "accept --op value must be lane-qualified: {op_id}"
                 )));
             }
-            Ok((lane.to_owned(), op_id.clone()))
+            Ok((LaneId::parse(lane).map_err(CliError::from)?, op_id.clone()))
         })
         .collect()
 }
@@ -301,7 +301,7 @@ pub(super) fn accept_ops(
         .collect::<Vec<_>>();
     locked.fs.accept_ops_files(
         lane,
-        &[(path.to_owned(), ops.to_vec())],
+        &[(FilePath::parse(path)?, ops.to_vec())],
         persist_lane_repo(&locked.storage_path),
     )?;
 

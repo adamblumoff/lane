@@ -38,7 +38,10 @@ pub(super) fn open_locked_lane_fs(repo_root: &Path) -> CliResult<LockedLaneFs> {
     let storage_path = storage_path(repo_root);
     let lock = acquire_repo_lock(&storage_path)?;
     let repo = load_lane_repo(&storage_path)?;
-    let lanes = repo.lane_ids().map(str::to_owned).collect::<BTreeSet<_>>();
+    let lanes = repo
+        .lane_ids()
+        .map(LaneId::parse)
+        .collect::<Result<BTreeSet<_>, _>>()?;
     let last_run = load_last_run(&storage_path, &lanes);
     Ok(LockedLaneFs {
         storage_path,

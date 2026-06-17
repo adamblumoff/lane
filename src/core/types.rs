@@ -1,10 +1,223 @@
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::ops::Deref;
+use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
-pub type FilePath = String;
-pub type LaneId = String;
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct FilePath(String);
+
+impl FilePath {
+    pub fn parse(raw: &str) -> Result<Self, LaneError> {
+        let label = Self::normalize_label(raw).map_err(LaneError::InvalidPath)?;
+        if label.is_empty() {
+            Err(LaneError::InvalidPath("missing path".to_owned()))
+        } else {
+            Ok(Self(label))
+        }
+    }
+
+    pub(crate) fn parse_label(raw: &str) -> Result<Self, String> {
+        Self::normalize_label(raw).map(Self)
+    }
+
+    pub(crate) fn from_normalized(raw: impl Into<String>) -> Self {
+        let raw = raw.into();
+        debug_assert_eq!(Self::normalize_label(&raw).as_deref(), Ok(raw.as_str()));
+        Self(raw)
+    }
+
+    pub(crate) fn normalize_label(raw: &str) -> Result<String, String> {
+        if raw.trim().is_empty() || raw == "." {
+            return Ok(String::new());
+        }
+        if is_absolute_repo_path(raw) {
+            return Err("path must be repo-relative".to_owned());
+        }
+
+        let normalized = raw.replace('\\', "/");
+        let mut parts = Vec::new();
+        for part in normalized.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => return Err("path must stay inside the repo".to_owned()),
+                part if part.contains('\0') => {
+                    return Err("path must stay inside the repo".to_owned());
+                }
+                part => parts.push(part.to_owned()),
+            }
+        }
+
+        let label = parts.join("/");
+        if is_lane_state_path(&label) {
+            return Err("cannot project lane state files".to_owned());
+        }
+        if is_git_metadata_path(&label) {
+            return Err("cannot project git metadata files".to_owned());
+        }
+        Ok(label)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Debug for FilePath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl fmt::Display for FilePath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Deref for FilePath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for FilePath {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for FilePath {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq<str> for FilePath {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for FilePath {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for FilePath {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl From<FilePath> for String {
+    fn from(path: FilePath) -> Self {
+        path.0
+    }
+}
+
+impl<'de> Deserialize<'de> for FilePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LaneId(String);
+
+impl LaneId {
+    pub fn parse(raw: &str) -> Result<Self, LaneError> {
+        if raw.trim().is_empty() || raw == "base" {
+            Err(LaneError::ReservedLane(raw.to_owned()))
+        } else {
+            Ok(Self(raw.to_owned()))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Debug for LaneId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl fmt::Display for LaneId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Deref for LaneId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for LaneId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for LaneId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq<str> for LaneId {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for LaneId {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl From<LaneId> for String {
+    fn from(lane: LaneId) -> Self {
+        lane.0
+    }
+}
+
+impl<'de> Deserialize<'de> for LaneId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
 
 pub(crate) fn is_lane_state_path(path: &str) -> bool {
     has_repo_root_component(path, ".lane")
@@ -12,6 +225,15 @@ pub(crate) fn is_lane_state_path(path: &str) -> bool {
 
 pub(crate) fn is_git_metadata_path(path: &str) -> bool {
     has_repo_root_component(path, ".git")
+}
+
+fn is_absolute_repo_path(path: &str) -> bool {
+    Path::new(path).is_absolute() || path.starts_with(['/', '\\']) || has_windows_drive_prefix(path)
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 fn has_repo_root_component(path: &str, component: &str) -> bool {
@@ -104,22 +326,24 @@ pub struct FileOpStorageSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LaneError {
+    #[error("invalid repo path: {0}")]
+    InvalidPath(String),
     #[error("reserved lane name {0:?}")]
-    ReservedLane(LaneId),
+    ReservedLane(String),
     #[error("lane {0:?} does not exist")]
-    LaneMissing(LaneId),
+    LaneMissing(String),
     #[error("base file changed outside lane for {path}")]
-    BaseChanged { path: FilePath },
+    BaseChanged { path: String },
     #[error("operation is outside the current base file for {path}")]
-    OperationOutOfBounds { path: FilePath },
+    OperationOutOfBounds { path: String },
     #[error("operation conflicts with another selected operation for {path}")]
-    OperationConflict { path: FilePath },
+    OperationConflict { path: String },
     #[error("operation selection cannot be empty")]
     EmptyOperationSelection,
     #[error("invalid operation selection for {path}: {reason}")]
-    InvalidOperationSelection { path: FilePath, reason: String },
+    InvalidOperationSelection { path: String, reason: String },
     #[error("operation {op_id:?} does not exist for {path}")]
-    OperationMissing { path: FilePath, op_id: String },
+    OperationMissing { path: String, op_id: String },
 }
 
 impl LaneRunState {
@@ -174,15 +398,11 @@ pub enum DecodeError {
     #[error("stored overlay references missing lane {0:?}")]
     OverlayLaneMissing(LaneId),
     #[error("stored manifest contains reserved lane name {0:?}")]
-    ReservedLane(LaneId),
+    ReservedLane(String),
 }
 
 pub fn ensure_user_lane(lane: &str) -> Result<(), LaneError> {
-    if lane.trim().is_empty() || lane == "base" {
-        Err(LaneError::ReservedLane(lane.to_owned()))
-    } else {
-        Ok(())
-    }
+    LaneId::parse(lane).map(|_| ())
 }
 
 pub(super) fn base_fingerprint(bytes: &[u8]) -> BaseFingerprint {

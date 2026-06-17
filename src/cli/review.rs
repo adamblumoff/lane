@@ -44,7 +44,7 @@ pub(super) fn collect_review(
                 lane.clone(),
                 ReviewLaneSummaryDraft {
                     lane: lane.clone(),
-                    last_run: last_run.get(lane).cloned(),
+                    last_run: last_run.get(lane.as_str()).cloned(),
                     ..ReviewLaneSummaryDraft::default()
                 },
             )
@@ -182,7 +182,7 @@ fn review_conflict_output(ops: Vec<ReviewOpOutput>) -> ReviewConflictOutput {
     let range_end = ops.iter().map(|op| op.op.base_end).max().unwrap_or(0);
     let lanes = ops
         .iter()
-        .map(|op| op.op.lane.clone())
+        .map(|op| op.op.lane.as_str().to_owned())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -220,11 +220,11 @@ pub(super) fn detail_action(op: &ReviewOpOutput) -> ReviewActionOutput {
         kind: ReviewActionKind::Detail,
         command: vec![
             "review".to_owned(),
-            op.op.lane.clone(),
-            op.op.path.clone(),
+            op.op.lane.to_string(),
+            op.op.path.to_string(),
             op.op.op_id.clone(),
         ],
-        lane: Some(op.op.lane.clone()),
+        lane: Some(op.op.lane.to_string()),
         path: Some(op.op.path.clone()),
         op_ids: vec![op.op.op_id.clone()],
         required_inputs: Vec::new(),
@@ -236,13 +236,13 @@ pub(super) fn accept_replacement_op_action(op: &ReviewOpOutput) -> ReviewActionO
         kind: ReviewActionKind::Accept,
         command: vec![
             "accept".to_owned(),
-            op.op.lane.clone(),
-            op.op.path.clone(),
+            op.op.lane.to_string(),
+            op.op.path.to_string(),
             op.op.op_id.clone(),
             "--with-file".to_owned(),
             "<replacement-file>".to_owned(),
         ],
-        lane: Some(op.op.lane.clone()),
+        lane: Some(op.op.lane.to_string()),
         path: Some(op.op.path.clone()),
         op_ids: vec![op.op.op_id.clone()],
         required_inputs: vec![ReviewActionInput {
@@ -253,9 +253,12 @@ pub(super) fn accept_replacement_op_action(op: &ReviewOpOutput) -> ReviewActionO
 }
 
 fn accept_replacement_ops_action(ops: &[ReviewOpOutput]) -> ReviewActionOutput {
-    let path = ops.first().map(|op| op.op.path.clone()).unwrap_or_default();
+    let path = ops
+        .first()
+        .map(|op| op.op.path.clone())
+        .expect("conflict action requires at least one operation");
     let op_ids = ops.iter().map(|op| op.op.op_id.clone()).collect::<Vec<_>>();
-    let mut command = vec!["accept".to_owned(), path.clone()];
+    let mut command = vec!["accept".to_owned(), path.to_string()];
     for op_id in &op_ids {
         command.push("--op".to_owned());
         command.push(op_id.clone());
@@ -369,7 +372,7 @@ fn is_whole_file_delete(op: &LaneOpSummary) -> bool {
         && op
             .op_id
             .rsplit_once(':')
-            .is_some_and(|(lane, suffix)| lane == op.lane && suffix == "delete")
+            .is_some_and(|(lane, suffix)| op.lane == lane && suffix == "delete")
 }
 
 pub(super) fn filter_change_ops(

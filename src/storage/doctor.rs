@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::{LaneRunState, ensure_user_lane};
+use crate::{FilePath, LaneRunState, ensure_user_lane};
 
 use super::blobs::{
     BlobInventory, blob_inventory, read_blob, record_blob_inventory, sha256_hex,
@@ -86,6 +86,12 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
     let mut referenced_blobs = BTreeSet::new();
 
     for file in &manifest.files {
+        if let Err(error) = FilePath::parse(&file.path) {
+            report.errors.push(format!(
+                "manifest file path {:?} is invalid: {error}",
+                file.path
+            ));
+        }
         if let StoredBase::Present { fingerprint } = &file.base
             && parse_fingerprint(fingerprint).is_err()
         {
