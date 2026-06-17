@@ -12,6 +12,8 @@ storage, VFS, and orchestration changes must preserve.
 - Reading an untouched user lane returns the supplied base bytes.
 - Replacing a path in a lane and then reading that lane returns the replacement
   bytes for the same base.
+- Creating an empty file from a missing base is still a real create operation;
+  it is reviewable, acceptable, and preserved by storage roundtrips.
 - Deleting a present path in a lane and then reading that lane returns missing.
 - A path overlay is tied to the base fingerprint captured when the overlay was
   created. Reads, reviews, and accepts against different base bytes fail with
@@ -28,6 +30,8 @@ storage, VFS, and orchestration changes must preserve.
 - Retained lanes preserve their rendered intent after a non-conflicting accept.
   When coordinate rebasing cannot preserve intent, the retained lane is rebuilt
   as replacement content against the accepted base.
+- A retained lane overlay that already renders to the accepted base is removed
+  instead of replayed as a duplicate operation.
 - Discarding a lane removes only that lane's overlays and leaves base bytes
   unchanged.
 
@@ -84,6 +88,9 @@ storage, VFS, and orchestration changes must preserve.
   core file APIs.
 - Property tests cover byte-level laws over generated inputs, including
   roundtrips, stale-base rejection, and same-offset insert convergence.
+- Stateful model tests cover generated one-path histories across two or three
+  lanes for lane creation, whole-file replacement, deletion, accept, discard,
+  storage roundtrip, stale-base rejection, and overlay isolation.
 - Integration tests cover important CLI, storage, VFS, and orchestration flows.
-- Future bounded models should focus on accept, discard, rebase, and conflict
+- Future bounded models should focus on selected partial accepts and conflict
   replacement sequences for one file across two or three lanes.

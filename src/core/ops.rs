@@ -40,8 +40,11 @@ impl FileOp {
 }
 
 pub(super) fn diff_to_ops(base: &[u8], content: &[u8], base_missing: bool) -> Vec<FileOp> {
-    if base_missing || is_probably_binary(base) || is_probably_binary(content) {
-        return coarse_replace_ops(base, content);
+    if base_missing {
+        return coarse_replace_ops(base, content, true);
+    }
+    if is_probably_binary(base) || is_probably_binary(content) {
+        return coarse_replace_ops(base, content, false);
     }
 
     let mut ops = Vec::new();
@@ -65,8 +68,8 @@ pub(super) fn diff_to_ops(base: &[u8], content: &[u8], base_missing: bool) -> Ve
     ops
 }
 
-fn coarse_replace_ops(base: &[u8], content: &[u8]) -> Vec<FileOp> {
-    if base == content {
+fn coarse_replace_ops(base: &[u8], content: &[u8], force_op: bool) -> Vec<FileOp> {
+    if !force_op && base == content {
         Vec::new()
     } else {
         vec![FileOp {
@@ -410,10 +413,13 @@ pub(super) fn validate_ops(ops: &[FileOp]) -> Result<(), DecodeError> {
     Ok(())
 }
 
-pub(super) fn normalize_ops_checked(ops: Vec<FileOp>) -> Result<Vec<FileOp>, DecodeError> {
+pub(super) fn normalize_ops_checked(
+    ops: Vec<FileOp>,
+    base_missing: bool,
+) -> Result<Vec<FileOp>, DecodeError> {
     validate_ops(&ops)?;
     Ok(ops
         .into_iter()
-        .filter(|op| op.base_len > 0 || !op.inserted.is_empty())
+        .filter(|op| base_missing || op.base_len > 0 || !op.inserted.is_empty())
         .collect())
 }

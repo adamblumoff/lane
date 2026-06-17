@@ -118,10 +118,16 @@ proptest! {
     #[test]
     fn same_position_inserts_converge_across_acceptance_orders(
         agent_a_insert in prop::collection::vec(b'A'..=b'Z', 1..8),
-        agent_b_insert in prop::collection::vec(b'A'..=b'Z', 1..8),
-        agent_c_insert in prop::collection::vec(b'A'..=b'Z', 1..8),
+        agent_b_insert_seed in prop::collection::vec(b'A'..=b'Z', 1..8),
+        agent_c_insert_seed in prop::collection::vec(b'A'..=b'Z', 1..8),
     ) {
         let base = b"tail\n";
+        let agent_b_insert =
+            bytes_different_from_any(&[agent_a_insert.as_slice()], agent_b_insert_seed);
+        let agent_c_insert = bytes_different_from_any(
+            &[agent_a_insert.as_slice(), agent_b_insert.as_slice()],
+            agent_c_insert_seed,
+        );
         let inserts = [
             (AGENT_A, agent_a_insert),
             (AGENT_B, agent_b_insert),
@@ -359,6 +365,9 @@ fn accept_all_ops(repo: &mut LaneRepo, path: &str, lane: &str, base: &[u8]) -> V
         .into_iter()
         .map(|op| op.op_id)
         .collect::<Vec<_>>();
+    if op_ids.is_empty() {
+        return base.to_vec();
+    }
     repo.accept_ops_path(path, lane, Some(base), &op_ids)
         .unwrap()
         .unwrap()
@@ -367,6 +376,15 @@ fn accept_all_ops(repo: &mut LaneRepo, path: &str, lane: &str, base: &[u8]) -> V
 fn bytes_different_from(base: &[u8], mut bytes: Vec<u8>) -> Vec<u8> {
     if bytes == base {
         bytes.push(0);
+    }
+    bytes
+}
+
+fn bytes_different_from_any(forbidden: &[&[u8]], mut bytes: Vec<u8>) -> Vec<u8> {
+    let mut marker = b'A';
+    while forbidden.contains(&bytes.as_slice()) {
+        bytes.push(marker);
+        marker = if marker == b'Z' { b'A' } else { marker + 1 };
     }
     bytes
 }
