@@ -5,13 +5,19 @@ use lane::{
     LaneError, LaneFileStorageSnapshot, LaneId, LaneRepo, LaneRepoStorageSnapshot, LaneRunState,
 };
 use proptest::prelude::*;
+use proptest::test_runner::{Config as ProptestConfig, FileFailurePersistence};
 
 const EXEC_OUTPUT_PREVIEW_LIMIT: usize = 4096;
 const PATH: &str = "src/property.bin";
 const AGENT_A: &str = "agent-a";
 const AGENT_B: &str = "agent-b";
+const AGENT_C: &str = "agent-c";
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_failure_persistence(
+        FileFailurePersistence::Direct("tests/properties_core.proptest-regressions"),
+    ))]
+
     #[test]
     fn replace_then_read_returns_replacement(
         base in prop::collection::vec(any::<u8>(), 0..64),
@@ -107,6 +113,39 @@ proptest! {
             repo.read_path(PATH, AGENT_B, Some(&accepted)).unwrap(),
             Some(expected)
         );
+    }
+
+    #[test]
+    fn same_position_inserts_converge_in_lane_order(
+        agent_a_insert in prop::collection::vec(b'A'..=b'Z', 1..8),
+        agent_b_insert in prop::collection::vec(b'A'..=b'Z', 1..8),
+        agent_c_insert in prop::collection::vec(b'A'..=b'Z', 1..8),
+        order_index in 0usize..6,
+    ) {
+        let base = b"tail\n";
+        let inserts = [
+            (AGENT_A, agent_a_insert),
+            (AGENT_B, agent_b_insert),
+            (AGENT_C, agent_c_insert),
+        ];
+        let mut repo = repo_with_named_lanes(&[AGENT_A, AGENT_B, AGENT_C]);
+        for (lane, insert) in &inserts {
+            let mut lane_bytes = insert.clone();
+            lane_bytes.extend_from_slice(base);
+            repo.replace_path(PATH, lane, Some(base), Some(lane_bytes)).unwrap();
+        }
+
+        let mut current_base = base.to_vec();
+        for lane_index in ACCEPTANCE_ORDERS[order_index] {
+            current_base = accept_all_ops(&mut repo, PATH, inserts[lane_index].0, &current_base);
+        }
+        let mut expected = Vec::new();
+        for (_, insert) in &inserts {
+            expected.extend_from_slice(insert);
+        }
+        expected.extend_from_slice(base);
+
+        prop_assert_eq!(current_base, expected);
     }
 }
 
@@ -292,11 +331,25 @@ fn lane_text_preview_truncates_at_utf8_boundary() {
 }
 
 fn repo_with_lanes() -> LaneRepo {
+    repo_with_named_lanes(&[AGENT_A, AGENT_B])
+}
+
+fn repo_with_named_lanes(lanes: &[&str]) -> LaneRepo {
     let mut repo = LaneRepo::new();
-    repo.create_lane(AGENT_A).unwrap();
-    repo.create_lane(AGENT_B).unwrap();
+    for lane in lanes {
+        repo.create_lane(*lane).unwrap();
+    }
     repo
 }
+
+const ACCEPTANCE_ORDERS: [[usize; 3]; 6] = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+];
 
 fn accept_all_ops(repo: &mut LaneRepo, path: &str, lane: &str, base: &[u8]) -> Vec<u8> {
     let op_ids = repo
