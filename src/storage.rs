@@ -28,7 +28,10 @@ pub(crate) use atomic::persist_bytes;
 pub(crate) use cleanup::cleanup_storage;
 pub(crate) use doctor::{StorageDoctorReport, doctor_storage};
 #[cfg(test)]
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "unused in the crate test target but used when storage_contract recompiles this facade"
+)]
 pub(crate) use lock::is_lock_contention;
 pub(crate) use lock::{RepoLock, acquire_repo_lock};
 pub(crate) use paths::encode_path_component;

@@ -125,10 +125,13 @@ fn process_is_running(pid: u32) -> Option<bool> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
+    // SAFETY: `OpenProcess` only receives a PID parsed from the lock file and
+    // asks for query-limited rights; failure is represented by a null handle.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if handle == 0 {
         return Some(false);
     }
+    // SAFETY: `handle` is non-null and was returned by `OpenProcess` above.
     unsafe {
         CloseHandle(handle);
     }

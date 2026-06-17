@@ -1,5 +1,3 @@
-use std::error::Error;
-use std::fmt;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -145,15 +143,16 @@ impl From<LaneFileChange> for VirtualChangeOutput {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
 pub(crate) struct VirtualRunError {
     message: String,
 }
 
 impl VirtualRunError {
-    pub(super) fn message(message: impl Into<String>) -> Self {
+    pub(super) fn message(message: impl ToString) -> Self {
         Self {
-            message: message.into(),
+            message: message.to_string(),
         }
     }
 
@@ -163,14 +162,6 @@ impl VirtualRunError {
         ))
     }
 }
-
-impl fmt::Display for VirtualRunError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl Error for VirtualRunError {}
 
 impl From<io::Error> for VirtualRunError {
     fn from(error: io::Error) -> Self {

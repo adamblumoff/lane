@@ -40,7 +40,7 @@ fn cli_rejects_reserved_lane_names_at_entry_points() {
             "-Command",
             "exit 0",
         ]);
-        assert_command_fails_with(&output, "ReservedLane");
+        assert_command_fails_with(&output, "reserved lane name");
     }
     assert!(!repo.path().join(".lane/repo.json").exists());
 }

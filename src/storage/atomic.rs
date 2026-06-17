@@ -102,6 +102,9 @@ fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
 
     let from = windows_path(from);
     let to = windows_path(to);
+    // SAFETY: `windows_path` returns null-terminated UTF-16 buffers that live
+    // for this call, and the flags request an atomic replace/write-through
+    // move without sharing ownership of the pointers with Windows.
     let ok = unsafe {
         MoveFileExW(
             from.as_ptr(),
