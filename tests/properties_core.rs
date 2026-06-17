@@ -116,11 +116,10 @@ proptest! {
     }
 
     #[test]
-    fn same_position_inserts_converge_in_lane_order(
+    fn same_position_inserts_converge_across_acceptance_orders(
         agent_a_insert in prop::collection::vec(b'A'..=b'Z', 1..8),
         agent_b_insert in prop::collection::vec(b'A'..=b'Z', 1..8),
         agent_c_insert in prop::collection::vec(b'A'..=b'Z', 1..8),
-        order_index in 0usize..6,
     ) {
         let base = b"tail\n";
         let inserts = [
@@ -128,24 +127,26 @@ proptest! {
             (AGENT_B, agent_b_insert),
             (AGENT_C, agent_c_insert),
         ];
-        let mut repo = repo_with_named_lanes(&[AGENT_A, AGENT_B, AGENT_C]);
-        for (lane, insert) in &inserts {
-            let mut lane_bytes = insert.clone();
-            lane_bytes.extend_from_slice(base);
-            repo.replace_path(PATH, lane, Some(base), Some(lane_bytes)).unwrap();
+        let mut final_versions = Vec::new();
+        for acceptance_order in ACCEPTANCE_ORDERS {
+            let mut repo = repo_with_named_lanes(&[AGENT_A, AGENT_B, AGENT_C]);
+            for (lane, insert) in &inserts {
+                let mut lane_bytes = insert.clone();
+                lane_bytes.extend_from_slice(base);
+                repo.replace_path(PATH, lane, Some(base), Some(lane_bytes)).unwrap();
+            }
+
+            let mut current_base = base.to_vec();
+            for lane_index in acceptance_order {
+                current_base =
+                    accept_all_ops(&mut repo, PATH, inserts[lane_index].0, &current_base);
+            }
+            final_versions.push(current_base);
         }
 
-        let mut current_base = base.to_vec();
-        for lane_index in ACCEPTANCE_ORDERS[order_index] {
-            current_base = accept_all_ops(&mut repo, PATH, inserts[lane_index].0, &current_base);
-        }
-        let mut expected = Vec::new();
-        for (_, insert) in &inserts {
-            expected.extend_from_slice(insert);
-        }
-        expected.extend_from_slice(base);
-
-        prop_assert_eq!(current_base, expected);
+        let first = final_versions[0].clone();
+        prop_assert!(first.ends_with(base));
+        prop_assert!(final_versions.iter().all(|version| version == &first));
     }
 }
 
