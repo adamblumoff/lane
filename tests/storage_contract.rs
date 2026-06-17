@@ -32,7 +32,7 @@ fn storage_v2_persists_manifest_blobs_and_last_run() {
     persist_last_run(
         temp.path(),
         "agent-a",
-        &LaneRunState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
+        &LaneRunState::new(Some(0), None, "ok\n", "", vec![file_path("src/new.ts")]),
     )
     .unwrap();
 
@@ -50,7 +50,7 @@ fn storage_v2_persists_manifest_blobs_and_last_run() {
     assert_eq!(last_run.exit_code, Some(0));
     assert_eq!(last_run.stdout.text, "ok\n");
     assert!(!last_run.stdout.truncated);
-    assert_eq!(last_run.changed_paths, vec!["src/new.ts"]);
+    assert_eq!(last_run.changed_paths, vec![file_path("src/new.ts")]);
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn corrupt_last_run_is_advisory_but_doctor_reports_it() {
     persist_last_run(
         temp.path(),
         "agent-a",
-        &LaneRunState::new(Some(0), None, "ok\n", "", vec!["src/new.ts".to_owned()]),
+        &LaneRunState::new(Some(0), None, "ok\n", "", vec![file_path("src/new.ts")]),
     )
     .unwrap();
     fs::write(temp.path().join("last_run/agent-a.json"), b"not json").unwrap();
@@ -278,6 +278,58 @@ fn reserved_manifest_lane_is_reported_by_doctor() {
 }
 
 #[test]
+fn reserved_manifest_file_path_is_rejected_and_reported_by_doctor() {
+    let temp = TempStorage::new();
+    let repo = repo_with_agent_file();
+    persist_repo(temp.path(), &repo).unwrap();
+    let path = temp.path().join("repo.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["files"][0]["path"] = serde_json::json!(".lane/repo.json");
+    fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+    let load_error = load_repo(temp.path()).unwrap_err();
+    assert_eq!(load_error.kind(), io::ErrorKind::InvalidData);
+    let report = doctor_storage(temp.path()).unwrap();
+    assert!(!report.is_healthy());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("manifest file path \".lane/repo.json\" is invalid"))
+    );
+}
+
+#[test]
+fn duplicate_normalized_manifest_file_paths_are_rejected_and_reported_by_doctor() {
+    let temp = TempStorage::new();
+    let repo = repo_with_agent_file();
+    persist_repo(temp.path(), &repo).unwrap();
+    let path = temp.path().join("repo.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let duplicate = manifest["files"][0].clone();
+    manifest["files"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "path": "src/./new.ts",
+            "base": duplicate["base"].clone(),
+            "lanes": duplicate["lanes"].clone(),
+        }));
+    fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+    let load_error = load_repo(temp.path()).unwrap_err();
+    assert_eq!(load_error.kind(), io::ErrorKind::InvalidData);
+    let report = doctor_storage(temp.path()).unwrap();
+    assert!(!report.is_healthy());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate file path after normalization"))
+    );
+}
+
+#[test]
 fn lock_contention_includes_windows_permission_denied_errors() {
     assert!(is_lock_contention(&io::Error::new(
         io::ErrorKind::AlreadyExists,
@@ -316,7 +368,13 @@ fn repo_with_agent_file() -> LaneRepo {
 }
 
 fn lane_set(repo: &LaneRepo) -> BTreeSet<LaneId> {
-    repo.lane_ids().map(str::to_owned).collect()
+    repo.lane_ids()
+        .map(|lane| LaneId::parse(lane).unwrap())
+        .collect()
+}
+
+fn file_path(path: &str) -> FilePath {
+    FilePath::parse(path).unwrap()
 }
 
 fn first_blob_path(storage_root: &Path) -> PathBuf {

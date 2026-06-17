@@ -44,3 +44,6 @@ needless_collect = "deny"
 perf = "deny"
 redundant_clone = "deny"
 undocumented_unsafe_blocks = "deny"
+
+[dev-dependencies]
+proptest = "1.11.0"

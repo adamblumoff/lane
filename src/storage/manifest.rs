@@ -56,34 +56,43 @@ fn snapshot_from_manifest(
     storage_root: &Path,
     manifest: StoredRepoManifest,
 ) -> io::Result<LaneRepoStorageSnapshot> {
+    let lanes = manifest
+        .lanes
+        .iter()
+        .map(|lane| LaneId::parse(lane).map_err(invalid_manifest_lane))
+        .collect::<io::Result<BTreeSet<_>>>()?;
     let mut files = BTreeMap::new();
     for stored_file in manifest.files {
-        files.insert(
-            stored_file.path,
-            LaneFileStorageSnapshot {
-                base: match stored_file.base {
-                    StoredBase::Present { fingerprint } => {
-                        BaseStorageSnapshot::Present(parse_fingerprint(&fingerprint)?)
-                    }
-                    StoredBase::Missing => BaseStorageSnapshot::Missing,
-                },
-                lanes: stored_file
-                    .lanes
-                    .into_iter()
-                    .map(|entry| {
-                        let lane = entry.lane.clone();
-                        stored_entry_to_snapshot(storage_root, entry)
-                            .map(|entry_state| (lane, entry_state))
-                    })
-                    .collect::<io::Result<_>>()?,
+        let path = FilePath::parse(&stored_file.path).map_err(invalid_manifest_path)?;
+        let snapshot = LaneFileStorageSnapshot {
+            base: match stored_file.base {
+                StoredBase::Present { fingerprint } => {
+                    BaseStorageSnapshot::Present(parse_fingerprint(&fingerprint)?)
+                }
+                StoredBase::Missing => BaseStorageSnapshot::Missing,
             },
-        );
+            lanes: stored_file
+                .lanes
+                .into_iter()
+                .map(|entry| {
+                    let lane = LaneId::parse(&entry.lane).map_err(invalid_manifest_lane)?;
+                    stored_entry_to_snapshot(storage_root, entry)
+                        .map(|entry_state| (lane, entry_state))
+                })
+                .collect::<io::Result<_>>()?,
+        };
+        if files.insert(path.clone(), snapshot).is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "manifest contains duplicate file path after normalization: {:?}",
+                    path.as_str()
+                ),
+            ));
+        }
     }
 
-    Ok(LaneRepoStorageSnapshot {
-        lanes: manifest.lanes.into_iter().collect(),
-        files,
-    })
+    Ok(LaneRepoStorageSnapshot { lanes, files })
 }
 
 fn stored_entry_to_snapshot(
@@ -116,7 +125,7 @@ fn manifest_from_snapshot(
     let mut persisted_blobs = BTreeSet::new();
     for (path, file) in &snapshot.files {
         files.push(StoredFile {
-            path: path.clone(),
+            path: path.as_str().to_owned(),
             base: match file.base {
                 BaseStorageSnapshot::Present(fingerprint) => StoredBase::Present {
                     fingerprint: hex(&fingerprint),
@@ -129,7 +138,7 @@ fn manifest_from_snapshot(
                 .map(|(lane, entry)| {
                     stored_entry_from_snapshot(storage_root, entry, &mut persisted_blobs).map(
                         |entry| StoredLaneEntry {
-                            lane: lane.clone(),
+                            lane: lane.as_str().to_owned(),
                             entry,
                         },
                     )
@@ -140,9 +149,21 @@ fn manifest_from_snapshot(
 
     Ok(StoredRepoManifest {
         version: STORE_VERSION,
-        lanes: snapshot.lanes.iter().cloned().collect(),
+        lanes: snapshot
+            .lanes
+            .iter()
+            .map(|lane| lane.as_str().to_owned())
+            .collect(),
         files,
     })
+}
+
+fn invalid_manifest_lane(error: impl std::fmt::Display) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+}
+
+fn invalid_manifest_path(error: impl std::fmt::Display) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
 
 fn stored_entry_from_snapshot(
@@ -221,13 +242,13 @@ fn hex_digit(byte: u8) -> io::Result<u8> {
 #[derive(Serialize, Deserialize)]
 pub(super) struct StoredRepoManifest {
     pub(super) version: u32,
-    pub(super) lanes: Vec<LaneId>,
+    pub(super) lanes: Vec<String>,
     pub(super) files: Vec<StoredFile>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct StoredFile {
-    pub(super) path: FilePath,
+    pub(super) path: String,
     pub(super) base: StoredBase,
     pub(super) lanes: Vec<StoredLaneEntry>,
 }
@@ -241,7 +262,7 @@ pub(super) enum StoredBase {
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct StoredLaneEntry {
-    pub(super) lane: LaneId,
+    pub(super) lane: String,
     pub(super) entry: StoredLaneEntryState,
 }
 

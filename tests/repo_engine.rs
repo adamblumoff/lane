@@ -1,4 +1,4 @@
-use lane::{BaseStorageSnapshot, LaneError, LaneOpKind, LaneRepo};
+use lane::{BaseStorageSnapshot, LaneError, LaneId, LaneOpKind, LaneRepo};
 use sha2::{Digest, Sha256};
 use std::ops::Range;
 
@@ -414,7 +414,7 @@ fn selected_delete_acceptance_preserves_other_lane_as_create() {
     let agent_b_ops = repo.change_ops("src/mode.txt", "agent-b", None).unwrap();
     assert_eq!(agent_b_ops.len(), 1);
     assert_eq!(agent_b_ops[0].kind, LaneOpKind::Create);
-    assert_eq!(agent_b_ops[0].conflicts_with, Vec::<String>::new());
+    assert_eq!(agent_b_ops[0].conflicts_with, Vec::<LaneId>::new());
 }
 
 #[test]
@@ -466,7 +466,7 @@ fn accept_replacement_op_accepts_replacement_bytes_and_preserves_other_lane_alte
         .unwrap();
     assert_eq!(detail.base, b"2");
     assert_eq!(detail.inserted, b"B");
-    assert_eq!(detail.summary.conflicts_with, vec!["agent-b".to_owned()]);
+    assert_eq!(detail.summary.conflicts_with, vec![lane_id("agent-b")]);
 
     let accepted = repo
         .accept_replacement_op_path(
@@ -510,7 +510,7 @@ fn accept_replacement_ops_combines_conflicting_replacements_and_consumes_selecte
                 .next()
                 .unwrap();
             assert_eq!(op.conflicts_with.len(), 2);
-            (lane.to_owned(), op.op_id)
+            (lane_id(lane), op.op_id)
         })
         .collect::<Vec<_>>();
     let replacement = b"function a() {}\n\nfunction b() {}\n\nfunction c() {}".to_vec();
@@ -556,8 +556,8 @@ fn accept_replacement_ops_rejects_unrelated_clean_ops_without_mutating_repo() {
         path,
         Some(base),
         &[
-            ("agent-a".to_owned(), agent_a_op.op_id),
-            ("agent-b".to_owned(), agent_b_op.op_id),
+            (lane_id("agent-a"), agent_a_op.op_id),
+            (lane_id("agent-b"), agent_b_op.op_id),
         ],
         b"bad".to_vec(),
     );
@@ -604,15 +604,15 @@ fn accept_replacement_ops_preserves_unselected_empty_file_insert_as_alternative_
         .next()
         .unwrap();
     assert_eq!(delete_op.conflicts_with.len(), 2);
-    assert_eq!(agent_b_op.conflicts_with, vec!["agent-a".to_owned()]);
+    assert_eq!(agent_b_op.conflicts_with, vec![lane_id("agent-a")]);
 
     let accepted = repo
         .accept_replacement_ops_path(
             path,
             Some(base),
             &[
-                ("agent-a".to_owned(), delete_op.op_id),
-                ("agent-b".to_owned(), agent_b_op.op_id),
+                (lane_id("agent-a"), delete_op.op_id),
+                (lane_id("agent-b"), agent_b_op.op_id),
             ],
             b"merged".to_vec(),
         )
@@ -637,7 +637,7 @@ fn overlapping_same_file_ops_remain_alternatives_after_accept() {
     let before = repo
         .change_ops("src/mode.txt", "agent-a", Some(base))
         .unwrap();
-    assert_eq!(before[0].conflicts_with, vec!["agent-b".to_owned()]);
+    assert_eq!(before[0].conflicts_with, vec![lane_id("agent-b")]);
 
     let accepted = repo
         .accept_all_ops("src/mode.txt", "agent-a", base)
@@ -783,6 +783,10 @@ fn seeded_repo() -> LaneRepo {
 
 fn round_trip_repo(repo: &LaneRepo) -> LaneRepo {
     LaneRepo::from_storage_snapshot(repo.storage_snapshot()).unwrap()
+}
+
+fn lane_id(lane: &str) -> LaneId {
+    LaneId::parse(lane).unwrap()
 }
 
 fn repo_with_same_position_inserts(base: &[u8]) -> LaneRepo {

@@ -30,18 +30,28 @@ fn cli_rejects_collapsed_review_and_acceptance_shortcuts() {
 fn cli_rejects_reserved_lane_names_at_entry_points() {
     let repo = TempRepo::new();
 
-    for lane in ["base", "   "] {
-        let output = repo.run_unchecked(&[
-            "run",
-            lane,
-            "--",
-            "pwsh",
-            "-NoProfile",
-            "-Command",
-            "exit 0",
-        ]);
-        assert_command_fails_with(&output, "reserved lane name");
-    }
+    let base = repo.run_unchecked(&[
+        "run",
+        "base",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "exit 0",
+    ]);
+    assert_command_fails_with(&base, "reserved lane name");
+
+    let whitespace = repo.run_unchecked(&[
+        "run",
+        "   ",
+        "--",
+        "pwsh",
+        "-NoProfile",
+        "-Command",
+        "exit 0",
+    ]);
+    assert_command_fails_with(&whitespace, "invalid lane name");
+
     assert!(!repo.path().join(".lane/repo.json").exists());
 }
 

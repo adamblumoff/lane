@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use serde::{Deserialize, Serialize};
 
 use crate::storage::{acquire_repo_lock, encode_path_component, persist_bytes, persist_repo};
-use crate::{FilePath, LaneId, LaneTextPreview, ensure_user_lane};
+use crate::{FilePath, LaneId, LaneTextPreview};
 
 use super::error::{CliError, CliResult};
 use super::human_review::{count_label, format_command};
@@ -159,7 +159,7 @@ pub(super) fn review_run(repo_root: &Path, run_name: &str, human: bool) -> CliRe
     let lanes = run
         .attempts
         .iter()
-        .map(|attempt| attempt.lane.clone())
+        .map(|attempt| attempt.lane.as_str().to_owned())
         .collect::<Vec<_>>();
     let locked = open_locked_lane_fs(repo_root)?;
     let review_result = collect_review(&locked.fs, &locked.last_run, &lanes);
@@ -272,8 +272,7 @@ fn attempt_lanes(name: &str, attempts: usize) -> CliResult<Vec<LaneId>> {
     (1..=attempts)
         .map(|index| {
             let lane = format!("{name}-{index}");
-            ensure_user_lane(&lane).map_err(CliError::from)?;
-            Ok(lane)
+            LaneId::parse(&lane).map_err(CliError::from)
         })
         .collect()
 }
@@ -294,7 +293,11 @@ fn reserve_attempt_lanes(repo_root: &Path, name: &str, lanes: &[LaneId]) -> CliR
     }
     let existing = repo
         .lane_ids()
-        .filter(|lane| lanes.iter().any(|attempt_lane| attempt_lane == lane))
+        .filter(|lane| {
+            lanes
+                .iter()
+                .any(|attempt_lane| attempt_lane.as_str() == *lane)
+        })
         .map(str::to_owned)
         .collect::<Vec<_>>();
     if !existing.is_empty() {
@@ -503,7 +506,7 @@ fn review_attempts(run: &RunRecord, review: Option<&ReviewOutput>) -> Vec<Review
     run.attempts
         .iter()
         .map(|attempt| {
-            let lane_review = review_by_lane.get(&attempt.lane);
+            let lane_review = review_by_lane.get(attempt.lane.as_str());
             let checks = run
                 .checks
                 .iter()

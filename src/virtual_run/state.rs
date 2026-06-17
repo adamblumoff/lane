@@ -71,18 +71,18 @@ impl VirtualLaneState {
     pub(super) fn node_for_path(&self, path: &str) -> Result<Option<VirtualNode>, i32> {
         if path.is_empty() {
             return Ok(Some(VirtualNode::Directory {
-                path: String::new(),
+                path: FilePath::from_normalized(""),
             }));
         }
 
         if let Some(entry) = self.dirty_entry(path)? {
             return Ok(match entry {
                 DirtyEntry::File(bytes) => Some(VirtualNode::File {
-                    path: path.to_owned(),
+                    path: FilePath::from_normalized(path),
                     len: bytes.len() as u64,
                 }),
                 DirtyEntry::Directory => Some(VirtualNode::Directory {
-                    path: path.to_owned(),
+                    path: FilePath::from_normalized(path),
                 }),
                 DirtyEntry::Deleted => None,
             });
@@ -101,7 +101,7 @@ impl VirtualLaneState {
                 .map_err(status_from_lane_fs_error)?
             {
                 return Ok(Some(VirtualNode::File {
-                    path: path.to_owned(),
+                    path: FilePath::from_normalized(path),
                     len: bytes.len() as u64,
                 }));
             }
@@ -113,7 +113,7 @@ impl VirtualLaneState {
                 || self.dirty_has_visible_children(path)?
             {
                 return Ok(Some(VirtualNode::Directory {
-                    path: path.to_owned(),
+                    path: FilePath::from_normalized(path),
                 }));
             }
             Ok(None)
@@ -286,7 +286,11 @@ impl VirtualLaneState {
         for deleted_path in deleted {
             self.set_dirty_entry_locked(&mut dirty, deleted_path, DirtyEntry::Deleted)?;
         }
-        self.set_dirty_entry_locked(&mut dirty, path.to_owned(), DirtyEntry::Deleted)?;
+        self.set_dirty_entry_locked(
+            &mut dirty,
+            FilePath::from_normalized(path),
+            DirtyEntry::Deleted,
+        )?;
         Ok(())
     }
 
@@ -545,7 +549,7 @@ impl VirtualLaneState {
 
     fn set_dirty_entry(&self, path: &str, entry: DirtyEntry) -> Result<u64, i32> {
         let mut dirty = self.dirty.lock().map_err(|_| STATUS_ACCESS_DENIED)?;
-        self.set_dirty_entry_locked(&mut dirty, path.to_owned(), entry)
+        self.set_dirty_entry_locked(&mut dirty, FilePath::from_normalized(path), entry)
     }
 
     fn set_dirty_entry_locked(
@@ -617,7 +621,7 @@ fn canonicalize_dirty_entries(
 }
 
 fn canonicalize_visible_path(fs: &LaneFs, lane: &str, path: &str) -> Result<FilePath, i32> {
-    let mut canonical = String::new();
+    let mut canonical = FilePath::from_normalized("");
     for part in path.split('/').filter(|part| !part.is_empty()) {
         let name = fs
             .list_dir(lane, &canonical)

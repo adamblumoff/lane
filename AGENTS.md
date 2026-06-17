@@ -18,4 +18,6 @@ Test code should be on different files then src code unless there is a really go
 
 Automatic tests should copy flows of manual verification that are important enough to keep running in the future.
 
+When a change may affect Lane's core behavior, storage contract, VFS/path safety, review semantics, or orchestration flow, read and update `docs/invariants.md` alongside the code.
+
 Don't roll your own UI if you don't have to, use some other premade popular package that fits the spec.
