@@ -82,7 +82,8 @@ storage, VFS, and orchestration changes must preserve.
 - `FilePath` is a validated newtype; absolute paths, traversal, root `.lane`,
   root `.git`, NUL-containing paths, and empty file paths cannot enter normal
   core file APIs.
-- Property tests cover byte-level laws over generated inputs.
+- Property tests cover byte-level laws over generated inputs, including
+  roundtrips, stale-base rejection, and same-offset insert convergence.
 - Integration tests cover important CLI, storage, VFS, and orchestration flows.
 - Future bounded models should focus on accept, discard, rebase, and conflict
   replacement sequences for one file across two or three lanes.

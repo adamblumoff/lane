@@ -228,21 +228,6 @@ fn created_and_deleted_paths_round_trip_through_storage() {
 }
 
 #[test]
-fn repo_state_round_trips() {
-    let mut repo = seeded_repo();
-    repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
-        .unwrap();
-
-    let decoded = round_trip_repo(&repo);
-
-    assert_eq!(decoded.read(PATH, "base", BASE).unwrap(), BASE);
-    assert_eq!(
-        decoded.read(PATH, "agent-a", BASE).unwrap(),
-        b"export const mode = 'fast';\n"
-    );
-}
-
-#[test]
 fn repo_state_snapshot_uses_sha256_base_fingerprint() {
     let mut repo = seeded_repo();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
@@ -696,58 +681,6 @@ fn same_position_inserts_have_deterministic_order_without_conflict() {
 }
 
 #[test]
-fn same_position_inserts_compose_in_stable_order_regardless_of_acceptance_order() {
-    let base = b"tail\n";
-    let mut a_then_b = repo_with_same_position_inserts(base);
-    let accepted_a = a_then_b
-        .accept_all_ops("src/imports.txt", "agent-a", base)
-        .unwrap();
-    let final_a_then_b = a_then_b
-        .accept_all_ops("src/imports.txt", "agent-b", &accepted_a)
-        .unwrap();
-
-    let mut b_then_a = repo_with_same_position_inserts(base);
-    let accepted_b = b_then_a
-        .accept_all_ops("src/imports.txt", "agent-b", base)
-        .unwrap();
-    let final_b_then_a = b_then_a
-        .accept_all_ops("src/imports.txt", "agent-a", &accepted_b)
-        .unwrap();
-
-    assert_eq!(final_a_then_b, b"use a;\nuse b;\ntail\n");
-    assert_eq!(final_b_then_a, final_a_then_b);
-}
-
-#[test]
-fn three_same_position_inserts_compose_in_stable_order_across_acceptance_orders() {
-    let base = b"tail\n";
-    let acceptance_orders = [
-        ["agent-a", "agent-b", "agent-c"],
-        ["agent-c", "agent-b", "agent-a"],
-        ["agent-b", "agent-a", "agent-c"],
-    ];
-    let mut final_versions = Vec::new();
-
-    for acceptance_order in acceptance_orders {
-        let mut repo = repo_with_three_same_position_inserts(base);
-        let mut current_base = base.to_vec();
-        for lane in acceptance_order {
-            current_base = repo
-                .accept_all_ops("src/imports.txt", lane, &current_base)
-                .unwrap();
-        }
-        final_versions.push(current_base);
-    }
-
-    assert_eq!(final_versions[0], b"use a;\nuse b;\nuse c;\ntail\n");
-    assert!(
-        final_versions
-            .iter()
-            .all(|version| version == &final_versions[0])
-    );
-}
-
-#[test]
 fn same_position_inserts_into_empty_file_are_not_create_conflicts() {
     let mut repo = seeded_repo();
     let base = b"";
@@ -787,41 +720,6 @@ fn round_trip_repo(repo: &LaneRepo) -> LaneRepo {
 
 fn lane_id(lane: &str) -> LaneId {
     LaneId::parse(lane).unwrap()
-}
-
-fn repo_with_same_position_inserts(base: &[u8]) -> LaneRepo {
-    let mut repo = seeded_repo();
-    repo.write(
-        "src/imports.txt",
-        "agent-a",
-        base,
-        0..0,
-        b"use a;\n".to_vec(),
-    )
-    .unwrap();
-    repo.write(
-        "src/imports.txt",
-        "agent-b",
-        base,
-        0..0,
-        b"use b;\n".to_vec(),
-    )
-    .unwrap();
-    repo
-}
-
-fn repo_with_three_same_position_inserts(base: &[u8]) -> LaneRepo {
-    let mut repo = repo_with_same_position_inserts(base);
-    repo.create_lane("agent-c").unwrap();
-    repo.write(
-        "src/imports.txt",
-        "agent-c",
-        base,
-        0..0,
-        b"use c;\n".to_vec(),
-    )
-    .unwrap();
-    repo
 }
 
 trait RepoTestExt {
