@@ -664,7 +664,7 @@ fn cli_review_op_detail_and_accept_replacement_op_complete_conflicted_operation_
         "src/vars.txt".to_owned(),
         "agent-a:2".to_owned(),
         "--with-file".to_owned(),
-        replacement.display().to_string().to_owned(),
+        replacement.display().to_string(),
     ]));
 
     assert_eq!(accepted["accepted_op"]["op_id"], "agent-a:2");
@@ -837,7 +837,7 @@ fn cli_review_keeps_cleanup_available_when_base_changed() {
         detail["review_error"]
             .as_str()
             .unwrap()
-            .contains("BaseChanged")
+            .contains("base file changed outside lane")
     );
     assert_eq!(detail["run"]["name"], "stale");
     assert_eq!(detail["attempts"][0]["lane"], "stale-1");

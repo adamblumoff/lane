@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -658,24 +657,15 @@ fn recreate_directory(path: &Path) -> io::Result<()> {
     unreachable!("retry loop always exits via return on the final attempt")
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum LaneFsError {
+    #[error("{0}")]
     BadPath(String),
+    #[error(transparent)]
     Io(io::Error),
+    #[error(transparent)]
     Lane(LaneError),
 }
-
-impl fmt::Display for LaneFsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::BadPath(message) => write!(f, "{message}"),
-            Self::Io(error) => write!(f, "{error}"),
-            Self::Lane(error) => write!(f, "{error:?}"),
-        }
-    }
-}
-
-impl std::error::Error for LaneFsError {}
 
 fn normalize_repo_path(path: &str) -> Result<String, LaneFsError> {
     let label = normalize_repo_label(path)?;

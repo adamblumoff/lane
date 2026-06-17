@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -103,15 +102,23 @@ pub struct FileOpStorageSnapshot {
     pub inserted: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LaneError {
+    #[error("reserved lane name {0:?}")]
     ReservedLane(LaneId),
+    #[error("lane {0:?} does not exist")]
     LaneMissing(LaneId),
+    #[error("base file changed outside lane for {path}")]
     BaseChanged { path: FilePath },
+    #[error("operation is outside the current base file for {path}")]
     OperationOutOfBounds { path: FilePath },
+    #[error("operation conflicts with another selected operation for {path}")]
     OperationConflict { path: FilePath },
+    #[error("operation selection cannot be empty")]
     EmptyOperationSelection,
+    #[error("invalid operation selection for {path}: {reason}")]
     InvalidOperationSelection { path: FilePath, reason: String },
+    #[error("operation {op_id:?} does not exist for {path}")]
     OperationMissing { path: FilePath, op_id: String },
 }
 
@@ -156,22 +163,19 @@ impl LaneTextPreview {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
+    #[error("invalid operation order key")]
     InvalidOrderKey,
+    #[error("stored operations conflict")]
     OperationConflict,
+    #[error("stored operation is outside the base file")]
     OperationOutOfBounds,
+    #[error("stored overlay references missing lane {0:?}")]
     OverlayLaneMissing(LaneId),
+    #[error("stored manifest contains reserved lane name {0:?}")]
     ReservedLane(LaneId),
 }
-
-impl fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-
-impl std::error::Error for DecodeError {}
 
 pub fn ensure_user_lane(lane: &str) -> Result<(), LaneError> {
     if lane.trim().is_empty() || lane == "base" {

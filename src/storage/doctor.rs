@@ -75,7 +75,7 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
         if let Err(error) = ensure_user_lane(lane) {
             report
                 .errors
-                .push(format!("manifest lane {lane:?} is invalid: {error:?}"));
+                .push(format!("manifest lane {lane:?} is invalid: {error}"));
         }
     }
     let expected_last_run = manifest

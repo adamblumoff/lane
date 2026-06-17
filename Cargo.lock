@@ -311,6 +311,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "similar",
+ "thiserror",
  "windows-sys 0.52.0",
  "winfsp_build",
  "winfsp_wrs",

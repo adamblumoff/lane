@@ -110,7 +110,7 @@ pub(super) fn check(
     let output = CheckOutput {
         repo_root: path_label(repo_root),
         storage_path: path_label(storage_path(repo_root)),
-        run: run.name.clone(),
+        run: run.name,
         check,
     };
     print_json(&output)?;

@@ -31,7 +31,7 @@ pub(crate) fn run_virtual_lane(
     options: VirtualRunOptions,
 ) -> Result<VirtualRunOutput, VirtualRunError> {
     let total_start = Instant::now();
-    ensure_user_lane(lane).map_err(|error| VirtualRunError::message(format!("{error:?}")))?;
+    ensure_user_lane(lane).map_err(VirtualRunError::message)?;
     let (program, args) = command
         .split_first()
         .ok_or_else(|| VirtualRunError::message("missing command for lane run"))?;
