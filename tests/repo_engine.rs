@@ -228,6 +228,31 @@ fn created_and_deleted_paths_round_trip_through_storage() {
 }
 
 #[test]
+fn empty_created_path_has_acceptable_create_op_after_storage_roundtrip() {
+    let mut repo = seeded_repo();
+    let path = "src/empty-created.txt";
+    repo.replace_path(path, "agent-a", None, Some(Vec::new()))
+        .unwrap();
+
+    let decoded = round_trip_repo(&repo);
+    let ops = decoded.change_ops(path, "agent-a", None).unwrap();
+
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].kind, LaneOpKind::Create);
+    assert_eq!(ops[0].inserted_len, 0);
+
+    let mut decoded = decoded;
+    let accepted = decoded
+        .accept_ops_path(path, "agent-a", None, &[ops[0].op_id.clone()])
+        .unwrap();
+    assert_eq!(accepted, Some(Vec::new()));
+    assert_eq!(
+        decoded.overlay_paths("agent-a").unwrap(),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
 fn repo_state_snapshot_uses_sha256_base_fingerprint() {
     let mut repo = seeded_repo();
     repo.write(PATH, "agent-a", BASE, 21..25, b"fast".to_vec())
@@ -704,6 +729,79 @@ fn same_position_inserts_into_empty_file_are_not_create_conflicts() {
     assert_eq!(
         repo.read("src/empty.txt", "agent-b", &accepted).unwrap(),
         b"ab"
+    );
+}
+
+#[test]
+fn accepting_identical_insert_removes_other_lane_overlay_instead_of_duplicating() {
+    let mut repo = seeded_repo();
+    let base = b"tail\n";
+    repo.write(
+        "src/imports.txt",
+        "agent-a",
+        base,
+        0..0,
+        b"use same;\n".to_vec(),
+    )
+    .unwrap();
+    repo.write(
+        "src/imports.txt",
+        "agent-b",
+        base,
+        0..0,
+        b"use same;\n".to_vec(),
+    )
+    .unwrap();
+
+    let accepted = repo
+        .accept_all_ops("src/imports.txt", "agent-a", base)
+        .unwrap();
+
+    assert_eq!(accepted, b"use same;\ntail\n");
+    assert_eq!(
+        repo.read("src/imports.txt", "agent-b", &accepted).unwrap(),
+        b"use same;\ntail\n"
+    );
+    assert!(
+        repo.change_ops("src/imports.txt", "agent-b", Some(&accepted))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn accepting_identical_whole_file_replacement_removes_other_lane_overlay() {
+    let mut repo = seeded_repo();
+    let base = b"mode=old\n";
+    let replacement = b"mode=new\n";
+    repo.replace_path(
+        "src/mode.txt",
+        "agent-a",
+        Some(base),
+        Some(replacement.to_vec()),
+    )
+    .unwrap();
+    repo.replace_path(
+        "src/mode.txt",
+        "agent-b",
+        Some(base),
+        Some(replacement.to_vec()),
+    )
+    .unwrap();
+
+    let accepted = repo
+        .accept_all_ops("src/mode.txt", "agent-a", base)
+        .unwrap();
+
+    assert_eq!(accepted, replacement);
+    assert_eq!(
+        repo.read("src/mode.txt", "agent-b", &accepted).unwrap(),
+        replacement
+    );
+    assert!(
+        repo.change_ops("src/mode.txt", "agent-b", Some(&accepted))
+            .unwrap()
+            .is_empty()
     );
 }
 

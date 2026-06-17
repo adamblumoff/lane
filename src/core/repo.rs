@@ -873,15 +873,21 @@ impl LaneFile {
 
 impl LaneFileStorageSnapshot {
     fn into_lane_file(self) -> Result<LaneFile, DecodeError> {
+        let base = match self.base {
+            BaseStorageSnapshot::Present(fingerprint) => BaseState::Present(fingerprint),
+            BaseStorageSnapshot::Missing => BaseState::Missing,
+        };
+        let base_missing = matches!(base, BaseState::Missing);
         let file = LaneFile {
-            base: match self.base {
-                BaseStorageSnapshot::Present(fingerprint) => BaseState::Present(fingerprint),
-                BaseStorageSnapshot::Missing => BaseState::Missing,
-            },
+            base,
             lanes: self
                 .lanes
                 .into_iter()
-                .map(|(lane, entry)| entry.into_lane_entry().map(|entry| (lane, entry)))
+                .map(|(lane, entry)| {
+                    entry
+                        .into_lane_entry(base_missing)
+                        .map(|entry| (lane, entry))
+                })
                 .collect::<Result<_, _>>()?,
         };
         file.validate()?;
@@ -901,11 +907,12 @@ impl LaneEntry {
 }
 
 impl LaneEntryStorageSnapshot {
-    fn into_lane_entry(self) -> Result<LaneEntry, DecodeError> {
+    fn into_lane_entry(self, base_missing: bool) -> Result<LaneEntry, DecodeError> {
         match self {
             LaneEntryStorageSnapshot::Present(ops) => Ok(LaneEntry::Present(LaneView {
                 ops: normalize_ops_checked(
                     ops.into_iter().map(FileOp::from_storage_snapshot).collect(),
+                    base_missing,
                 )?,
             })),
             LaneEntryStorageSnapshot::Deleted => Ok(LaneEntry::Deleted),
@@ -937,6 +944,9 @@ fn rebased_entry_for_present_ops(
     let Some(accepted_base) = accepted_base else {
         return Ok(entry_for_content(accepted_base, fallback_bytes));
     };
+    if fallback_bytes.as_deref() == Some(accepted_base) {
+        return Ok(None);
+    }
     if old_base.is_none()
         || retained.ops.is_empty()
         || entries_conflict(accepted.ops, retained.ops, false)

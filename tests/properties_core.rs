@@ -359,6 +359,9 @@ fn accept_all_ops(repo: &mut LaneRepo, path: &str, lane: &str, base: &[u8]) -> V
         .into_iter()
         .map(|op| op.op_id)
         .collect::<Vec<_>>();
+    if op_ids.is_empty() {
+        return base.to_vec();
+    }
     repo.accept_ops_path(path, lane, Some(base), &op_ids)
         .unwrap()
         .unwrap()
