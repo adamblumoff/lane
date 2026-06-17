@@ -64,26 +64,32 @@ fn snapshot_from_manifest(
     let mut files = BTreeMap::new();
     for stored_file in manifest.files {
         let path = FilePath::parse(&stored_file.path).map_err(invalid_manifest_path)?;
-        files.insert(
-            path,
-            LaneFileStorageSnapshot {
-                base: match stored_file.base {
-                    StoredBase::Present { fingerprint } => {
-                        BaseStorageSnapshot::Present(parse_fingerprint(&fingerprint)?)
-                    }
-                    StoredBase::Missing => BaseStorageSnapshot::Missing,
-                },
-                lanes: stored_file
-                    .lanes
-                    .into_iter()
-                    .map(|entry| {
-                        let lane = LaneId::parse(&entry.lane).map_err(invalid_manifest_lane)?;
-                        stored_entry_to_snapshot(storage_root, entry)
-                            .map(|entry_state| (lane, entry_state))
-                    })
-                    .collect::<io::Result<_>>()?,
+        let snapshot = LaneFileStorageSnapshot {
+            base: match stored_file.base {
+                StoredBase::Present { fingerprint } => {
+                    BaseStorageSnapshot::Present(parse_fingerprint(&fingerprint)?)
+                }
+                StoredBase::Missing => BaseStorageSnapshot::Missing,
             },
-        );
+            lanes: stored_file
+                .lanes
+                .into_iter()
+                .map(|entry| {
+                    let lane = LaneId::parse(&entry.lane).map_err(invalid_manifest_lane)?;
+                    stored_entry_to_snapshot(storage_root, entry)
+                        .map(|entry_state| (lane, entry_state))
+                })
+                .collect::<io::Result<_>>()?,
+        };
+        if files.insert(path.clone(), snapshot).is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "manifest contains duplicate file path after normalization: {:?}",
+                    path.as_str()
+                ),
+            ));
+        }
     }
 
     Ok(LaneRepoStorageSnapshot { lanes, files })

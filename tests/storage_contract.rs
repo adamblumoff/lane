@@ -300,6 +300,36 @@ fn reserved_manifest_file_path_is_rejected_and_reported_by_doctor() {
 }
 
 #[test]
+fn duplicate_normalized_manifest_file_paths_are_rejected_and_reported_by_doctor() {
+    let temp = TempStorage::new();
+    let repo = repo_with_agent_file();
+    persist_repo(temp.path(), &repo).unwrap();
+    let path = temp.path().join("repo.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let duplicate = manifest["files"][0].clone();
+    manifest["files"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "path": "src/./new.ts",
+            "base": duplicate["base"].clone(),
+            "lanes": duplicate["lanes"].clone(),
+        }));
+    fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+    let load_error = load_repo(temp.path()).unwrap_err();
+    assert_eq!(load_error.kind(), io::ErrorKind::InvalidData);
+    let report = doctor_storage(temp.path()).unwrap();
+    assert!(!report.is_healthy());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("duplicate file path after normalization"))
+    );
+}
+
+#[test]
 fn lock_contention_includes_windows_permission_denied_errors() {
     assert!(is_lock_contention(&io::Error::new(
         io::ErrorKind::AlreadyExists,

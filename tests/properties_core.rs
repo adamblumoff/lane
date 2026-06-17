@@ -188,7 +188,15 @@ fn lane_id_parse_rejects_reserved_lane_names() {
 fn lane_id_parse_rejects_empty_lane_names() {
     let error = LaneId::parse("  ").unwrap_err();
 
-    assert_eq!(error, LaneError::ReservedLane("  ".to_owned()));
+    assert_eq!(error, LaneError::InvalidLane("  ".to_owned()));
+}
+
+#[test]
+fn lane_id_parse_rejects_leading_or_trailing_whitespace() {
+    for lane in [" agent-a", "agent-a ", "\tagent-a"] {
+        let error = LaneId::parse(lane).unwrap_err();
+        assert_eq!(error, LaneError::InvalidLane(lane.to_owned()));
+    }
 }
 
 #[test]

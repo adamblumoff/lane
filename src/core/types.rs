@@ -27,7 +27,11 @@ impl FilePath {
 
     pub(crate) fn from_normalized(raw: impl Into<String>) -> Self {
         let raw = raw.into();
-        debug_assert_eq!(Self::normalize_label(&raw).as_deref(), Ok(raw.as_str()));
+        assert_eq!(
+            Self::normalize_label(&raw).as_deref(),
+            Ok(raw.as_str()),
+            "FilePath::from_normalized requires a normalized repo-relative label"
+        );
         Self(raw)
     }
 
@@ -143,10 +147,13 @@ pub struct LaneId(String);
 
 impl LaneId {
     pub fn parse(raw: &str) -> Result<Self, LaneError> {
-        if raw.trim().is_empty() || raw == "base" {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed != raw {
+            Err(LaneError::InvalidLane(raw.to_owned()))
+        } else if raw == "base" {
             Err(LaneError::ReservedLane(raw.to_owned()))
         } else {
-            Ok(Self(raw.to_owned()))
+            Ok(Self(trimmed.to_owned()))
         }
     }
 
@@ -328,6 +335,8 @@ pub struct FileOpStorageSnapshot {
 pub enum LaneError {
     #[error("invalid repo path: {0}")]
     InvalidPath(String),
+    #[error("invalid lane name {0:?}")]
+    InvalidLane(String),
     #[error("reserved lane name {0:?}")]
     ReservedLane(String),
     #[error("lane {0:?} does not exist")]

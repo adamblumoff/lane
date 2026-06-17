@@ -23,6 +23,7 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
 
 pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorInspection> {
     let mut report = StorageDoctorReport::default();
+    let mut normalized_paths = BTreeSet::new();
 
     let manifest_path = manifest_path(storage_root);
     let bytes = match fs::read(&manifest_path) {
@@ -86,11 +87,21 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
     let mut referenced_blobs = BTreeSet::new();
 
     for file in &manifest.files {
-        if let Err(error) = FilePath::parse(&file.path) {
-            report.errors.push(format!(
-                "manifest file path {:?} is invalid: {error}",
-                file.path
-            ));
+        match FilePath::parse(&file.path) {
+            Ok(path) => {
+                if !normalized_paths.insert(path.clone()) {
+                    report.errors.push(format!(
+                        "manifest contains duplicate file path after normalization: {:?}",
+                        path.as_str()
+                    ));
+                }
+            }
+            Err(error) => {
+                report.errors.push(format!(
+                    "manifest file path {:?} is invalid: {error}",
+                    file.path
+                ));
+            }
         }
         if let StoredBase::Present { fingerprint } = &file.base
             && parse_fingerprint(fingerprint).is_err()
