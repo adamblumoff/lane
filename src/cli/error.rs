@@ -11,7 +11,7 @@ pub struct CliError {
 }
 
 impl CliError {
-    pub(super) fn message(message: impl ToString) -> Self {
+    pub(super) fn message(message: impl std::fmt::Display) -> Self {
         Self {
             message: message.to_string(),
         }
