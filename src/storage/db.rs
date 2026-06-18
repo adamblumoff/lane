@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use rusqlite::ffi::ErrorCode;
 use rusqlite::{Connection, OpenFlags, params};
 
 use crate::{
@@ -10,6 +11,7 @@ use crate::{
     LaneEntryStorageSnapshot, LaneFileStorageSnapshot, LaneId, LaneRepoStorageSnapshot,
 };
 
+use super::atomic::{replace_file_with_retry, temp_path_for};
 use super::blobs::{hex, persist_blob, read_blob, sha256_hex};
 use super::serde_util::invalid_storage;
 
@@ -33,22 +35,34 @@ pub(super) fn persist_db_snapshot(
 ) -> io::Result<()> {
     fs::create_dir_all(storage_root)?;
     let db_path = super::paths::db_path(storage_root);
-    let mut connection = Connection::open(&db_path).map_err(sqlite_error)?;
-    initialize_schema(&connection)?;
+    let temp_path = temp_path_for(&db_path)?;
+    remove_sqlite_temp_files(&temp_path)?;
 
+    let result = (|| {
+        write_snapshot_database(storage_root, &temp_path, snapshot)?;
+        replace_file_with_retry(&temp_path, &db_path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("replace database {}: {error}", db_path.display()),
+            )
+        })
+    })();
+
+    if let Err(error) = result {
+        let _ = remove_sqlite_temp_files(&temp_path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn write_snapshot_database(
+    storage_root: &Path,
+    db_path: &Path,
+    snapshot: &LaneRepoStorageSnapshot,
+) -> io::Result<()> {
+    let mut connection = Connection::open(db_path).map_err(sqlite_error)?;
+    initialize_schema(&connection)?;
     let transaction = connection.transaction().map_err(sqlite_error)?;
-    transaction
-        .execute_batch(
-            "
-            DELETE FROM ops;
-            DELETE FROM lane_entries;
-            DELETE FROM files;
-            DELETE FROM lanes;
-            DELETE FROM blobs;
-            DELETE FROM store_meta;
-            ",
-        )
-        .map_err(sqlite_error)?;
     transaction
         .execute(
             "INSERT INTO store_meta (key, value) VALUES ('schema_version', ?1)",
@@ -92,14 +106,6 @@ pub(super) fn persist_db_snapshot(
                 ",
             )
             .map_err(sqlite_error)?;
-        let mut insert_blob = transaction
-            .prepare(
-                "
-                INSERT OR IGNORE INTO blobs (reference, len)
-                VALUES (?1, ?2)
-                ",
-            )
-            .map_err(sqlite_error)?;
 
         for (path, file) in &snapshot.files {
             let (base_state, base_fingerprint) = stored_base(&file.base);
@@ -124,12 +130,6 @@ pub(super) fn persist_db_snapshot(
                     if persisted_blobs.insert(inserted_blob.clone()) {
                         persist_blob(storage_root, &inserted_blob, &op.inserted)?;
                     }
-                    insert_blob
-                        .execute(params![
-                            inserted_blob.as_str(),
-                            op.inserted.len().to_string()
-                        ])
-                        .map_err(sqlite_error)?;
                     insert_op
                         .execute(params![
                             path.as_str(),
@@ -148,7 +148,33 @@ pub(super) fn persist_db_snapshot(
         }
     }
 
-    transaction.commit().map_err(sqlite_error)
+    transaction.commit().map_err(sqlite_error)?;
+    connection.close().map_err(|(_, error)| sqlite_error(error))
+}
+
+fn remove_sqlite_temp_files(db_path: &Path) -> io::Result<()> {
+    for path in [
+        db_path.to_path_buf(),
+        sqlite_sidecar_path(db_path, "-journal"),
+        sqlite_sidecar_path(db_path, "-wal"),
+        sqlite_sidecar_path(db_path, "-shm"),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut file_name = db_path
+        .file_name()
+        .expect("database path has a file name")
+        .to_os_string();
+    file_name.push(suffix);
+    db_path.with_file_name(file_name)
 }
 
 pub(super) fn load_stored_repo(storage_root: &Path) -> io::Result<Option<StoredRepo>> {
@@ -182,7 +208,6 @@ fn initialize_schema(connection: &Connection) -> io::Result<()> {
     connection
         .execute_batch(
             "
-            PRAGMA journal_mode = WAL;
             PRAGMA foreign_keys = ON;
 
             CREATE TABLE IF NOT EXISTS store_meta (
@@ -221,11 +246,6 @@ fn initialize_schema(connection: &Connection) -> io::Result<()> {
                 inserted_len TEXT NOT NULL,
                 PRIMARY KEY (path, lane, ordinal),
                 FOREIGN KEY (path, lane) REFERENCES lane_entries(path, lane) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS blobs (
-                reference TEXT PRIMARY KEY NOT NULL,
-                len TEXT NOT NULL
             );
             ",
         )
@@ -285,7 +305,7 @@ fn read_files(connection: &Connection) -> io::Result<BTreeMap<FilePath, StoredFi
         let path = FilePath::parse(&raw_path).map_err(invalid_path)?;
         let file = StoredFile {
             base: parse_base(&base_state, base_fingerprint)?,
-            lanes: read_entries(connection, &raw_path)?,
+            lanes: BTreeMap::new(),
         };
         if files.insert(path.clone(), file).is_some() {
             return Err(io::Error::new(
@@ -298,44 +318,35 @@ fn read_files(connection: &Connection) -> io::Result<BTreeMap<FilePath, StoredFi
         }
     }
 
+    read_lane_entries(connection, &mut files)?;
+    read_ops(connection, &mut files)?;
     Ok(files)
 }
 
-fn read_entries(
+fn read_lane_entries(
     connection: &Connection,
-    raw_path: &str,
-) -> io::Result<BTreeMap<LaneId, StoredLaneEntry>> {
-    let mut entries = BTreeMap::new();
+    files: &mut BTreeMap<FilePath, StoredFile>,
+) -> io::Result<()> {
     let mut statement = connection
-        .prepare("SELECT lane, state FROM lane_entries WHERE path = ?1 ORDER BY lane")
+        .prepare("SELECT path, lane, state FROM lane_entries ORDER BY path, lane")
         .map_err(sqlite_error)?;
     let rows = statement
-        .query_map([raw_path], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })
         .map_err(sqlite_error)?;
 
     for row in rows {
-        let (raw_lane, state) = row.map_err(sqlite_error)?;
+        let (raw_path, raw_lane, state) = row.map_err(sqlite_error)?;
+        let path = FilePath::parse(&raw_path).map_err(invalid_path)?;
         let lane = LaneId::parse(&raw_lane).map_err(invalid_lane)?;
         let entry = match state.as_str() {
-            ENTRY_PRESENT => StoredLaneEntry::Present(read_ops(connection, raw_path, &raw_lane)?),
-            ENTRY_DELETED => {
-                let op_count: u64 = connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM ops WHERE path = ?1 AND lane = ?2",
-                        params![raw_path, raw_lane],
-                        |row| row.get(0),
-                    )
-                    .map_err(sqlite_error)?;
-                if op_count != 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("deleted database entry {raw_path}:{raw_lane} has stored ops"),
-                    ));
-                }
-                StoredLaneEntry::Deleted
-            }
+            ENTRY_PRESENT => StoredLaneEntry::Present(Vec::new()),
+            ENTRY_DELETED => StoredLaneEntry::Deleted,
             state => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -343,25 +354,39 @@ fn read_entries(
                 ));
             }
         };
-        entries.insert(lane, entry);
+        let file = files.get_mut(&path).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("database entry {raw_path}:{raw_lane} references missing file"),
+            )
+        })?;
+        if file.lanes.insert(lane.clone(), entry).is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "database file {} contains duplicate lane entry after normalization: {}",
+                    path.as_str(),
+                    lane.as_str()
+                ),
+            ));
+        }
     }
 
-    Ok(entries)
+    Ok(())
 }
 
-fn read_ops(connection: &Connection, raw_path: &str, raw_lane: &str) -> io::Result<Vec<StoredOp>> {
+fn read_ops(connection: &Connection, files: &mut BTreeMap<FilePath, StoredFile>) -> io::Result<()> {
     let mut statement = connection
         .prepare(
             "
-            SELECT id, base_start, base_len, order_key, inserted_blob, inserted_len
+            SELECT path, lane, id, base_start, base_len, order_key, inserted_blob, inserted_len
             FROM ops
-            WHERE path = ?1 AND lane = ?2
-            ORDER BY ordinal
+            ORDER BY path, lane, ordinal
             ",
         )
         .map_err(sqlite_error)?;
     let rows = statement
-        .query_map(params![raw_path, raw_lane], |row| {
+        .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -369,24 +394,54 @@ fn read_ops(connection: &Connection, raw_path: &str, raw_lane: &str) -> io::Resu
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
             ))
         })
         .map_err(sqlite_error)?;
 
-    let mut ops = Vec::new();
     for row in rows {
-        let (id, base_start, base_len, order_key, inserted_blob, inserted_len) =
+        let (raw_path, raw_lane, id, base_start, base_len, order_key, inserted_blob, inserted_len) =
             row.map_err(sqlite_error)?;
-        ops.push(StoredOp {
+        let path = FilePath::parse(&raw_path).map_err(invalid_path)?;
+        let lane = LaneId::parse(&raw_lane).map_err(invalid_lane)?;
+        let op = StoredOp {
             id: parse_u64(&id, "id")?,
             base_start: parse_u64(&base_start, "base_start")?,
             base_len: parse_u64(&base_len, "base_len")?,
             order_key,
             inserted_blob,
             inserted_len: parse_u64(&inserted_len, "inserted_len")?,
-        });
+        };
+        let file = files.get_mut(&path).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "database op {raw_path}:{raw_lane}:{} references missing file",
+                    op.id
+                ),
+            )
+        })?;
+        let entry = file.lanes.get_mut(&lane).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "database op {raw_path}:{raw_lane}:{} references missing entry",
+                    op.id
+                ),
+            )
+        })?;
+        match entry {
+            StoredLaneEntry::Present(ops) => ops.push(op),
+            StoredLaneEntry::Deleted => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("deleted database entry {raw_path}:{raw_lane} has stored ops"),
+                ));
+            }
+        }
     }
-    Ok(ops)
+    Ok(())
 }
 
 fn stored_repo_to_snapshot(
@@ -547,7 +602,63 @@ fn invalid_ordinal(error: impl std::fmt::Display) -> io::Error {
 }
 
 fn sqlite_error(error: rusqlite::Error) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error)
+    let kind = match &error {
+        rusqlite::Error::SqliteFailure(error, _) => sqlite_error_kind(error.code),
+        rusqlite::Error::InvalidPath(_) => io::ErrorKind::InvalidInput,
+        _ => io::ErrorKind::InvalidData,
+    };
+    io::Error::new(kind, error)
+}
+
+fn sqlite_error_kind(code: ErrorCode) -> io::ErrorKind {
+    match code {
+        ErrorCode::PermissionDenied
+        | ErrorCode::ReadOnly
+        | ErrorCode::AuthorizationForStatementDenied => io::ErrorKind::PermissionDenied,
+        ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked => io::ErrorKind::WouldBlock,
+        ErrorCode::SystemIoFailure
+        | ErrorCode::CannotOpen
+        | ErrorCode::FileLockingProtocolFailed => io::ErrorKind::Other,
+        ErrorCode::DiskFull => io::ErrorKind::StorageFull,
+        ErrorCode::OperationAborted | ErrorCode::OperationInterrupted => io::ErrorKind::Interrupted,
+        ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase => io::ErrorKind::InvalidData,
+        _ => io::ErrorKind::InvalidData,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_error_maps_storage_failures_to_specific_io_kinds() {
+        assert_eq!(
+            sqlite_error(sqlite_failure(ErrorCode::DiskFull)).kind(),
+            io::ErrorKind::StorageFull
+        );
+        assert_eq!(
+            sqlite_error(sqlite_failure(ErrorCode::ReadOnly)).kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            sqlite_error(sqlite_failure(ErrorCode::DatabaseBusy)).kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            sqlite_error(sqlite_failure(ErrorCode::DatabaseCorrupt)).kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    fn sqlite_failure(code: ErrorCode) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code,
+                extended_code: 0,
+            },
+            None,
+        )
+    }
 }
 
 #[derive(Clone, Debug)]

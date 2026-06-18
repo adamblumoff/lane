@@ -40,7 +40,7 @@ pub(crate) fn persist_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn temp_path_for(path: &Path) -> io::Result<PathBuf> {
+pub(super) fn temp_path_for(path: &Path) -> io::Result<PathBuf> {
     let file_name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing file name"))?;
@@ -54,7 +54,7 @@ fn temp_path_for(path: &Path) -> io::Result<PathBuf> {
     Ok(path.with_file_name(temp_name))
 }
 
-fn replace_file_with_retry(from: &Path, to: &Path) -> io::Result<()> {
+pub(super) fn replace_file_with_retry(from: &Path, to: &Path) -> io::Result<()> {
     for attempt in 1..=REPLACE_RETRY_ATTEMPTS {
         match replace_file(from, to) {
             Ok(()) => return Ok(()),

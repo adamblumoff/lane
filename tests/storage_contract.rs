@@ -78,6 +78,23 @@ fn storage_v3_deduplicates_repeated_inserted_blobs() {
 }
 
 #[test]
+fn failed_first_persist_does_not_publish_lane_database() {
+    let temp = TempStorage::new();
+    let repo = repo_with_agent_file();
+    fs::write(temp.path().join("blobs"), b"not a directory").unwrap();
+
+    let error = persist_repo(temp.path(), &repo).unwrap_err();
+
+    assert!(matches!(
+        error.kind(),
+        io::ErrorKind::AlreadyExists | io::ErrorKind::NotADirectory
+    ));
+    assert!(!temp.path().join("lane.sqlite").exists());
+    assert!(!storage_root_contains_lane_database_temp(temp.path()));
+    assert!(load_repo(temp.path()).unwrap().is_none());
+}
+
+#[test]
 fn corrupt_last_run_is_advisory_but_doctor_reports_it() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
@@ -450,6 +467,16 @@ fn open_storage_db(storage_root: &Path) -> Connection {
         .execute_batch("PRAGMA foreign_keys = OFF;")
         .unwrap();
     connection
+}
+
+fn storage_root_contains_lane_database_temp(storage_root: &Path) -> bool {
+    fs::read_dir(storage_root).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("lane.sqlite")
+    })
 }
 
 struct TempStorage {
