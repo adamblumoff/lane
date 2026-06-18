@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn path_normalization_rejects_repo_metadata_case_insensitively() {
         assert!(matches!(
-            normalize_repo_path(".LANE/repo.json"),
+            normalize_repo_path(".LANE/lane.sqlite"),
             Err(LaneFsError::BadPath(message)) if message == "cannot project lane state files"
         ));
         assert!(matches!(

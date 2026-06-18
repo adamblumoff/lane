@@ -3,7 +3,7 @@ pub use lane::{
     LaneEntryStorageSnapshot, LaneFileStorageSnapshot, LaneId, LaneRepo, LaneRepoStorageSnapshot,
     LaneRunState, ensure_user_lane,
 };
-use serde_json::Value;
+use rusqlite::Connection;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -24,7 +24,7 @@ mod storage;
 static NEXT_UNIQUE_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 #[test]
-fn storage_v2_persists_manifest_blobs_and_last_run() {
+fn storage_v3_persists_database_blobs_and_last_run() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
 
@@ -36,7 +36,7 @@ fn storage_v2_persists_manifest_blobs_and_last_run() {
     )
     .unwrap();
 
-    assert!(temp.path().join("repo.json").exists());
+    assert!(temp.path().join("lane.sqlite").exists());
     assert_eq!(doctor_storage(temp.path()).unwrap().blobs_present, 1);
     assert!(temp.path().join("last_run/agent-a.json").exists());
 
@@ -54,7 +54,7 @@ fn storage_v2_persists_manifest_blobs_and_last_run() {
 }
 
 #[test]
-fn storage_v2_deduplicates_repeated_inserted_blobs() {
+fn storage_v3_deduplicates_repeated_inserted_blobs() {
     let temp = TempStorage::new();
     let mut repo = LaneRepo::new();
     repo.create_lane("agent-a").unwrap();
@@ -126,7 +126,7 @@ fn orphan_last_run_is_warning_not_error() {
         report
             .warnings
             .iter()
-            .any(|warning| warning.contains("does not belong to a manifest lane"))
+            .any(|warning| warning.contains("does not belong to a database lane"))
     );
 }
 
@@ -177,7 +177,7 @@ fn unreferenced_blob_is_reported_as_warning_not_error() {
         report
             .warnings
             .iter()
-            .any(|warning| warning.contains("not referenced by repo.json"))
+            .any(|warning| warning.contains("not referenced by lane.sqlite"))
     );
 }
 
@@ -205,7 +205,7 @@ fn storage_cleanup_removes_unreferenced_blobs_without_touching_referenced_blobs(
 }
 
 #[test]
-fn storage_cleanup_rejects_missing_manifest_without_deleting_blobs() {
+fn storage_cleanup_rejects_missing_store_without_deleting_blobs() {
     let temp = TempStorage::new();
     let stale_blob = stale_blob_path(temp.path());
     fs::write(&stale_blob, b"stale").unwrap();
@@ -213,19 +213,19 @@ fn storage_cleanup_rejects_missing_manifest_without_deleting_blobs() {
     let error = cleanup_storage(temp.path()).unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("without repo.json"));
+    assert!(error.to_string().contains("without lane.sqlite"));
     assert!(stale_blob.exists());
 }
 
 #[test]
-fn storage_cleanup_rejects_corrupt_manifest_without_deleting_blobs() {
+fn storage_cleanup_rejects_corrupt_store_without_deleting_blobs() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
     persist_repo(temp.path(), &repo).unwrap();
     let referenced_blob = first_blob_path(temp.path());
     let stale_blob = stale_blob_path(temp.path());
     fs::write(&stale_blob, b"stale").unwrap();
-    fs::write(temp.path().join("repo.json"), b"not json").unwrap();
+    fs::write(temp.path().join("lane.sqlite"), b"not sqlite").unwrap();
 
     let error = cleanup_storage(temp.path()).unwrap_err();
 
@@ -256,14 +256,14 @@ fn storage_cleanup_rejects_invalid_blob_file_without_deleting_blobs() {
 }
 
 #[test]
-fn reserved_manifest_lane_is_reported_by_doctor() {
+fn reserved_database_lane_is_reported_by_doctor() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
     persist_repo(temp.path(), &repo).unwrap();
-    let path = temp.path().join("repo.json");
-    let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    manifest["lanes"] = serde_json::json!(["base", "agent-a"]);
-    fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let connection = open_storage_db(temp.path());
+    connection
+        .execute("INSERT INTO lanes (name) VALUES ('base')", [])
+        .unwrap();
 
     let load_error = load_repo(temp.path()).unwrap_err();
     assert_eq!(load_error.kind(), io::ErrorKind::InvalidData);
@@ -273,19 +273,22 @@ fn reserved_manifest_lane_is_reported_by_doctor() {
         report
             .errors
             .iter()
-            .any(|error| error.contains("manifest lane \"base\" is invalid"))
+            .any(|error| error.contains("reserved lane name \"base\""))
     );
 }
 
 #[test]
-fn reserved_manifest_file_path_is_rejected_and_reported_by_doctor() {
+fn reserved_database_file_path_is_rejected_and_reported_by_doctor() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
     persist_repo(temp.path(), &repo).unwrap();
-    let path = temp.path().join("repo.json");
-    let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    manifest["files"][0]["path"] = serde_json::json!(".lane/repo.json");
-    fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let connection = open_storage_db(temp.path());
+    connection
+        .execute(
+            "UPDATE files SET path = '.lane/lane.sqlite' WHERE path = 'src/new.ts'",
+            [],
+        )
+        .unwrap();
 
     let load_error = load_repo(temp.path()).unwrap_err();
     assert_eq!(load_error.kind(), io::ErrorKind::InvalidData);
@@ -295,27 +298,51 @@ fn reserved_manifest_file_path_is_rejected_and_reported_by_doctor() {
         report
             .errors
             .iter()
-            .any(|error| error.contains("manifest file path \".lane/repo.json\" is invalid"))
+            .any(|error| error.contains("cannot project lane state files"))
     );
 }
 
 #[test]
-fn duplicate_normalized_manifest_file_paths_are_rejected_and_reported_by_doctor() {
+fn duplicate_normalized_database_file_paths_are_rejected_and_reported_by_doctor() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
     persist_repo(temp.path(), &repo).unwrap();
-    let path = temp.path().join("repo.json");
-    let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    let duplicate = manifest["files"][0].clone();
-    manifest["files"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({
-            "path": "src/./new.ts",
-            "base": duplicate["base"].clone(),
-            "lanes": duplicate["lanes"].clone(),
-        }));
-    fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let connection = open_storage_db(temp.path());
+    connection
+        .execute(
+            "
+            INSERT INTO files (path, base_state, base_fingerprint)
+            SELECT 'src/./new.ts', base_state, base_fingerprint
+            FROM files
+            WHERE path = 'src/new.ts'
+            ",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO lane_entries (path, lane, state)
+            SELECT 'src/./new.ts', lane, state
+            FROM lane_entries
+            WHERE path = 'src/new.ts'
+            ",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO ops
+                (path, lane, ordinal, id, base_start, base_len, order_key, inserted_blob, inserted_len)
+            SELECT
+                'src/./new.ts', lane, ordinal, id, base_start, base_len, order_key, inserted_blob, inserted_len
+            FROM ops
+            WHERE path = 'src/new.ts'
+            ",
+            [],
+        )
+        .unwrap();
 
     let load_error = load_repo(temp.path()).unwrap_err();
     assert_eq!(load_error.kind(), io::ErrorKind::InvalidData);
@@ -326,6 +353,30 @@ fn duplicate_normalized_manifest_file_paths_are_rejected_and_reported_by_doctor(
             .errors
             .iter()
             .any(|error| error.contains("duplicate file path after normalization"))
+    );
+}
+
+#[test]
+fn mismatched_blob_length_is_reported_by_doctor() {
+    let temp = TempStorage::new();
+    let repo = repo_with_agent_file();
+    persist_repo(temp.path(), &repo).unwrap();
+    let connection = open_storage_db(temp.path());
+    connection
+        .execute(
+            "UPDATE ops SET inserted_len = '999' WHERE path = 'src/new.ts'",
+            [],
+        )
+        .unwrap();
+
+    let report = doctor_storage(temp.path()).unwrap();
+
+    assert!(!report.is_healthy());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("length is 4; expected 999"))
     );
 }
 
@@ -391,6 +442,14 @@ fn stale_blob_path(storage_root: &Path) -> PathBuf {
         .join("blobs/sha256/0000000000000000000000000000000000000000000000000000000000000000");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     path
+}
+
+fn open_storage_db(storage_root: &Path) -> Connection {
+    let connection = Connection::open(storage_root.join("lane.sqlite")).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .unwrap();
+    connection
 }
 
 struct TempStorage {

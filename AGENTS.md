@@ -2,6 +2,8 @@ THIS APPLICATION IS MADE FOR AGENTS, NOT HUMANS. THE ONLY THING THE HUMAN IS DOI
 
 The goal of this application is to allow agents to work on the same file at the same time in different "lanes" asynchronously without making multiple copies of the same file.
 
+I don't care that this product is Windows only, it's still early and i need it to work on my machine for dogfooding, so please stop bringing this up it's not relevant to anything and we will make it multi-os in the future. 
+
 This is intended to replace the git worktree flow that is very annoying and cumbersome. 
 
 This is intended to go lower level into the "file" level. 

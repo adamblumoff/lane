@@ -61,10 +61,10 @@ pub(super) fn record_blob_inventory(
     if unreferenced == 1 {
         report
             .warnings
-            .push("1 blob is not referenced by repo.json".to_owned());
+            .push("1 blob is not referenced by lane.sqlite".to_owned());
     } else if unreferenced > 1 {
         report.warnings.push(format!(
-            "{unreferenced} blobs are not referenced by repo.json"
+            "{unreferenced} blobs are not referenced by lane.sqlite"
         ));
     }
 }

@@ -1,20 +1,18 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
 
 use serde::Serialize;
 
-use crate::{FilePath, LaneRunState, ensure_user_lane};
+use crate::{LaneRunState, ensure_user_lane};
 
 use super::blobs::{
     BlobInventory, blob_inventory, read_blob, record_blob_inventory, sha256_hex,
     validate_blob_reference,
 };
-use super::manifest::{
-    STORE_VERSION, StoredBase, StoredLaneEntryState, StoredRepoManifest, parse_fingerprint,
-};
-use super::paths::{last_run_file_name, manifest_path};
+use super::db::{self, StoredLaneEntry};
+use super::paths::{db_path, last_run_file_name};
 use super::serde_util::json_error;
 
 pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorReport> {
@@ -23,12 +21,10 @@ pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorRep
 
 pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorInspection> {
     let mut report = StorageDoctorReport::default();
-    let mut normalized_paths = BTreeSet::new();
 
-    let manifest_path = manifest_path(storage_root);
-    let bytes = match fs::read(&manifest_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let store = match db::load_stored_repo(storage_root) {
+        Ok(Some(store)) => store,
+        Ok(None) => {
             let blob_inventory = blob_inventory(storage_root)?;
             let referenced_blobs = BTreeSet::new();
             record_blob_inventory(&blob_inventory, &referenced_blobs, &mut report);
@@ -39,17 +35,9 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
                 blob_inventory,
             });
         }
-        Err(error) => return Err(error),
-    };
-
-    report.manifest_present = true;
-    let manifest = match serde_json::from_slice::<StoredRepoManifest>(&bytes) {
-        Ok(manifest) => manifest,
         Err(error) => {
-            report.errors.push(format!(
-                "manifest {} is invalid JSON: {error}",
-                manifest_path.display()
-            ));
+            report.store_present = db_path(storage_root).exists();
+            report.errors.push(error.to_string());
             let blob_inventory = blob_inventory(storage_root)?;
             let referenced_blobs = BTreeSet::new();
             record_blob_inventory(&blob_inventory, &referenced_blobs, &mut report);
@@ -62,100 +50,54 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
         }
     };
 
-    report.version = Some(manifest.version);
-    if manifest.version != STORE_VERSION {
-        report.errors.push(format!(
-            "manifest version {} is unsupported; expected {}",
-            manifest.version, STORE_VERSION
-        ));
-    }
-
-    report.lanes = manifest.lanes.len();
-    report.files = manifest.files.len();
-    for lane in &manifest.lanes {
+    report.store_present = true;
+    report.version = Some(store.version);
+    report.lanes = store.lanes.len();
+    report.files = store.files.len();
+    for lane in &store.lanes {
         if let Err(error) = ensure_user_lane(lane) {
             report
                 .errors
-                .push(format!("manifest lane {lane:?} is invalid: {error}"));
+                .push(format!("database lane {lane:?} is invalid: {error}"));
         }
     }
-    let expected_last_run = manifest
+    let expected_last_run = store
         .lanes
         .iter()
-        .map(|lane| last_run_file_name(lane))
+        .map(|lane| last_run_file_name(lane.as_str()))
         .collect::<BTreeSet<_>>();
-    let mut referenced_blobs = BTreeSet::new();
+    let referenced_blob_lengths = collect_referenced_blobs(&store);
+    let referenced_blobs = referenced_blob_lengths
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
 
-    for file in &manifest.files {
-        match FilePath::parse(&file.path) {
-            Ok(path) => {
-                if !normalized_paths.insert(path.clone()) {
-                    report.errors.push(format!(
-                        "manifest contains duplicate file path after normalization: {:?}",
-                        path.as_str()
-                    ));
-                }
-            }
-            Err(error) => {
-                report.errors.push(format!(
-                    "manifest file path {:?} is invalid: {error}",
-                    file.path
-                ));
-            }
-        }
-        if let StoredBase::Present { fingerprint } = &file.base
-            && parse_fingerprint(fingerprint).is_err()
-        {
-            report.errors.push(format!(
-                "file {} has invalid base fingerprint {}",
-                file.path, fingerprint
-            ));
-        }
-        for lane_entry in &file.lanes {
-            if !manifest.lanes.contains(&lane_entry.lane) {
+    for (path, file) in &store.files {
+        for (lane, entry) in &file.lanes {
+            if !store.lanes.contains(lane) {
                 report.errors.push(format!(
                     "file {} references missing lane {}",
-                    file.path, lane_entry.lane
+                    path.as_str(),
+                    lane.as_str()
                 ));
             }
-            if let StoredLaneEntryState::Present { ops } = &lane_entry.entry {
+            if let StoredLaneEntry::Present(ops) = entry {
                 report.ops += ops.len();
                 for op in ops {
                     report.blobs_referenced += 1;
                     if let Err(error) = validate_blob_reference(&op.inserted_blob) {
                         report.errors.push(format!(
                             "file {} op {} has invalid blob reference {}: {error}",
-                            file.path, op.id, op.inserted_blob
+                            path.as_str(),
+                            op.id,
+                            op.inserted_blob
                         ));
-                        continue;
-                    }
-                    referenced_blobs.insert(op.inserted_blob.clone());
-                    match read_blob(storage_root, &op.inserted_blob) {
-                        Ok(bytes) => {
-                            if bytes.len() as u64 != op.inserted_len {
-                                report.errors.push(format!(
-                                    "blob {} length is {}; expected {}",
-                                    op.inserted_blob,
-                                    bytes.len(),
-                                    op.inserted_len
-                                ));
-                            }
-                            let actual = sha256_hex(&bytes);
-                            if format!("sha256/{actual}") != op.inserted_blob {
-                                report.errors.push(format!(
-                                    "blob {} content hash is sha256/{actual}",
-                                    op.inserted_blob
-                                ));
-                            }
-                        }
-                        Err(error) => report
-                            .errors
-                            .push(format!("blob {} is unreadable: {error}", op.inserted_blob)),
                     }
                 }
             }
         }
     }
+    validate_referenced_blobs(storage_root, &referenced_blob_lengths, &mut report);
 
     let last_run_dir = storage_root.join("last_run");
     report.last_run_files = count_json_files(&last_run_dir)?;
@@ -174,7 +116,7 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
             }
             if !expected_last_run.contains(file_name) {
                 report.warnings.push(format!(
-                    "last_run file {} does not belong to a manifest lane",
+                    "last_run file {} does not belong to a database lane",
                     path.display()
                 ));
                 continue;
@@ -200,6 +142,57 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
     })
 }
 
+fn collect_referenced_blobs(store: &db::StoredRepo) -> BTreeMap<String, BTreeSet<u64>> {
+    let mut referenced: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+    for file in store.files.values() {
+        for entry in file.lanes.values() {
+            let StoredLaneEntry::Present(ops) = entry else {
+                continue;
+            };
+            for op in ops {
+                referenced
+                    .entry(op.inserted_blob.clone())
+                    .or_default()
+                    .insert(op.inserted_len);
+            }
+        }
+    }
+    referenced
+}
+
+fn validate_referenced_blobs(
+    storage_root: &Path,
+    referenced_blobs: &BTreeMap<String, BTreeSet<u64>>,
+    report: &mut StorageDoctorReport,
+) {
+    for (reference, expected_lengths) in referenced_blobs {
+        if validate_blob_reference(reference).is_err() {
+            continue;
+        }
+        match read_blob(storage_root, reference) {
+            Ok(bytes) => {
+                for expected_len in expected_lengths {
+                    if bytes.len() as u64 != *expected_len {
+                        report.errors.push(format!(
+                            "blob {reference} length is {}; expected {expected_len}",
+                            bytes.len()
+                        ));
+                    }
+                }
+                let actual = sha256_hex(&bytes);
+                if format!("sha256/{actual}") != *reference {
+                    report
+                        .errors
+                        .push(format!("blob {reference} content hash is sha256/{actual}"));
+                }
+            }
+            Err(error) => report
+                .errors
+                .push(format!("blob {reference} is unreadable: {error}")),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct StorageDoctorInspection {
     pub(super) report: StorageDoctorReport,
@@ -209,7 +202,7 @@ pub(super) struct StorageDoctorInspection {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct StorageDoctorReport {
-    pub(crate) manifest_present: bool,
+    pub(crate) store_present: bool,
     pub(crate) version: Option<u32>,
     pub(crate) lanes: usize,
     pub(crate) files: usize,

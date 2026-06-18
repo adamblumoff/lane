@@ -262,8 +262,8 @@ fn file_path_parse_normalizes_repo_labels() {
 #[test]
 fn file_path_parse_rejects_reserved_root_metadata() {
     for path in [
-        ".lane/repo.json",
-        ".LANE/repo.json",
+        ".lane/lane.sqlite",
+        ".LANE/lane.sqlite",
         ".git/config",
         r".GIT\config",
     ] {
@@ -294,7 +294,7 @@ fn file_path_parse_rejects_paths_outside_repo() {
 fn core_file_apis_reject_reserved_paths() {
     let mut repo = repo_with_lanes();
     let error = repo
-        .replace_path(".LANE/repo.json", AGENT_A, None, Some(b"bad".to_vec()))
+        .replace_path(".LANE/lane.sqlite", AGENT_A, None, Some(b"bad".to_vec()))
         .unwrap_err();
 
     assert!(matches!(error, LaneError::InvalidPath(_)));

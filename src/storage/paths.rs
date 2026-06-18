@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
-const MANIFEST_FILE: &str = "repo.json";
+const DB_FILE: &str = "lane.sqlite";
 pub(super) const REPO_LOCK_FILE: &str = "repo.lock";
 
-pub(super) fn manifest_path(storage_root: &Path) -> PathBuf {
-    storage_root.join(MANIFEST_FILE)
+pub(super) fn db_path(storage_root: &Path) -> PathBuf {
+    storage_root.join(DB_FILE)
 }
 
 pub(super) fn last_run_path(storage_root: &Path, lane: &str) -> PathBuf {

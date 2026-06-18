@@ -42,7 +42,7 @@ fn cli_run_runs_command_in_virtual_mount_and_accepts_output() {
         b"export const mode = 'base';\n"
     );
     assert!(!repo.path().join("src/created.ts").exists());
-    assert!(repo.path().join(".lane/repo.json").exists());
+    assert!(repo.path().join(".lane/lane.sqlite").exists());
     assert!(repo.path().join(".lane/last_run/agent-a.json").exists());
     assert!(
         fs::read_dir(repo.path().join(".lane/blobs/sha256"))
