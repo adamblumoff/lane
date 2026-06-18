@@ -406,7 +406,7 @@ pub enum DecodeError {
     OperationOutOfBounds,
     #[error("stored overlay references missing lane {0:?}")]
     OverlayLaneMissing(LaneId),
-    #[error("stored manifest contains reserved lane name {0:?}")]
+    #[error("stored lane database contains reserved lane name {0:?}")]
     ReservedLane(String),
 }
 

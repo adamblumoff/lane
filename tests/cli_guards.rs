@@ -52,7 +52,7 @@ fn cli_rejects_reserved_lane_names_at_entry_points() {
     ]);
     assert_command_fails_with(&whitespace, "invalid lane name");
 
-    assert!(!repo.path().join(".lane/repo.json").exists());
+    assert!(!repo.path().join(".lane/lane.sqlite").exists());
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
                 "review".to_owned(),
                 "agent-a".to_owned(),
                 "--diff".to_owned(),
-                ".lane/repo.json".to_owned(),
+                ".lane/lane.sqlite".to_owned(),
             ],
             "cannot project lane state files",
         ),
@@ -100,7 +100,7 @@ fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
             vec![
                 "review".to_owned(),
                 "agent-a".to_owned(),
-                ".lane/repo.json".to_owned(),
+                ".lane/lane.sqlite".to_owned(),
                 "agent-a:1".to_owned(),
             ],
             "cannot project lane state files",
@@ -109,7 +109,7 @@ fn cli_path_commands_reject_repo_state_absolute_and_parent_paths() {
             vec![
                 "accept".to_owned(),
                 "agent-a".to_owned(),
-                ".lane/repo.json".to_owned(),
+                ".lane/lane.sqlite".to_owned(),
                 "agent-a:1".to_owned(),
                 "--with-file".to_owned(),
                 replacement.display().to_string(),

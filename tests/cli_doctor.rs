@@ -60,7 +60,7 @@ fn cli_doctor_warns_for_orphan_last_run_without_failing() {
             .any(|warning| warning
                 .as_str()
                 .unwrap()
-                .contains("does not belong to a manifest lane"))
+                .contains("does not belong to a database lane"))
     );
 }
 
@@ -87,12 +87,12 @@ fn cli_cleanup_removes_unreferenced_blobs_and_doctor_drops_to_zero() {
 }
 
 #[test]
-fn cli_cleanup_rejects_corrupt_manifest_without_deleting_blobs() {
+fn cli_cleanup_rejects_corrupt_store_without_deleting_blobs() {
     let repo = repo_with_agent_run();
     let stale_blob =
         ".lane/blobs/sha256/0000000000000000000000000000000000000000000000000000000000000000";
     repo.write(stale_blob, b"stale");
-    fs::write(repo.path().join(".lane/repo.json"), b"not json").unwrap();
+    fs::write(repo.path().join(".lane/lane.sqlite"), b"not sqlite").unwrap();
 
     let output = repo.run_unchecked(&["doctor", "--cleanup"]);
 

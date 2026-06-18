@@ -40,8 +40,10 @@ storage, VFS, and orchestration changes must preserve.
 - `storage_snapshot` followed by `from_storage_snapshot` preserves valid repo
   behavior.
 - Invalid snapshots are rejected before they affect the loaded repo.
-- Every overlay entry references a lane present in the manifest lane set.
-- Reserved manifest lane names are rejected.
+- Repo metadata is stored in `.lane/lane.sqlite`; inserted bytes live in
+  `.lane/blobs/sha256/*` and are addressed from the database.
+- Every overlay entry references a lane present in the database lane set.
+- Reserved stored lane names are rejected.
 - Inserted blobs are content-addressed by SHA-256 and may be shared by many ops.
 - Last-run records are advisory evidence. Corrupt last-run files do not make a
   valid repo unloadable, but `doctor` reports them.

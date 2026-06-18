@@ -11,10 +11,10 @@ pub(crate) fn cleanup_storage(storage_root: &Path) -> io::Result<StorageCleanupR
     let _lock = acquire_repo_lock(storage_root)?;
     let inspection = inspect_storage(storage_root)?;
     let report = &inspection.report;
-    if !report.manifest_present {
+    if !report.store_present {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "cannot clean lane storage without repo.json",
+            "cannot clean lane storage without lane.sqlite",
         ));
     }
     if !report.is_healthy() {

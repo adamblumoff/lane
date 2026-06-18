@@ -21,3 +21,9 @@ Automatic tests should copy flows of manual verification that are important enou
 When a change may affect Lane's core behavior, storage contract, VFS/path safety, review semantics, or orchestration flow, read and update `docs/invariants.md` alongside the code.
 
 Don't roll your own UI if you don't have to, use some other premade popular package that fits the spec.
+
+
+I don't care that this product is Windows only, it's still early and i need it to work on my machine for dogfooding, so please stop bringing this up it's not relevant to anything and we will make it multi-os in the future.
+
+
+Make all PRs ready to review as soon as you publish, no drafts.
