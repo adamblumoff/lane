@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::thread::{self, JoinHandle};
 
 use serde::{Deserialize, Serialize};
 
-use crate::storage::{acquire_repo_lock, encode_path_component, persist_bytes, persist_repo};
+use crate::storage::{
+    acquire_repo_lock, delete_run_record, load_run_record, load_run_records, persist_repo,
+    persist_run_record, run_record_exists,
+};
 use crate::{FilePath, LaneId, LaneTextPreview};
 
 use super::error::{CliError, CliResult};
@@ -135,8 +137,8 @@ pub(super) fn review_history(repo_root: &Path) -> CliResult<()> {
     Ok(())
 }
 
-pub(super) fn run_exists(repo_root: &Path, run_name: &str) -> bool {
-    run_path(repo_root, run_name).is_file()
+pub(super) fn run_exists(repo_root: &Path, run_name: &str) -> CliResult<bool> {
+    Ok(run_record_exists(&storage_path(repo_root), run_name)?)
 }
 
 fn join_attempt_jobs(
@@ -216,13 +218,10 @@ pub(super) fn discard(repo_root: &Path, run_name: &str) -> CliResult<()> {
         });
     }
     locked.persist()?;
-
-    let path = run_path(repo_root, &run.name);
-    fs::remove_file(&path).map_err(|error| {
+    delete_run_record(&locked.storage_path, &run.name).map_err(|error| {
         CliError::message(format!(
-            "discarded attempt lanes for run {:?}, but could not remove {}: {error}",
-            run.name,
-            path.display()
+            "discarded attempt lanes for run {:?}, but could not delete run record: {error}",
+            run.name
         ))
     })?;
 
@@ -278,13 +277,11 @@ fn attempt_lanes(name: &str, attempts: usize) -> CliResult<Vec<LaneId>> {
 }
 
 fn reserve_attempt_lanes(repo_root: &Path, name: &str, lanes: &[LaneId]) -> CliResult<()> {
-    let run_path = run_path(repo_root, name);
-    if run_path.exists() {
-        return Err(CliError::message(format!("run {name:?} already exists")));
-    }
-
     let storage_path = storage_path(repo_root);
     let _lock = acquire_repo_lock(&storage_path)?;
+    if run_record_exists(&storage_path, name)? {
+        return Err(CliError::message(format!("run {name:?} already exists")));
+    }
     let mut repo = load_lane_repo(&storage_path)?;
     if repo.lane_ids().any(|lane| lane == name) {
         return Err(CliError::message(format!(
@@ -414,50 +411,30 @@ fn run_check_command(
     }
 }
 
-fn run_path(repo_root: &Path, name: &str) -> PathBuf {
-    runs_dir(repo_root).join(format!("{}.json", encode_path_component(name)))
-}
-
-fn runs_dir(repo_root: &Path) -> PathBuf {
-    storage_path(repo_root).join("runs")
-}
-
 fn load_run(repo_root: &Path, name: &str) -> CliResult<RunRecord> {
-    let path = run_path(repo_root, name);
-    let bytes = fs::read(&path).map_err(|error| {
-        CliError::message(format!(
-            "run {name:?} is not readable at {}: {error}",
-            path.display()
-        ))
+    load_run_from_storage(&storage_path(repo_root), name)
+}
+
+fn load_run_from_storage(storage_path: &Path, name: &str) -> CliResult<RunRecord> {
+    let Some(record_json) = load_run_record(storage_path, name)? else {
+        return Err(CliError::message(format!("run {name:?} does not exist")));
+    };
+    parse_run_record(name, &record_json)
+}
+
+fn parse_run_record(name: &str, record_json: &str) -> CliResult<RunRecord> {
+    let run = serde_json::from_str::<RunRecord>(record_json).map_err(|error| {
+        CliError::message(format!("run record {name:?} is not valid JSON: {error}"))
     })?;
-    let run = serde_json::from_slice::<RunRecord>(&bytes)?;
     validate_run_version(name, &run)?;
     Ok(run)
 }
 
 fn load_runs(repo_root: &Path) -> CliResult<Vec<RunRecord>> {
-    let entries = match fs::read_dir(runs_dir(repo_root)) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(CliError::from(error)),
-    };
-    let mut runs = Vec::new();
-
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-            continue;
-        }
-        let bytes = fs::read(&path)?;
-        let run = serde_json::from_slice::<RunRecord>(&bytes).map_err(|error| {
-            CliError::message(format!(
-                "run file {} is not valid JSON: {error}",
-                path.display()
-            ))
-        })?;
-        validate_run_version(&run.name, &run)?;
-        runs.push(run);
-    }
+    let mut runs = load_run_records(&storage_path(repo_root))?
+        .into_iter()
+        .map(|(name, record_json)| parse_run_record(&name, &record_json))
+        .collect::<CliResult<Vec<_>>>()?;
 
     runs.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(runs)
@@ -474,21 +451,23 @@ fn validate_run_version(name: &str, run: &RunRecord) -> CliResult<()> {
 }
 
 fn persist_run(repo_root: &Path, run: &RunRecord) -> CliResult<()> {
-    let path = run_path(repo_root, &run.name);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let bytes = serde_json::to_vec_pretty(run)?;
-    persist_bytes(&path, &bytes)?;
+    let storage_path = storage_path(repo_root);
+    let _lock = acquire_repo_lock(&storage_path)?;
+    persist_run_without_lock(&storage_path, run)
+}
+
+fn persist_run_without_lock(storage_path: &Path, run: &RunRecord) -> CliResult<()> {
+    let record_json = serde_json::to_string(run)?;
+    persist_run_record(storage_path, &run.name, &record_json)?;
     Ok(())
 }
 
 fn append_check(repo_root: &Path, run_name: &str, check: CheckRecord) -> CliResult<RunRecord> {
     let storage_path = storage_path(repo_root);
     let _lock = acquire_repo_lock(&storage_path)?;
-    let mut run = load_run(repo_root, run_name)?;
+    let mut run = load_run_from_storage(&storage_path, run_name)?;
     run.checks.push(check);
-    persist_run(repo_root, &run)?;
+    persist_run_without_lock(&storage_path, &run)?;
     Ok(run)
 }
 

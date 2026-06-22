@@ -7,7 +7,7 @@ use common::*;
 #[test]
 fn cli_review_ignores_corrupt_last_run_but_doctor_reports_it() {
     let repo = repo_with_agent_run();
-    fs::write(repo.path().join(".lane/last_run/agent-a.json"), b"not json").unwrap();
+    corrupt_last_run_row(&repo, "agent-a");
 
     let review = repo.run_json(["review", "agent-a"]);
     assert_eq!(review["lanes"][0]["last_run"], Value::Null);
@@ -22,27 +22,27 @@ fn cli_review_ignores_corrupt_last_run_but_doctor_reports_it() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|error| error.as_str().unwrap().contains("last_run file"))
+            .any(|error| error.as_str().unwrap().contains("last_run row"))
     );
 }
 
 #[test]
-fn cli_discard_prunes_last_run_metadata_for_removed_lane() {
+fn cli_discard_prunes_last_run_row_for_removed_lane() {
     let repo = repo_with_agent_run();
-    assert!(repo.path().join(".lane/last_run/agent-a.json").exists());
+    assert_eq!(lane_table_count(&repo, "last_runs"), 1);
 
     let discarded = repo.run_json(["discard", "agent-a"]);
     assert_eq!(discarded["removed"], true);
-    assert!(!repo.path().join(".lane/last_run/agent-a.json").exists());
+    assert_eq!(lane_table_count(&repo, "last_runs"), 0);
 
     let doctor = repo.run_json(["doctor"]);
     assert_eq!(doctor["healthy"], true);
-    assert_eq!(doctor["report"]["last_run_files"], 0);
+    assert_eq!(doctor["report"]["last_run_rows"], 0);
     assert!(doctor["report"]["errors"].as_array().unwrap().is_empty());
 }
 
 #[test]
-fn cli_doctor_warns_for_orphan_last_run_without_failing() {
+fn cli_doctor_ignores_obsolete_last_run_files() {
     let repo = repo_with_agent_run();
     repo.run_json(["discard", "agent-a"]);
     fs::create_dir_all(repo.path().join(".lane/last_run")).unwrap();
@@ -50,17 +50,14 @@ fn cli_doctor_warns_for_orphan_last_run_without_failing() {
 
     let doctor = repo.run_json(["doctor"]);
     assert_eq!(doctor["healthy"], true);
-    assert_eq!(doctor["report"]["last_run_files"], 1);
+    assert_eq!(doctor["report"]["last_run_rows"], 0);
     assert!(doctor["report"]["errors"].as_array().unwrap().is_empty());
     assert!(
-        doctor["report"]["warnings"]
+        !doctor["report"]["warnings"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|warning| warning
-                .as_str()
-                .unwrap()
-                .contains("does not belong to a database lane"))
+            .any(|warning| warning.as_str().unwrap().contains("last_run"))
     );
 }
 

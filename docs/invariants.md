@@ -45,8 +45,8 @@ storage, VFS, and orchestration changes must preserve.
 - Every overlay entry references a lane present in the database lane set.
 - Reserved stored lane names are rejected.
 - Inserted blobs are content-addressed by SHA-256 and may be shared by many ops.
-- Last-run records are advisory evidence. Corrupt last-run files do not make a
-  valid repo unloadable, but `doctor` reports them.
+- Last-run records and run records are SQLite JSON evidence rows. Corrupt
+  last-run rows do not make a valid repo unloadable, but `doctor` reports them.
 - Cleanup never removes referenced blobs and refuses to clean unhealthy storage.
 
 ## Paths And VFS

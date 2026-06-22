@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -12,7 +11,7 @@ use super::blobs::{
     validate_blob_reference,
 };
 use super::db::{self, StoredLaneEntry};
-use super::paths::{db_path, last_run_file_name};
+use super::paths::db_path;
 use super::serde_util::json_error;
 
 pub(crate) fn doctor_storage(storage_root: &Path) -> io::Result<StorageDoctorReport> {
@@ -28,7 +27,6 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
             let blob_inventory = blob_inventory(storage_root)?;
             let referenced_blobs = BTreeSet::new();
             record_blob_inventory(&blob_inventory, &referenced_blobs, &mut report);
-            report.last_run_files = count_json_files(&storage_root.join("last_run"))?;
             return Ok(StorageDoctorInspection {
                 report,
                 referenced_blobs,
@@ -41,7 +39,6 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
             let blob_inventory = blob_inventory(storage_root)?;
             let referenced_blobs = BTreeSet::new();
             record_blob_inventory(&blob_inventory, &referenced_blobs, &mut report);
-            report.last_run_files = count_json_files(&storage_root.join("last_run"))?;
             return Ok(StorageDoctorInspection {
                 report,
                 referenced_blobs,
@@ -61,11 +58,6 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
                 .push(format!("database lane {lane:?} is invalid: {error}"));
         }
     }
-    let expected_last_run = store
-        .lanes
-        .iter()
-        .map(|lane| last_run_file_name(lane.as_str()))
-        .collect::<BTreeSet<_>>();
     let referenced_blob_lengths = collect_referenced_blobs(&store);
     let referenced_blobs = referenced_blob_lengths
         .keys()
@@ -98,40 +90,7 @@ pub(super) fn inspect_storage(storage_root: &Path) -> io::Result<StorageDoctorIn
         }
     }
     validate_referenced_blobs(storage_root, &referenced_blob_lengths, &mut report);
-
-    let last_run_dir = storage_root.join("last_run");
-    report.last_run_files = count_json_files(&last_run_dir)?;
-    if last_run_dir.exists() {
-        for entry in fs::read_dir(&last_run_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !file_name.ends_with(".json") {
-                continue;
-            }
-            if !expected_last_run.contains(file_name) {
-                report.warnings.push(format!(
-                    "last_run file {} does not belong to a database lane",
-                    path.display()
-                ));
-                continue;
-            }
-            match fs::read(&path).and_then(|bytes| {
-                serde_json::from_slice::<LaneRunState>(&bytes).map_err(json_error)
-            }) {
-                Ok(_) => {}
-                Err(error) => report.errors.push(format!(
-                    "last_run file {} is invalid: {error}",
-                    path.display()
-                )),
-            }
-        }
-    }
+    validate_evidence(storage_root, &store.lanes, &mut report);
 
     let blob_inventory = blob_inventory(storage_root)?;
     record_blob_inventory(&blob_inventory, &referenced_blobs, &mut report);
@@ -193,6 +152,46 @@ fn validate_referenced_blobs(
     }
 }
 
+fn validate_evidence(
+    storage_root: &Path,
+    lanes: &BTreeSet<crate::LaneId>,
+    report: &mut StorageDoctorReport,
+) {
+    match db::load_evidence(storage_root) {
+        Ok(evidence) => {
+            report.last_run_rows = evidence.last_runs.len();
+            report.run_records = evidence.run_records.len();
+            for (lane, state_json) in evidence.last_runs {
+                if !lanes.contains(&lane) {
+                    report.errors.push(format!(
+                        "last_run row for lane {} does not belong to a database lane",
+                        lane.as_str()
+                    ));
+                    continue;
+                }
+                if let Err(error) = serde_json::from_str::<LaneRunState>(&state_json) {
+                    report.errors.push(format!(
+                        "last_run row for lane {} is invalid: {}",
+                        lane.as_str(),
+                        json_error(error)
+                    ));
+                }
+            }
+            for (name, record_json) in evidence.run_records {
+                if let Err(error) = serde_json::from_str::<serde_json::Value>(&record_json) {
+                    report.errors.push(format!(
+                        "run record row {name:?} is invalid: {}",
+                        json_error(error)
+                    ));
+                }
+            }
+        }
+        Err(error) => report
+            .errors
+            .push(format!("evidence rows are unreadable: {error}")),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct StorageDoctorInspection {
     pub(super) report: StorageDoctorReport,
@@ -210,7 +209,8 @@ pub(crate) struct StorageDoctorReport {
     pub(crate) blobs_referenced: usize,
     pub(crate) blobs_present: usize,
     pub(crate) blobs_unreferenced: usize,
-    pub(crate) last_run_files: usize,
+    pub(crate) last_run_rows: usize,
+    pub(crate) run_records: usize,
     pub(crate) warnings: Vec<String>,
     pub(crate) errors: Vec<String>,
 }
@@ -219,19 +219,4 @@ impl StorageDoctorReport {
     pub(crate) fn is_healthy(&self) -> bool {
         self.errors.is_empty()
     }
-}
-
-fn count_json_files(dir: &Path) -> io::Result<usize> {
-    if !dir.exists() {
-        return Ok(0);
-    }
-    let mut count = 0;
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "json") {
-            count += 1;
-        }
-    }
-    Ok(count)
 }

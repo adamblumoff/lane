@@ -7,14 +7,6 @@ pub(super) fn db_path(storage_root: &Path) -> PathBuf {
     storage_root.join(DB_FILE)
 }
 
-pub(super) fn last_run_path(storage_root: &Path, lane: &str) -> PathBuf {
-    storage_root.join("last_run").join(last_run_file_name(lane))
-}
-
-pub(super) fn last_run_file_name(lane: &str) -> String {
-    format!("{}.json", encode_path_component(lane))
-}
-
 pub(crate) fn encode_path_component(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {

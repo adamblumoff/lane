@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use rusqlite::ffi::ErrorCode;
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::{
     BaseFingerprint, BaseStorageSnapshot, FileOpStorageSnapshot, FilePath,
@@ -15,7 +15,7 @@ use super::atomic::{replace_file_with_retry, temp_path_for};
 use super::blobs::{hex, persist_blob, read_blob, sha256_hex};
 use super::serde_util::invalid_storage;
 
-pub(super) const STORE_VERSION: u32 = 3;
+pub(super) const STORE_VERSION: u32 = 4;
 
 const BASE_PRESENT: &str = "present";
 const BASE_MISSING: &str = "missing";
@@ -34,12 +34,13 @@ pub(super) fn persist_db_snapshot(
     snapshot: &LaneRepoStorageSnapshot,
 ) -> io::Result<()> {
     fs::create_dir_all(storage_root)?;
+    let evidence = read_evidence_for_rewrite(storage_root, &snapshot.lanes)?;
     let db_path = super::paths::db_path(storage_root);
     let temp_path = temp_path_for(&db_path)?;
     remove_sqlite_temp_files(&temp_path)?;
 
     let result = (|| {
-        write_snapshot_database(storage_root, &temp_path, snapshot)?;
+        write_snapshot_database(storage_root, &temp_path, snapshot, &evidence)?;
         replace_file_with_retry(&temp_path, &db_path).map_err(|error| {
             io::Error::new(
                 error.kind(),
@@ -55,10 +56,115 @@ pub(super) fn persist_db_snapshot(
     Ok(())
 }
 
+pub(super) fn persist_last_run_json(
+    storage_root: &Path,
+    lane: &str,
+    state_json: &str,
+) -> io::Result<()> {
+    let connection = open_existing_store_read_write(storage_root)?;
+    connection
+        .execute(
+            "
+            INSERT INTO last_runs (lane, state_json)
+            VALUES (?1, ?2)
+            ON CONFLICT(lane) DO UPDATE SET state_json = excluded.state_json
+            ",
+            params![lane, state_json],
+        )
+        .map_err(sqlite_error)?;
+    connection.close().map_err(|(_, error)| sqlite_error(error))
+}
+
+pub(super) fn load_last_run_jsons(
+    storage_root: &Path,
+    lanes: &BTreeSet<LaneId>,
+) -> io::Result<BTreeMap<LaneId, String>> {
+    if !super::paths::db_path(storage_root).exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let connection = open_existing_store_read_only(storage_root)?;
+    let mut rows = read_last_run_rows(&connection)?;
+    rows.retain(|lane, _| lanes.contains(lane));
+    connection
+        .close()
+        .map_err(|(_, error)| sqlite_error(error))?;
+    Ok(rows)
+}
+
+pub(super) fn persist_run_record_json(
+    storage_root: &Path,
+    name: &str,
+    record_json: &str,
+) -> io::Result<()> {
+    let connection = open_existing_store_read_write(storage_root)?;
+    connection
+        .execute(
+            "
+            INSERT INTO run_records (name, record_json)
+            VALUES (?1, ?2)
+            ON CONFLICT(name) DO UPDATE SET record_json = excluded.record_json
+            ",
+            params![name, record_json],
+        )
+        .map_err(sqlite_error)?;
+    connection.close().map_err(|(_, error)| sqlite_error(error))
+}
+
+pub(super) fn load_run_record_json(storage_root: &Path, name: &str) -> io::Result<Option<String>> {
+    if !super::paths::db_path(storage_root).exists() {
+        return Ok(None);
+    }
+
+    let connection = open_existing_store_read_only(storage_root)?;
+    let record = connection
+        .query_row(
+            "SELECT record_json FROM run_records WHERE name = ?1",
+            [name],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sqlite_error)?;
+    connection
+        .close()
+        .map_err(|(_, error)| sqlite_error(error))?;
+    Ok(record)
+}
+
+pub(super) fn load_run_record_jsons(storage_root: &Path) -> io::Result<BTreeMap<String, String>> {
+    if !super::paths::db_path(storage_root).exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let connection = open_existing_store_read_only(storage_root)?;
+    let rows = read_run_record_rows(&connection)?;
+    connection
+        .close()
+        .map_err(|(_, error)| sqlite_error(error))?;
+    Ok(rows)
+}
+
+pub(super) fn delete_run_record(storage_root: &Path, name: &str) -> io::Result<bool> {
+    let connection = open_existing_store_read_write(storage_root)?;
+    let removed = connection
+        .execute("DELETE FROM run_records WHERE name = ?1", [name])
+        .map_err(sqlite_error)?
+        > 0;
+    connection
+        .close()
+        .map_err(|(_, error)| sqlite_error(error))?;
+    Ok(removed)
+}
+
+pub(super) fn run_record_exists(storage_root: &Path, name: &str) -> io::Result<bool> {
+    load_run_record_json(storage_root, name).map(|record| record.is_some())
+}
+
 fn write_snapshot_database(
     storage_root: &Path,
     db_path: &Path,
     snapshot: &LaneRepoStorageSnapshot,
+    evidence: &StoredEvidence,
 ) -> io::Result<()> {
     let mut connection = Connection::open(db_path).map_err(sqlite_error)?;
     initialize_schema(&connection)?;
@@ -148,6 +254,28 @@ fn write_snapshot_database(
         }
     }
 
+    {
+        let mut insert_last_run = transaction
+            .prepare("INSERT INTO last_runs (lane, state_json) VALUES (?1, ?2)")
+            .map_err(sqlite_error)?;
+        for (lane, state_json) in &evidence.last_runs {
+            insert_last_run
+                .execute(params![lane.as_str(), state_json])
+                .map_err(sqlite_error)?;
+        }
+    }
+
+    {
+        let mut insert_run_record = transaction
+            .prepare("INSERT INTO run_records (name, record_json) VALUES (?1, ?2)")
+            .map_err(sqlite_error)?;
+        for (name, record_json) in &evidence.run_records {
+            insert_run_record
+                .execute(params![name, record_json])
+                .map_err(sqlite_error)?;
+        }
+    }
+
     transaction.commit().map_err(sqlite_error)?;
     connection.close().map_err(|(_, error)| sqlite_error(error))
 }
@@ -204,6 +332,98 @@ pub(super) fn load_stored_repo(storage_root: &Path) -> io::Result<Option<StoredR
     }))
 }
 
+pub(super) fn load_evidence(storage_root: &Path) -> io::Result<StoredEvidence> {
+    if !super::paths::db_path(storage_root).exists() {
+        return Ok(StoredEvidence::default());
+    }
+
+    let connection = open_existing_store_read_only(storage_root)?;
+    let evidence = StoredEvidence {
+        last_runs: read_last_run_rows(&connection)?,
+        run_records: read_run_record_rows(&connection)?,
+    };
+    connection
+        .close()
+        .map_err(|(_, error)| sqlite_error(error))?;
+    Ok(evidence)
+}
+
+fn read_evidence_for_rewrite(
+    storage_root: &Path,
+    lanes: &BTreeSet<LaneId>,
+) -> io::Result<StoredEvidence> {
+    let mut evidence = load_evidence(storage_root)?;
+    evidence.last_runs.retain(|lane, _| lanes.contains(lane));
+    Ok(evidence)
+}
+
+fn open_existing_store_read_only(storage_root: &Path) -> io::Result<Connection> {
+    let db_path = super::paths::db_path(storage_root);
+    let connection = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(sqlite_error)?;
+    prepare_existing_store_connection(&connection, &db_path)?;
+    Ok(connection)
+}
+
+fn open_existing_store_read_write(storage_root: &Path) -> io::Result<Connection> {
+    let db_path = super::paths::db_path(storage_root);
+    let connection = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(sqlite_error)?;
+    prepare_existing_store_connection(&connection, &db_path)?;
+    Ok(connection)
+}
+
+fn prepare_existing_store_connection(connection: &Connection, db_path: &Path) -> io::Result<()> {
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(sqlite_error)?;
+    let version = read_store_version(connection, db_path)?;
+    if version != STORE_VERSION {
+        return Err(invalid_storage(
+            db_path,
+            format!("unsupported lane storage version {version}; expected {STORE_VERSION}"),
+        ));
+    }
+    Ok(())
+}
+
+fn read_last_run_rows(connection: &Connection) -> io::Result<BTreeMap<LaneId, String>> {
+    let mut last_runs = BTreeMap::new();
+    let mut statement = connection
+        .prepare("SELECT lane, state_json FROM last_runs ORDER BY lane")
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(sqlite_error)?;
+
+    for row in rows {
+        let (raw_lane, state_json) = row.map_err(sqlite_error)?;
+        let lane = LaneId::parse(&raw_lane).map_err(invalid_lane)?;
+        last_runs.insert(lane, state_json);
+    }
+    Ok(last_runs)
+}
+
+fn read_run_record_rows(connection: &Connection) -> io::Result<BTreeMap<String, String>> {
+    let mut records = BTreeMap::new();
+    let mut statement = connection
+        .prepare("SELECT name, record_json FROM run_records ORDER BY name")
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(sqlite_error)?;
+
+    for row in rows {
+        let (name, record_json) = row.map_err(sqlite_error)?;
+        records.insert(name, record_json);
+    }
+    Ok(records)
+}
+
 fn initialize_schema(connection: &Connection) -> io::Result<()> {
     connection
         .execute_batch(
@@ -246,6 +466,17 @@ fn initialize_schema(connection: &Connection) -> io::Result<()> {
                 inserted_len TEXT NOT NULL,
                 PRIMARY KEY (path, lane, ordinal),
                 FOREIGN KEY (path, lane) REFERENCES lane_entries(path, lane) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS last_runs (
+                lane TEXT PRIMARY KEY NOT NULL,
+                state_json TEXT NOT NULL,
+                FOREIGN KEY (lane) REFERENCES lanes(name) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS run_records (
+                name TEXT PRIMARY KEY NOT NULL,
+                record_json TEXT NOT NULL
             );
             ",
         )
@@ -666,6 +897,12 @@ pub(super) struct StoredRepo {
     pub(super) version: u32,
     pub(super) lanes: BTreeSet<LaneId>,
     pub(super) files: BTreeMap<FilePath, StoredFile>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct StoredEvidence {
+    pub(super) last_runs: BTreeMap<LaneId, String>,
+    pub(super) run_records: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug)]

@@ -43,7 +43,8 @@ fn cli_run_runs_command_in_virtual_mount_and_accepts_output() {
     );
     assert!(!repo.path().join("src/created.ts").exists());
     assert!(repo.path().join(".lane/lane.sqlite").exists());
-    assert!(repo.path().join(".lane/last_run/agent-a.json").exists());
+    assert_eq!(lane_table_count(&repo, "last_runs"), 1);
+    assert!(!repo.path().join(".lane/last_run").exists());
     assert!(
         fs::read_dir(repo.path().join(".lane/blobs/sha256"))
             .unwrap()

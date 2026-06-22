@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::{
-    acquire_repo_lock, cleanup_storage, doctor_storage, is_lock_contention, load_last_run,
-    load_repo, persist_last_run, persist_repo,
+    acquire_repo_lock, cleanup_storage, delete_run_record, doctor_storage, is_lock_contention,
+    load_last_run, load_repo, load_run_record, load_run_records, persist_last_run, persist_repo,
+    persist_run_record, run_record_exists,
 };
 
 // This recompiles the crate-private storage module inside the integration test.
@@ -24,7 +25,7 @@ mod storage;
 static NEXT_UNIQUE_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 #[test]
-fn storage_v3_persists_database_blobs_and_last_run() {
+fn storage_v4_persists_database_blobs_and_last_run_rows() {
     let temp = TempStorage::new();
     let repo = repo_with_agent_file();
 
@@ -38,7 +39,8 @@ fn storage_v3_persists_database_blobs_and_last_run() {
 
     assert!(temp.path().join("lane.sqlite").exists());
     assert_eq!(doctor_storage(temp.path()).unwrap().blobs_present, 1);
-    assert!(temp.path().join("last_run/agent-a.json").exists());
+    assert_eq!(row_count(temp.path(), "last_runs"), 1);
+    assert!(!temp.path().join("last_run").exists());
 
     let loaded = load_repo(temp.path()).unwrap().unwrap();
     assert_eq!(
@@ -54,7 +56,32 @@ fn storage_v3_persists_database_blobs_and_last_run() {
 }
 
 #[test]
-fn storage_v3_deduplicates_repeated_inserted_blobs() {
+fn storage_v4_persists_run_records_in_database_rows() {
+    let temp = TempStorage::new();
+    let repo = repo_with_agent_file();
+    persist_repo(temp.path(), &repo).unwrap();
+
+    persist_run_record(
+        temp.path(),
+        "agent-run",
+        r#"{"version":1,"name":"agent-run"}"#,
+    )
+    .unwrap();
+
+    assert!(run_record_exists(temp.path(), "agent-run").unwrap());
+    assert_eq!(
+        load_run_record(temp.path(), "agent-run")
+            .unwrap()
+            .as_deref(),
+        Some(r#"{"version":1,"name":"agent-run"}"#)
+    );
+    assert_eq!(load_run_records(temp.path()).unwrap().len(), 1);
+    assert!(delete_run_record(temp.path(), "agent-run").unwrap());
+    assert!(!run_record_exists(temp.path(), "agent-run").unwrap());
+}
+
+#[test]
+fn storage_v4_deduplicates_repeated_inserted_blobs() {
     let temp = TempStorage::new();
     let mut repo = LaneRepo::new();
     repo.create_lane("agent-a").unwrap();
@@ -105,7 +132,12 @@ fn corrupt_last_run_is_advisory_but_doctor_reports_it() {
         &LaneRunState::new(Some(0), None, "ok\n", "", vec![file_path("src/new.ts")]),
     )
     .unwrap();
-    fs::write(temp.path().join("last_run/agent-a.json"), b"not json").unwrap();
+    open_storage_db(temp.path())
+        .execute(
+            "UPDATE last_runs SET state_json = 'not json' WHERE lane = 'agent-a'",
+            [],
+        )
+        .unwrap();
 
     let loaded = load_repo(temp.path()).unwrap().unwrap();
     assert_eq!(
@@ -120,31 +152,36 @@ fn corrupt_last_run_is_advisory_but_doctor_reports_it() {
         report
             .errors
             .iter()
-            .any(|error| error.contains("last_run file"))
+            .any(|error| error.contains("last_run row"))
     );
 }
 
 #[test]
-fn orphan_last_run_is_warning_not_error() {
+fn persist_repo_prunes_last_run_rows_for_removed_lanes() {
     let temp = TempStorage::new();
-    let repo = repo_with_agent_file();
+    let mut repo = repo_with_agent_file();
     persist_repo(temp.path(), &repo).unwrap();
-    fs::create_dir_all(temp.path().join("last_run")).unwrap();
-    fs::write(temp.path().join("last_run/agent-b.json"), b"not json").unwrap();
+    persist_last_run(
+        temp.path(),
+        "agent-a",
+        &LaneRunState::new(Some(0), None, "ok\n", "", vec![file_path("src/new.ts")]),
+    )
+    .unwrap();
 
-    let loaded = load_repo(temp.path()).unwrap().unwrap();
-    assert!(load_last_run(temp.path(), &lane_set(&loaded)).is_empty());
+    repo.discard_lane("agent-a");
+    persist_repo(temp.path(), &repo).unwrap();
 
     let report = doctor_storage(temp.path()).unwrap();
     assert!(report.is_healthy());
-    assert_eq!(report.last_run_files, 1);
+    assert_eq!(report.last_run_rows, 0);
     assert!(report.errors.is_empty());
     assert!(
-        report
+        !report
             .warnings
             .iter()
-            .any(|warning| warning.contains("does not belong to a database lane"))
+            .any(|warning| warning.contains("last_run"))
     );
+    assert_eq!(row_count(temp.path(), "last_runs"), 0);
 }
 
 #[test]
@@ -467,6 +504,14 @@ fn open_storage_db(storage_root: &Path) -> Connection {
         .execute_batch("PRAGMA foreign_keys = OFF;")
         .unwrap();
     connection
+}
+
+fn row_count(storage_root: &Path, table: &str) -> i64 {
+    open_storage_db(storage_root)
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
 }
 
 fn storage_root_contains_lane_database_temp(storage_root: &Path) -> bool {

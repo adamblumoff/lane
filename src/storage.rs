@@ -37,7 +37,7 @@ pub(crate) use lock::{RepoLock, acquire_repo_lock};
 pub(crate) use paths::encode_path_component;
 
 use db::{load_db_snapshot, persist_db_snapshot};
-use paths::{db_path, last_run_file_name, last_run_path};
+use paths::db_path;
 use serde_util::{invalid_storage, json_error};
 
 pub(crate) fn load_repo(storage_root: &Path) -> io::Result<Option<LaneRepo>> {
@@ -56,7 +56,6 @@ pub(crate) fn persist_repo(storage_root: &Path, repo: &LaneRepo) -> io::Result<(
     fs::create_dir_all(storage_root)?;
 
     persist_db_snapshot(storage_root, &snapshot)?;
-    prune_stale_last_run_files(storage_root, &snapshot.lanes);
     Ok(())
 }
 
@@ -65,42 +64,46 @@ pub(crate) fn persist_last_run(
     lane: &str,
     state: &LaneRunState,
 ) -> io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(state).map_err(json_error)?;
-    persist_bytes(&last_run_path(storage_root, lane), &bytes)
+    let state_json = serde_json::to_string(state).map_err(json_error)?;
+    db::persist_last_run_json(storage_root, lane, &state_json)
 }
 
 pub(crate) fn load_last_run(
     storage_root: &Path,
     lanes: &BTreeSet<LaneId>,
 ) -> BTreeMap<LaneId, LaneRunState> {
-    lanes
-        .iter()
-        .filter_map(|lane| {
-            let path = last_run_path(storage_root, lane);
-            let bytes = fs::read(path).ok()?;
-            let state = serde_json::from_slice(&bytes).ok()?;
-            Some((lane.clone(), state))
+    let Ok(rows) = db::load_last_run_jsons(storage_root, lanes) else {
+        return BTreeMap::new();
+    };
+    rows.into_iter()
+        .filter_map(|(lane, state_json)| {
+            serde_json::from_str(&state_json)
+                .ok()
+                .map(|state| (lane, state))
         })
         .collect()
 }
 
-fn prune_stale_last_run_files(storage_root: &Path, lanes: &BTreeSet<LaneId>) {
-    let last_run_dir = storage_root.join("last_run");
-    let expected = lanes
-        .iter()
-        .map(|lane| last_run_file_name(lane))
-        .collect::<BTreeSet<_>>();
+pub(crate) fn persist_run_record(
+    storage_root: &Path,
+    name: &str,
+    record_json: &str,
+) -> io::Result<()> {
+    db::persist_run_record_json(storage_root, name, record_json)
+}
 
-    // last_run is advisory; failed cleanup must not block repo persistence.
-    if let Ok(entries) = fs::read_dir(&last_run_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !expected.contains(file_name) {
-                let _ = fs::remove_file(path);
-            }
-        }
-    }
+pub(crate) fn load_run_record(storage_root: &Path, name: &str) -> io::Result<Option<String>> {
+    db::load_run_record_json(storage_root, name)
+}
+
+pub(crate) fn load_run_records(storage_root: &Path) -> io::Result<BTreeMap<String, String>> {
+    db::load_run_record_jsons(storage_root)
+}
+
+pub(crate) fn delete_run_record(storage_root: &Path, name: &str) -> io::Result<bool> {
+    db::delete_run_record(storage_root, name)
+}
+
+pub(crate) fn run_record_exists(storage_root: &Path, name: &str) -> io::Result<bool> {
+    db::run_record_exists(storage_root, name)
 }

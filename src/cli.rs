@@ -132,7 +132,7 @@ fn run_cli(cli: Cli) -> CliResult<ExitCode> {
                 orchestrate::run_attempts(&repo_root, &name, attempts, observe, &command)
             }
             None => {
-                if orchestrate::run_exists(&repo_root, &name) {
+                if orchestrate::run_exists(&repo_root, &name)? {
                     return Err(CliError::message(format!(
                         "lane name {name:?} overlaps an existing run"
                     )));
@@ -277,7 +277,7 @@ fn resolve_run_or_lane_target(
     command: &str,
     target: &str,
 ) -> CliResult<RunOrLaneTarget> {
-    let is_run = orchestrate::run_exists(repo_root, target);
+    let is_run = orchestrate::run_exists(repo_root, target)?;
     let is_lane = commands::lane_exists(repo_root, target)?;
     match (is_run, is_lane) {
         (true, true) => Err(CliError::message(format!(

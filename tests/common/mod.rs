@@ -165,6 +165,41 @@ pub(crate) fn first_blob_path(repo: &TempRepo) -> PathBuf {
         .path()
 }
 
+pub(crate) fn lane_table_count(repo: &TempRepo, table: &str) -> i64 {
+    let connection = lane_db(repo);
+    connection
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+}
+
+pub(crate) fn lane_run_record_exists(repo: &TempRepo, name: &str) -> bool {
+    let connection = lane_db(repo);
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM run_records WHERE name = ?1",
+            [name],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+        > 0
+}
+
+pub(crate) fn corrupt_last_run_row(repo: &TempRepo, lane: &str) {
+    let connection = lane_db(repo);
+    connection
+        .execute(
+            "UPDATE last_runs SET state_json = 'not json' WHERE lane = ?1",
+            [lane],
+        )
+        .unwrap();
+}
+
+pub(crate) fn lane_db(repo: &TempRepo) -> rusqlite::Connection {
+    rusqlite::Connection::open(repo.path().join(".lane/lane.sqlite")).unwrap()
+}
+
 pub(crate) fn run_lane_command(repo_root: &Path, lane: &str, script: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_lane"))
         .arg("--repo-root")

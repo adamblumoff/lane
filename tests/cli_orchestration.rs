@@ -701,7 +701,8 @@ fn cli_run_check_review_lists_attempt_evidence_without_ranking() {
     ]);
     assert_eq!(attempted["run"]["name"], "login");
     assert_eq!(attempted["run"]["attempts"].as_array().unwrap().len(), 3);
-    assert!(repo.path().join(".lane/runs/login.json").exists());
+    assert!(lane_run_record_exists(&repo, "login"));
+    assert!(!repo.path().join(".lane/runs").exists());
     assert_eq!(
         fs::read(repo.path().join("src/login.tsx")).unwrap(),
         b"export const design = 'base';"
@@ -800,7 +801,7 @@ fn cli_run_check_review_lists_attempt_evidence_without_ranking() {
     let discarded = repo.run_json(["discard", "login"]);
     assert_eq!(discarded["removed_attempt_lanes"], 3);
     assert_eq!(discarded["discarded_changes"], 4);
-    assert!(!repo.path().join(".lane/runs/login.json").exists());
+    assert!(!lane_run_record_exists(&repo, "login"));
     assert!(
         repo.run_json(["review", "--history"])["runs"]
             .as_array()
@@ -861,7 +862,7 @@ fn cli_review_keeps_cleanup_available_when_base_changed() {
     let discarded = repo.run_json(["discard", "stale"]);
     assert_eq!(discarded["removed_attempt_lanes"], 1);
     assert_eq!(discarded["discarded_changes"], 0);
-    assert!(!repo.path().join(".lane/runs/stale.json").exists());
+    assert!(!lane_run_record_exists(&repo, "stale"));
 }
 
 #[test]
